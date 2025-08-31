@@ -84,6 +84,19 @@ def training_loop(
     _emit(hooks, "on_train_start", ctx)
 
     it = iter(dataset)
+    # Optionally wrap with DistributedDataParallel; device_ids bound to current device for CUDA
+    if config_lib.get(config, "ddp", False) and world_size > 1:
+        try:
+            import torch
+            import torch.nn.parallel as parallel
+            ddp_kwargs = {
+                "find_unused_parameters": bool(config_lib.get(config, "find_unused_parameters", False)),
+            }
+            if getattr(device, "type", "cpu") == "cuda":
+                ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
+            model = parallel.DistributedDataParallel(model, **ddp_kwargs)
+        except Exception:
+            pass
     # If user requested DDP semantics, shard the iterable by rank/world_size
     if config_lib.get(config, "ddp", False) and world_size > 1:
         it = iter(shard_iterable(it, rank, world_size))

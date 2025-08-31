@@ -4,7 +4,7 @@ from typing import Any, Iterable, Iterator
 
 import torch
 
-__all__ = ["to_device", "cycle"]
+__all__ = ["to_device", "cycle", "take"]
 
 
 def to_device(batch: Any, device: torch.device) -> Any:
@@ -26,3 +26,20 @@ def cycle(iterable: Iterable[Any]) -> Iterator[Any]:
     while True:
         for x in iterable:
             yield x
+
+
+def take(iterable: Iterable[Any], n: int) -> Iterator[Any]:
+    """Yield at most `n` items from iterable.
+
+    Useful for quick eval loops or sampling a small subset without materializing.
+    """
+    if n <= 0:
+        return
+    it = iter(iterable)
+    count = 0
+    while count < n:
+        try:
+            yield next(it)
+        except StopIteration:
+            return
+        count += 1

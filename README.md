@@ -19,7 +19,7 @@ A tiny, hackable, function‑first training loop for PyTorch — built to be eas
     - `precision.py` – `autocast_context(mode, device)` and `Scaler(mode)`.
     - `dist.py` – DDP helpers: `init_process_group`, `barrier`, `rank/world_size`, `rank0`.
   - `data/`
-    - `iterable.py` – `to_device(batch, device)` and `cycle(iterable)`.
+    - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_iterable(iterable, rank, world_size)`.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
@@ -150,9 +150,12 @@ if need_ddp:
 - Only rank 0 writes checkpoints and logs via built-in hooks; barriers enclose checkpoint steps to align rank progress.
 - Launch with torchrun as usual:
 
-`torchrun --nproc_per_node=8 -m examples.mnist.main --config examples/mnist/config.yaml`
+`torchrun --nproc_per_node=8 -m examples.mnist.ddp_main --config examples/mnist/config.yaml`
 
-(You may add a tiny DDP wrapper that calls `init_process_group` before main.)
+The DDP launcher:
+- Calls `init_process_group(backend=...)` and sets the current CUDA device from `LOCAL_RANK`.
+- Forces `train.ddp: true` and keeps other training settings from YAML.
+- Uses the same logging configuration (stdout/CSV/JSONL and optional W&B).
 
 ## Optimizers and Schedulers
 

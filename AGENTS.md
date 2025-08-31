@@ -58,9 +58,19 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - Stats utils: SmoothedMeter, Throughput, EMA [DONE]
 - Refine stdout formatting to optionally include smoothed stats [TODO]
 - Extract remaining storage helpers (e.g., artifact naming) if needed [TODO]
-- Add `data/take.py` helper or extend iterable utils with `take(n)` [TODO]
-- DDP convenience: example torchrun entry that calls `dist.init_process_group` [TODO]
+- Add `data/take.py` helper or extend iterable utils with `take(n)` [DONE]
+- DDP checkpoint compatibility [TODO]
+  - Problem: When the model is wrapped in `DistributedDataParallel`, `model.state_dict()` includes `module.` prefixes, which complicates resuming across DDP vs single-GPU. Our loop currently saves `model.state_dict()` directly.
+  - Plan:
+    1) Save the underlying module weights: if `hasattr(model, "module")`, save `model.module.state_dict()`; otherwise `model.state_dict()`.
+    2) Provide small load helpers to add/remove `module.` prefixes as needed when users load a checkpoint.
+    3) Document best practices in README (resuming with/without DDP).
+- DDP convenience: example torchrun entry that calls `dist.init_process_group` [DONE]
 - Optional: cli/train.py thin wrapper around `training_loop` [TODO]
+  - Purpose: Generic CLI to run training from YAML without custom scripts.
+  - Inputs: YAML pointing to Python callables (module:function) for `model_fn`, `dataset_fn` or `dataloader_fn`, `step_fn`, optional `eval_fn`. Also uses `train`/`optim`/`logging`/`wandb` sections.
+  - Behavior: Imports callables, builds model/optim/scheduler/datasets, attaches hooks (stdout/CSV/JSONL/W&B), handles resume via latest checkpoint, supports DDP (auto `init_process_group` + sharding), then calls `training_loop`.
+  - Value: Consistent UX; reduces boilerplate; easier automation.
 - Tests: unit tests for precision helpers, checkpoint round-trip, shard_iterable [TODO]
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions.
