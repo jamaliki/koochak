@@ -80,3 +80,13 @@ Note: Keep this TODO section synchronized with the codebase state and design dec
 
 Updates:
 - DDP checkpoint compatibility implemented: loop saves `model.module.state_dict()` when present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` and README instructions for resuming across DDP/non-DDP.
+
+New design TODOs
+
+- Config validation and unused-key detection [DESIGN TODO]
+  - Goal: Minimize silent misconfiguration by warning (or erroring) on YAML keys that are not used during a run.
+  - Approach A (schema-based): Define allowed keys per section (`train`, `data`, `optim`, `logging`, `wandb`) and recursively validate the YAML against this schema. Unknown keys cause a rank0 warning or error depending on `train.strict_config: true`.
+  - Approach B (usage-tracking): Enhance `koochak.utils.config.get` to record all accessed keys (with dotted paths). Provide a context (e.g., `with config.track(cfg)`) that at the end computes `unused = yaml_keys - accessed_keys` and emits rank0 warnings (or raises in strict mode). This also catches keys used by user code as long as they use `config.get`.
+  - Hybrid: Support both. Use schema to catch typos early; usage-tracking to catch drift in forks/custom loops. Expose knobs: `train.strict_config: bool`, `train.config_warn_unknown: bool`.
+  - Integration: Implement `config.validate(cfg_all, schema, accessed=None, strict=False)` and call once during startup (and optionally after hooks are registered). Emit a tidy summary with the unknown keys and their paths.
+  - Docs: Document in README under Configuration; show how to enable strict mode and how to opt-out for experimental keys.

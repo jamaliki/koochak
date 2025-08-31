@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from typing import Any
 
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 
 __all__ = ["autocast_context", "Scaler", "is_fp16"]
 
