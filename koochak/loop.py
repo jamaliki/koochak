@@ -20,7 +20,7 @@ from koochak.data.iterable import to_device
 from koochak.data.sharding import shard_iterable
 from koochak.utils import config as config_lib
 from koochak.utils.device import get_device, get_lr
-from koochak.utils.seed import get_rng_state
+from koochak.utils.seed import get_rng_state, set_rng_state
 
 # Type aliases per design
 StepFn = Callable[[nn.Module, Any, Mapping[str, Any]], Dict[str, Any]]
@@ -79,6 +79,19 @@ def training_loop(
         "scaler": scaler,
         "config_json": cfg_json,
     }
+
+    # Restore RNG state if resuming
+    if checkpoint_dict and isinstance(checkpoint_dict, dict):
+        rng = checkpoint_dict.get("rng")
+        if rng:
+            try:
+                if dist_lib.is_initialized():
+                    dist_lib.barrier()
+                set_rng_state(rng)
+                if dist_lib.is_initialized():
+                    dist_lib.barrier()
+            except Exception:
+                pass
 
     # Allow hooks to see start of training
     _emit(hooks, "on_train_start", ctx)

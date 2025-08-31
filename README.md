@@ -8,7 +8,7 @@ A tiny, hackable, function‑first training loop for PyTorch — built to be eas
 - Hackable: pure-PyTorch, minimal magic, everything explicit via a small config mapping.
 - Iterable-first: data is any iterable (finite or infinite). No hidden epoch semantics.
 - Modern essentials: AMP, grad accumulation, grad clipping, logging, checkpointing, eval hooks, and DDP — each in small swappable modules.
-- Low dependency: standard library + PyTorch (optional: torchvision for examples, tqdm for niceties, wandb for logging, pyyaml for configs).
+- Low dependency: standard library + PyTorch (OmegaConf for configs; optional: torchvision for examples, tqdm for niceties, wandb for logging).
 
 ## Repository Layout
 
@@ -48,7 +48,8 @@ A tiny, hackable, function‑first training loop for PyTorch — built to be eas
 
 - Python 3.9+
 - PyTorch (CUDA optional): https://pytorch.org
-- Optional: `pip install torchvision pyyaml wandb tqdm`
+- Required: `pip install omegaconf`
+- Optional: `pip install torchvision wandb tqdm`
 
 This repo is intentionally lightweight — it is not a packaged PyPI install. Import modules via the repo root (e.g., `python -m examples.mnist.main`).
 
@@ -251,6 +252,7 @@ optim:
 - `koochak.utils.seed.set_all_seeds(seed)` sets Python/NumPy/Torch seeds and (optionally) CUDA seeds.
 - `koochak.utils.seed.make_worker_init_fn(seed)` seeds DataLoader workers deterministically.
 - RNG state is stored in checkpoints (`get_rng_state()`), so resumed runs continue deterministically.
+- On resume, the training loop restores RNG state from the checkpoint (Python/NumPy/Torch CPU/CUDA) before resuming steps, so randomness inside `step_fn` (e.g., `torch.rand`) is reproducible across restarts.
 
 ## Contributing
 

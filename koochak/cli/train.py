@@ -17,9 +17,9 @@ from koochak.utils import config as config_lib
 from koochak.storage import checkpoint as checkpoint_lib
 
 try:
-    import yaml  # type: ignore
+    from omegaconf import OmegaConf  # type: ignore
 except Exception as _e:
-    yaml = None
+    OmegaConf = None
 
 
 def _import_obj(path: str):
@@ -39,10 +39,9 @@ def main():
     args = parser.parse_args()
 
     if yaml is None:
-        raise RuntimeError("pyyaml is required. Please `pip install pyyaml`.")
+        raise RuntimeError("omegaconf is required. Please `pip install omegaconf`.")
 
-    with open(args.config, "r") as f:
-        cfg_all: Dict[str, Any] = yaml.safe_load(f) or {}
+    cfg_all: Dict[str, Any] = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)  # type: ignore
 
     # Sections
     cfg_train = dict(cfg_all.get("train", {}))

@@ -28,9 +28,9 @@ from koochak.utils.seed import set_all_seeds, make_worker_init_fn
 from koochak.utils import config as config_lib
 
 try:
-    import yaml  # type: ignore
+    from omegaconf import OmegaConf  # type: ignore
 except Exception as _e:
-    yaml = None  # will error at runtime with a helpful message
+    OmegaConf = None  # will error at runtime with a helpful message
 
 
 class SmallCNN(nn.Module):
@@ -113,11 +113,10 @@ def main():
     parser.add_argument("--config", default=os.path.join(os.path.dirname(__file__), "config.yaml"), help="YAML config path")
     args = parser.parse_args()
 
-    if yaml is None:
-        raise RuntimeError("pyyaml is required for the MNIST example. Please `pip install pyyaml`. ")
+    if OmegaConf is None:
+        raise RuntimeError("omegaconf is required for the MNIST example. Please `pip install omegaconf`. ")
 
-    with open(args.config, "r") as f:
-        cfg_all: Dict[str, Any] = yaml.safe_load(f) or {}
+    cfg_all: Dict[str, Any] = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)  # type: ignore
 
     cfg_train = dict(cfg_all.get("train", {}))
     cfg_data = dict(cfg_all.get("data", {}))

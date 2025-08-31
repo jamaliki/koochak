@@ -26,9 +26,9 @@ from koochak.utils.seed import set_all_seeds
 from koochak.utils import config as config_lib
 
 try:
-    import yaml  # type: ignore
+    from omegaconf import OmegaConf  # type: ignore
 except Exception:
-    yaml = None
+    OmegaConf = None
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
     args = parser.parse_args()
 
     if yaml is None:
-        raise RuntimeError("pyyaml is required. Please `pip install pyyaml`.")
+        raise RuntimeError("omegaconf is required. Please `pip install omegaconf`.")
 
     dist_lib.init_process_group(backend=args.backend)
 
@@ -47,8 +47,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank % torch.cuda.device_count())
 
-    with open(args.config, "r") as f:
-        cfg_all: Dict[str, Any] = yaml.safe_load(f) or {}
+    cfg_all: Dict[str, Any] = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)  # type: ignore
 
     cfg_train = dict(cfg_all.get("train", {}))
     cfg_data = dict(cfg_all.get("data", {}))

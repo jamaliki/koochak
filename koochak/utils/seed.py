@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 import torch
 
-__all__ = ["get_rng_state", "set_all_seeds", "make_worker_init_fn"]
+__all__ = ["get_rng_state", "set_rng_state", "set_all_seeds", "make_worker_init_fn"]
 
 
 def get_rng_state() -> Dict[str, Any]:
@@ -24,6 +24,26 @@ def get_rng_state() -> Dict[str, Any]:
         }
     )
     return state
+
+
+def set_rng_state(state: Dict[str, Any]) -> None:
+    """Restore RNG state previously produced by get_rng_state()."""
+    try:
+        import numpy as np  # type: ignore
+
+        if state.get("numpy") is not None:
+            np.random.set_state(state["numpy"])  # type: ignore[arg-type]
+    except Exception:
+        pass
+    try:
+        import torch
+
+        if state.get("torch_cpu") is not None:
+            torch.set_rng_state(state["torch_cpu"])  # type: ignore[arg-type]
+        if torch.cuda.is_available() and state.get("torch_cuda") is not None:
+            torch.cuda.set_rng_state_all(state["torch_cuda"])  # type: ignore[arg-type]
+    except Exception:
+        pass
 
 
 def set_all_seeds(seed: int) -> None:

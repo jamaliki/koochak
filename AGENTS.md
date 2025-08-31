@@ -80,6 +80,7 @@ Note: Keep this TODO section synchronized with the codebase state and design dec
 
 Updates:
 - DDP checkpoint compatibility implemented: loop saves `model.module.state_dict()` when present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` and README instructions for resuming across DDP/non-DDP.
+- RNG restore on resume implemented: loop restores RNG from checkpoint (`utils.seed.set_rng_state`), tests added.
 
 New design TODOs
 
@@ -103,3 +104,39 @@ New TODOs (Config validation and UX)
 - Pre-run config summary [DONE]
   - Print a rank-0 summary at startup showing sections present, recognized keys, and unknown keys (if any), with clear guidance on how to enable strict mode.
   - Implement as part of the hybrid validation helper and call from examples and future CLI.
+
+
+CLI enhancements (design TODOs)
+
+- Expand CLI to accept simple kwargs [DESIGN TODO]
+  - Goal: Allow passing positional/keyword args to entry callables via YAML without writing custom glue code.
+  - YAML shape (examples):
+    entry:
+      model: your_pkg.model_defs:make_model
+      model_args: [256, 10]                # optional positional args
+      model_kwargs: {dropout: 0.1}         # optional keyword args
+      dataset: your_pkg.data:train_dataset
+      dataset_kwargs: {data_dir: ./data, batch_size: ${data.batch_size}}
+      step: your_pkg.train:step_fn         # signature remains (model, batch, ctx)
+      eval_dataset: your_pkg.data:val_dataset
+      eval_dataset_kwargs: {data_dir: ./data, batch_size: ${data.batch_size}}
+      eval_fn: your_pkg.train:eval_fn
+  - Implementation notes:
+    1) Use OmegaConf interpolation (already integrated) for `${section.key}` resolution.
+    2) In koochak.cli.train, when constructing objects, retrieve *_args (list) and *_kwargs (dict) if present and pass them to the callable.
+    3) Keep types as provided by YAML; OmegaConf preserves original types on resolve.
+    4) Strict config still applies: extend schema to include entry.model_args, entry.model_kwargs, etc.
+
+- Tiny helpers for safe importing [DESIGN TODO]
+  - Purpose: Centralize import-from-string with robust errors and validation; reduce boilerplate and improve UX in CLI and examples.
+  - Module: koochak/utils/imports.py (or entry.py)
+  - API:
+    - import_object(path: str, *, expect_callable: bool | None = None, expect_type: type | tuple[type, ...] | None = None) -> Any
+      - Supports both "module:object" and "module.object" notations.
+      - On ImportError/AttributeError, raise a ValueError with a friendly message showing the path, attempted module, and available attributes. Optionally suggest close matches via difflib.get_close_matches.
+      - If expect_callable is True, verify callable(obj); if expect_type provided, isinstance check with a clear error.
+    - call_with(obj, *args, **kwargs): wraps calling with a short context on exception (e.g., "error while calling entry.model(...)")
+  - Optional niceties:
+    - Signature introspection (inspect.signature) to warn when unexpected kwargs are provided.
+    - A tiny dotted-path resolver util used by CLI to implement ${...} interpolation.
+  - Tests: cover good/bad import strings, callable/type validation, and helpful error messages.
