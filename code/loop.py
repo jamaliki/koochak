@@ -10,12 +10,13 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
 from storage import checkpoint as checkpoint_lib
+from koochak.core import hooks as hooks_lib
 
 # Type aliases per design
 StepFn = Callable[[nn.Module, Any, Mapping[str, Any]], Dict[str, Any]]
@@ -102,14 +103,8 @@ def _dist_info():
 
 
 def _emit(hooks: Optional[Dict[str, list]], event: str, *args, **kwargs):
-    if not hooks:
-        return
-    for fn in hooks.get(event, []):
-        try:
-            fn(*args, **kwargs)
-        except Exception:
-            # Hooks should not crash training; they are user-implemented.
-            continue
+    # Backward-compatible shim to central hooks helper
+    hooks_lib.emit(hooks, event, *args, **kwargs)
 
 
 def _rng_state() -> Dict[str, Any]:
@@ -290,4 +285,3 @@ def training_loop(
         }
 
     return final_ckpt
-
