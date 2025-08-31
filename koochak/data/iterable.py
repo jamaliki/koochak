@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import torch
 
-__all__ = ["to_device"]
+__all__ = ["to_device", "cycle"]
 
 
 def to_device(batch: Any, device: torch.device) -> Any:
@@ -17,3 +17,12 @@ def to_device(batch: Any, device: torch.device) -> Any:
         return tuple(items) if isinstance(batch, tuple) else items
     return batch
 
+
+def cycle(iterable: Iterable[Any]) -> Iterator[Any]:
+    """Yield from `iterable` forever by cycling.
+
+    If the iterable is finite, this will restart it repeatedly.
+    """
+    while True:
+        for x in iterable:
+            yield x

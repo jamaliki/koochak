@@ -1,0 +1,30 @@
+max_steps: 1000
+log_every: 50
+eval_every: 200
+ckpt_every: 200
+
+# Optim / schedule
+grad_accum: 1
+grad_clip_norm: null
+scheduler_step: step
+lr: 0.0003
+
+# Precision
+amp: fp32   # fp32 | fp16 | bf16
+
+# Misc
+seed: 42
+device: cuda
+out_dir: ./runs/mnist
+keep_last_k: 3
+
+# Data
+data_dir: ./data
+batch_size: 128
+num_workers: 4
+
+# Logging
+wandb:
+  enabled: false
+  project: koochak-mnist
+
