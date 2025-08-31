@@ -21,7 +21,7 @@ This doc tracks incremental design decisions and changes from the initial design
   - The loop shards the dataset when `config.ddp=True`, and places `barrier()` calls around checkpointing. Only rank 0 writes checkpoints.
 
 - Storage
-  - `storage/checkpoint.py` – atomic save/load, `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` pointer and prunes with `keep_last_k`.
+  - `koochak/storage/checkpoint.py` – atomic save/load, `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` pointer and prunes with `keep_last_k`.
 
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
