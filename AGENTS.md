@@ -1,6 +1,6 @@
 # Koochak – Agent Notes and Design Updates
 
-This doc tracks incremental design decisions and changes from the initial design_doc.md as we implement the stack. New contributors: please read README.md first to get oriented, then come back here for active notes and TODOs.
+This doc tracks incremental design decisions and changes from the initial design_doc.md as we implement the stack. New contributors: please read README.md first to get oriented, then come back here for active notes and TODOs. Always update README.md and this TODO list whenever behavior, layout, or usage changes.
 
 ## Implemented so far
 
@@ -54,6 +54,7 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - Add `utils/timeit.py` scoped timers [DONE]
 - Rank-0 gating helper and apply to built-in hooks [DONE]
 - CSV and JSONL loggers [DONE]
+- Wire CSV/JSONL logging via YAML and attach hooks in example [DONE]
 - Stats utils: SmoothedMeter, Throughput, EMA [DONE]
 - Refine stdout formatting to optionally include smoothed stats [TODO]
 - Extract remaining storage helpers (e.g., artifact naming) if needed [TODO]

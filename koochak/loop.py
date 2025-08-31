@@ -12,7 +12,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
-from storage import checkpoint as checkpoint_lib
+from koochak.storage import checkpoint as checkpoint_lib
 from koochak.core import hooks as hooks_lib
 from koochak.core import dist as dist_lib
 from koochak.core.precision import Scaler as make_scaler, autocast_context

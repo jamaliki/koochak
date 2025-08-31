@@ -31,3 +31,7 @@ data:
 wandb:
   enabled: false
   project: koochak-mnist
+
+logging:
+  csv_path: ./runs/mnist/log.csv
+  jsonl_path: ./runs/mnist/log.jsonl

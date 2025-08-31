@@ -19,6 +19,8 @@ from koochak.loop import training_loop
 from koochak.storage import checkpoint as checkpoint_lib
 from koochak.core import hooks as hooks_lib
 from koochak.logging.stdout import make_stdout_hooks
+from koochak.logging.csv import make_csv_hooks
+from koochak.logging.jsonl import make_jsonl_hooks
 from koochak.logging.wandb_logger import make_wandb_hooks
 from koochak.data.iterable import cycle
 from koochak.optim.build import build_optimizer, build_scheduler
@@ -120,6 +122,7 @@ def main():
     cfg_data = dict(cfg_all.get("data", {}))
     cfg_optim = dict(cfg_all.get("optim", {}))
     cfg_wandb = cfg_all.get("wandb")
+    cfg_logging = dict(cfg_all.get("logging", {}))
 
     # Defaults for train
     cfg_train.setdefault("max_steps", 1000)
@@ -151,6 +154,13 @@ def main():
     train_iter = cycle(train_loader)
 
     hooks = hooks_lib.merge({}, make_stdout_hooks())
+    # CSV/JSONL logging
+    csv_path = cfg_logging.get("csv_path") or os.path.join(str(cfg_train["out_dir"]), "log.csv")
+    jsonl_path = cfg_logging.get("jsonl_path") or os.path.join(str(cfg_train["out_dir"]), "log.jsonl")
+    if csv_path:
+        hooks = hooks_lib.merge(hooks, make_csv_hooks(csv_path))
+    if jsonl_path:
+        hooks = hooks_lib.merge(hooks, make_jsonl_hooks(jsonl_path))
     wb = cfg_wandb
     if wb and isinstance(wb, dict) and wb.get("enabled", False):
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(wb))

@@ -115,6 +115,18 @@ def step_fn(model, batch, ctx):
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.
 - Compose hooks with `koochak.core.hooks.merge(a, b)`. Gate any custom hook via `koochak.core.hooks.rank0_only(fn)` to ensure single-emission under DDP.
 
+YAML-driven logging (example):
+
+```
+logging:
+  csv_path: ./runs/mnist/log.csv
+  jsonl_path: ./runs/mnist/log.jsonl
+wandb:
+  enabled: false
+```
+
+If `csv_path`/`jsonl_path` are omitted, the MNIST example defaults to `<train.out_dir>/log.csv` and `<train.out_dir>/log.jsonl`.
+
 ## Checkpointing
 
 - `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` performs atomic writes, keeps only the last `k` step-checkpoints, and maintains `latest.pt`.
@@ -177,4 +189,3 @@ optim:
 ## License
 
 Apache 2.0 (see `LICENSE`).
-
