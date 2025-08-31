@@ -76,7 +76,7 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 Updates:
 - DDP checkpoint compatibility work started: loop now saves `model.module.state_dict()` if present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` to simplify resuming across DDP vs non-DDP.
 
-Note: Keep this TODO section synchronized with the codebase state and design decisions.
+Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
 
 Updates:
 - DDP checkpoint compatibility implemented: loop saves `model.module.state_dict()` when present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` and README instructions for resuming across DDP/non-DDP.
@@ -140,3 +140,37 @@ CLI enhancements (design TODOs)
     - Signature introspection (inspect.signature) to warn when unexpected kwargs are provided.
     - A tiny dotted-path resolver util used by CLI to implement ${...} interpolation.
   - Tests: cover good/bad import strings, callable/type validation, and helpful error messages.
+
+---
+
+Status Update — 2025-08-31
+
+Done recently
+- Core loop tightened and modularized; DDP wrapping + sharding + checkpoint barriers.
+- Storage split into `atomic`, `fs`, `pruning`; checkpoint uses atomic writes and pruning; latest/best helpers.
+- Logging: stdout TSV + CSV + JSONL; W&B hooks; rank0 gating applied in hooks.
+- Precision helpers (autocast + scaler), stats (SmoothedMeter/Throughput/EMA), and timeit utility.
+- DDP-safe checkpoints: save underlying module weights; helpers to adapt state_dict keys; README guidance.
+- RNG management: global seeding; rank-aware worker seeding; per‑rank RNG save/restore on resume.
+- Data: `cycle`, `take`, and `shard_iterable`.
+- Hybrid config validation: strict summary pre-run (default strict), post-run unused detection, helper wrappers.
+- Config: adopted OmegaConf for YAML loading and interpolation/resolution.
+- Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).
+- Generic CLI: `python -m koochak.cli.train --config ...` with strict validation and standard hooks.
+- Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
+
+Open TODOs (authoritative)
+- CLI: support entry kwargs [TODO]
+  - Extend schema to include `entry.model_args`, `entry.model_kwargs`, `entry.dataset_args/kwargs`, `entry.eval_dataset_args/kwargs`.
+  - Use OmegaConf-resolved values; pass args/kwargs to entry callables in `koochak.cli.train`.
+  - Add tests for args/kwargs plumbing.
+- Safe imports helper [TODO]
+  - `koochak/utils/imports.py` with `import_object` and `call_with` + friendly errors; tests.
+- Refine stdout logging [TODO]
+  - Optionally include smoothed stats (e.g., loss EMA/avg) and throughput in periodic prints.
+- Storage niceties [TODO]
+  - Optional artifact naming helpers; tighter integration with W&B artifact versioning.
+- More tests [TODO]
+  - Resume determinism across partial runs (single/DDR), scheduler-on-eval policy, grad-accum equivalence.
+- Documentation [TODO]
+  - Add a short README for `examples/mnist` and a troubleshooting section for DDP (env vars, CUDA device binding).

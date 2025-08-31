@@ -87,6 +87,10 @@ def build_dataloaders(data_dir: str, batch_size: int, num_workers: int, seed: in
         ys = torch.tensor([b[1] for b in batch], dtype=torch.long)
         return {"x": xs, "y": ys}
 
+    # Rank-aware worker seeding (rank=0 in single-process case)
+    from koochak.core import dist as dist_lib
+    rank = dist_lib.rank()
+
     train_loader = torch.utils.data.DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -94,7 +98,7 @@ def build_dataloaders(data_dir: str, batch_size: int, num_workers: int, seed: in
         num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate,
-        worker_init_fn=make_worker_init_fn(seed),
+        worker_init_fn=make_worker_init_fn(seed, rank=rank),
     )
     test_loader = torch.utils.data.DataLoader(
         test_ds,
@@ -103,7 +107,7 @@ def build_dataloaders(data_dir: str, batch_size: int, num_workers: int, seed: in
         num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate,
-        worker_init_fn=make_worker_init_fn(seed + 1),
+        worker_init_fn=make_worker_init_fn(seed + 1, rank=rank),
     )
     return train_loader, test_loader
 

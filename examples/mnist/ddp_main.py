@@ -74,7 +74,8 @@ def main():
 
     cfg_optim.setdefault("optimizer", {"name": "AdamW", "lr": 3e-4})
 
-    set_all_seeds(int(cfg_train["seed"]))
+    # Per-rank deterministic seeding to avoid correlated randomness
+    set_all_seeds(int(cfg_train["seed"]) + dist_lib.rank())
 
     model = SmallCNN()
     opt = build_optimizer(model.parameters(), cfg_optim.get("optimizer"))
@@ -131,4 +132,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

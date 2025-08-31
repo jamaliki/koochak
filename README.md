@@ -253,6 +253,7 @@ optim:
 - `koochak.utils.seed.make_worker_init_fn(seed)` seeds DataLoader workers deterministically.
 - RNG state is stored in checkpoints (`get_rng_state()`), so resumed runs continue deterministically.
 - On resume, the training loop restores RNG state from the checkpoint (Python/NumPy/Torch CPU/CUDA) before resuming steps, so randomness inside `step_fn` (e.g., `torch.rand`) is reproducible across restarts.
+- In DDP, prefer per-rank seeding (e.g., `set_all_seeds(seed + rank)`) and rank-aware worker seeding (`make_worker_init_fn(seed, rank=rank)`) to avoid correlated randomness. Checkpoints saved on rank 0 include per-rank RNG states and are used on resume to restore each rank’s RNG deterministically.
 
 ## Contributing
 

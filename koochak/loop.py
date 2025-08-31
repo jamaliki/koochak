@@ -87,7 +87,14 @@ def training_loop(
             try:
                 if dist_lib.is_initialized():
                     dist_lib.barrier()
-                set_rng_state(rng)
+                # Support per-rank rng saved under {"by_rank": {rank: state}}
+                sel = None
+                if isinstance(rng, dict) and "by_rank" in rng:
+                    by_rank = rng.get("by_rank", {})
+                    sel = by_rank.get(rank)
+                if sel is None:
+                    sel = rng
+                set_rng_state(sel)
                 if dist_lib.is_initialized():
                     dist_lib.barrier()
             except Exception:
@@ -181,6 +188,23 @@ def training_loop(
                     dist_lib.barrier()
                 now = time.time()
                 model_to_save = getattr(model, "module", model)
+                # Collect RNG states per rank for deterministic resume
+                rng_record: Dict[str, Any]
+                try:
+                    local_rng = get_rng_state()
+                    if dist_lib.is_initialized():
+                        import torch.distributed as dist
+                        if is_rank0:
+                            gathered = [None] * world_size  # type: ignore[list-item]
+                            dist.gather_object(local_rng, gathered, dst=0)
+                            rng_record = {"by_rank": {r: gathered[r] for r in range(world_size)}}
+                        else:
+                            dist.gather_object(local_rng, dst=0)
+                            rng_record = {"by_rank": {}}
+                    else:
+                        rng_record = local_rng  # single process
+                except Exception:
+                    rng_record = get_rng_state()
                 ckpt = {
                     "step": step,
                     "model": model_to_save.state_dict(),
@@ -188,7 +212,7 @@ def training_loop(
                     "scheduler": scheduler.state_dict() if scheduler is not None else None,
                     "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
                     "config": cfg_json,
-                    "rng": get_rng_state(),
+                    "rng": rng_record,
                     "wall_time": now,
                     "metrics": {},
                 }
@@ -215,6 +239,7 @@ def training_loop(
     # If we never saved inside the loop, construct a final ckpt snapshot
     if final_ckpt is None:
         model_to_save = getattr(model, "module", model)
+        # No per-rank gather here; this is a final constructed dict for return
         final_ckpt = {
             "step": max_steps,
             "model": model_to_save.state_dict(),

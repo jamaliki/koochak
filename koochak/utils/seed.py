@@ -70,10 +70,14 @@ def set_all_seeds(seed: int) -> None:
         pass
 
 
-def make_worker_init_fn(base_seed: int):
-    """Return a DataLoader worker_init_fn using base_seed and worker id."""
+def make_worker_init_fn(base_seed: int, *, rank: int = 0, worker_seed_offset: int = 1000):
+    """Return a DataLoader worker_init_fn using base_seed, rank, and worker id.
+
+    Each worker gets a unique deterministic seed:
+      seed = base_seed + rank * worker_seed_offset + worker_id
+    """
     def _fn(worker_id: int):
-        s = base_seed + worker_id
+        s = int(base_seed) + int(rank) * int(worker_seed_offset) + int(worker_id)
         random.seed(s)
         try:
             import numpy as np  # type: ignore
