@@ -7,8 +7,6 @@ from typing import Any, Dict, Iterable, Mapping
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 try:
     from torchvision import datasets, transforms
@@ -22,6 +20,7 @@ from koochak.core import hooks as hooks_lib
 from koochak.logging.stdout import make_stdout_hooks
 from koochak.logging.wandb_logger import make_wandb_hooks
 from koochak.data.iterable import cycle
+from koochak.optim.build import build_optimizer, build_scheduler
 from koochak.utils.seed import set_all_seeds, make_worker_init_fn
 
 try:
@@ -58,11 +57,17 @@ def step_fn(model: nn.Module, batch: Mapping[str, Any], ctx: Mapping[str, Any]) 
 @torch.no_grad()
 def eval_fn(model: nn.Module, iterable: Iterable, ctx: Mapping[str, Any]) -> Dict[str, float]:
     model.eval()
+    device = ctx.get("device")
     total, n = 0.0, 0
-    for batch in iterable:
-        logits = model(batch["x"])  # to_device handled by loop
-        total += F.cross_entropy(logits, batch["y"]).item()
-        n += 1
+    ac = ctx.get("autocast")
+    cm = ac if ac is not None else contextlib.nullcontext()
+    with cm:
+        for batch in iterable:
+            x = batch["x"].to(device, non_blocking=True)
+            y = batch["y"].to(device, non_blocking=True)
+            logits = model(x)
+            total += F.cross_entropy(logits, y).item()
+            n += 1
     return {"val_loss": total / max(1, n)}
 
 
@@ -108,42 +113,49 @@ def main():
         raise RuntimeError("pyyaml is required for the MNIST example. Please `pip install pyyaml`. ")
 
     with open(args.config, "r") as f:
-        cfg: Dict[str, Any] = yaml.safe_load(f) or {}
+        cfg_all: Dict[str, Any] = yaml.safe_load(f) or {}
 
-    # Defaults if missing
-    cfg.setdefault("max_steps", 1000)
-    cfg.setdefault("log_every", 50)
-    cfg.setdefault("eval_every", 200)
-    cfg.setdefault("ckpt_every", 200)
-    cfg.setdefault("amp", "fp32")
-    cfg.setdefault("seed", 42)
-    cfg.setdefault("device", "cuda")
-    cfg.setdefault("out_dir", "./runs/mnist")
-    cfg.setdefault("keep_last_k", 3)
-    cfg.setdefault("lr", 3e-4)
-    cfg.setdefault("data_dir", "./data")
-    cfg.setdefault("batch_size", 128)
-    cfg.setdefault("num_workers", 4)
+    cfg_train = dict(cfg_all.get("train", {}))
+    cfg_data = dict(cfg_all.get("data", {}))
+    cfg_optim = dict(cfg_all.get("optim", {}))
+    cfg_wandb = cfg_all.get("wandb")
 
-    set_all_seeds(int(cfg["seed"]))
+    # Defaults for train
+    cfg_train.setdefault("max_steps", 1000)
+    cfg_train.setdefault("log_every", 50)
+    cfg_train.setdefault("eval_every", 200)
+    cfg_train.setdefault("ckpt_every", 200)
+    cfg_train.setdefault("amp", "fp32")
+    cfg_train.setdefault("seed", 42)
+    cfg_train.setdefault("device", "cuda")
+    cfg_train.setdefault("out_dir", "./runs/mnist")
+    cfg_train.setdefault("keep_last_k", 3)
+
+    # Defaults for data and optim
+    cfg_optim.setdefault("lr", 3e-4)
+    cfg_data.setdefault("data_dir", "./data")
+    cfg_data.setdefault("batch_size", 128)
+    cfg_data.setdefault("num_workers", 4)
+
+    set_all_seeds(int(cfg_train["seed"]))
 
     model = SmallCNN()
-    opt = AdamW(model.parameters(), lr=float(cfg["lr"]))
-    sched = CosineAnnealingLR(opt, T_max=max(1, int(cfg["max_steps"])))
+    opt = build_optimizer(model.parameters(), cfg_optim.get("optimizer"))
+    sched = build_scheduler(opt, cfg_optim.get("scheduler"), cfg_train)
 
     train_loader, test_loader = build_dataloaders(
-        str(cfg["data_dir"]), int(cfg["batch_size"]), int(cfg["num_workers"]), int(cfg["seed"]))
+        str(cfg_data["data_dir"]), int(cfg_data["batch_size"]), int(cfg_data["num_workers"]), int(cfg_train["seed"]))
 
     # Dataset can be finite; we cycle it to satisfy max_steps
     train_iter = cycle(train_loader)
 
     hooks = hooks_lib.merge({}, make_stdout_hooks())
-    wb = cfg.get("wandb")
+    wb = cfg_wandb
     if wb and isinstance(wb, dict) and wb.get("enabled", False):
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(wb))
 
     # Resume if available
-    latest = checkpoint_lib.latest(str(cfg["out_dir"]))
+    latest = checkpoint_lib.latest(str(cfg_train["out_dir"]))
     ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
 
     training_loop(
@@ -152,7 +164,7 @@ def main():
         step_fn=step_fn,
         optimizer=opt,
         scheduler=sched,
-        config=cfg,
+        config=cfg_train,
         checkpoint_dict=ckpt,
         eval_dataset=test_loader,
         eval_fn=eval_fn,
