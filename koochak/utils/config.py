@@ -3,7 +3,18 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
-__all__ = ["get", "as_dict"]
+__all__ = [
+    "get",
+    "as_dict",
+    "accessed_keys",
+    "reset_access_log",
+    "default_schema",
+    "schema_validate",
+    "report_unused",
+    "summarize_and_check",
+    "apply_hybrid_validation_pre",
+    "apply_hybrid_validation_post_train",
+]
 
 
 _ACCESS_LOG: Dict[int, Set[str]] = {}
@@ -140,3 +151,69 @@ def report_unused(section_name: str, section_cfg: Dict[str, Any], cfg_obj: Mappi
     used = accessed_keys(cfg_obj)
     declared = set(section_cfg.keys())
     return {k for k in declared if k not in used}
+
+
+def summarize_and_check(
+    cfg_all: Dict[str, Any],
+    *,
+    schema: Optional[Dict[str, Any]] = None,
+    strict: bool = True,
+    warn_unknown: bool = True,
+) -> Set[str]:
+    """Print a concise summary and return unknown keys; raise if strict and unknown.
+
+    - strict: when True, raises ValueError if any unknown keys are found.
+    - warn_unknown: when False, suppresses warning prints if not strict.
+    """
+    schema = schema or default_schema()
+    sections = sorted(cfg_all.keys())
+    print("[koochak][config] sections:", ", ".join(sections) or "<none>")
+    unknown = schema_validate(cfg_all, schema)
+    if unknown:
+        msg = "[koochak][config] unknown keys: " + ", ".join(sorted(unknown))
+        if strict:
+            raise ValueError(msg)
+        elif warn_unknown:
+            print(msg)
+    else:
+        print("[koochak][config] unknown keys: <none>")
+    print(f"[koochak][config] strict: {'on' if strict else 'off'}")
+    return unknown
+
+
+def apply_hybrid_validation_pre(
+    cfg_all: Dict[str, Any],
+    train_cfg: Mapping[str, Any] | Any,
+    *,
+    schema: Optional[Dict[str, Any]] = None,
+) -> Set[str]:
+    """Pre-run: print summary and enforce strict unknown-key checks.
+
+    Uses train_cfg['strict_config'] defaulting to True.
+    """
+    strict = bool(get(train_cfg, "strict_config", True))
+    return summarize_and_check(cfg_all, schema=schema or default_schema(), strict=strict, warn_unknown=True)
+
+
+def apply_hybrid_validation_post_train(
+    train_cfg: Mapping[str, Any] | Any,
+) -> Set[str]:
+    """Post-run: report/raise on unused train.* keys based on strict_config.
+
+    Returns the unused key set.
+    """
+    strict = bool(get(train_cfg, "strict_config", True))
+    warn = bool(get(train_cfg, "config_warn_unknown", True))
+    # Only checks keys present in the train_cfg mapping
+    if isinstance(train_cfg, Mapping):
+        unused = report_unused("train", train_cfg, train_cfg)
+    else:
+        # If not a Mapping, can't meaningfully diff; treat as empty
+        unused = set()
+    if unused:
+        msg = "[koochak][config] unused train.* keys: " + ", ".join(sorted(unused))
+        if strict:
+            raise ValueError(msg)
+        elif warn:
+            print(msg)
+    return unused

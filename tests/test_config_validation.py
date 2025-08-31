@@ -42,3 +42,17 @@ def test_reset_access_log_isolation():
     config_lib.get(cfg2, "y")
     assert "y" in config_lib.accessed_keys(cfg2)
 
+
+def test_summarize_and_check_strict_behavior(capsys):
+    schema = config_lib.default_schema()
+    bad = {"train": {"foo": 1}}
+    # strict=True should raise
+    try:
+        config_lib.summarize_and_check(bad, schema=schema, strict=True)
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    # strict=False should not raise, but should print unknown
+    config_lib.summarize_and_check(bad, schema=schema, strict=False)
+    out = capsys.readouterr().out
+    assert "unknown keys" in out

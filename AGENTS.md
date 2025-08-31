@@ -93,13 +93,13 @@ New design TODOs
 
 New TODOs (Config validation and UX)
 
-- Promote hybrid config validation into a reusable helper [TODO]
+- Promote hybrid config validation into a reusable helper [DONE]
   - Create a small utility (e.g., `config.apply_hybrid_validation(cfg_all, schema, train_cfg)`) that runs schema validation + usage-tracking and handles warn/raise behavior based on `train.strict_config` and `train.config_warn_unknown`.
   - Use this helper in all examples and later in `cli/train.py` to avoid repetition.
 
 - Document strict_config/config_warn_unknown in README [TODO]
   - Add a section under Configuration explaining these toggles and showing example YAML snippets.
 
-- Pre-run config summary [TODO]
+- Pre-run config summary [DONE]
   - Print a rank-0 summary at startup showing sections present, recognized keys, and unknown keys (if any), with clear guidance on how to enable strict mode.
   - Implement as part of the hybrid validation helper and call from examples and future CLI.

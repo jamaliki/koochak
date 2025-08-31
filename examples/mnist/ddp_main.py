@@ -55,15 +55,8 @@ def main():
     cfg_optim = dict(cfg_all.get("optim", {}))
     cfg_wandb = cfg_all.get("wandb")
     cfg_logging = dict(cfg_all.get("logging", {}))
-    # Schema validation
-    schema = config_lib.default_schema()
-    unknown = config_lib.schema_validate(cfg_all, schema)
-    if unknown:
-        msg = "Unknown config keys: " + ", ".join(sorted(unknown))
-        if bool(cfg_train.get("strict_config", False)):
-            raise ValueError(msg)
-        else:
-            print("[koochak][config][warn]", msg)
+    # Pre-run summary + schema validation (strict by default)
+    config_lib.apply_hybrid_validation_pre(cfg_all, cfg_train, schema=config_lib.default_schema())
 
     # Force DDP on and device to current CUDA device (logical)
     cfg_train["ddp"] = True
@@ -125,17 +118,11 @@ def main():
             hooks=hooks,
         )
     finally:
-        # Report unused keys in train section (usage tracking)
+        # Post-run: report/raise on unused train.* keys
         try:
-            unused = config_lib.report_unused("train", cfg_train, cfg_train)
-            if unused:
-                msg = "Unused train.* keys: " + ", ".join(sorted(unused))
-                if bool(cfg_train.get("strict_config", False)):
-                    raise ValueError(msg)
-                elif bool(cfg_train.get("config_warn_unknown", True)):
-                    print("[koochak][config][warn]", msg)
+            config_lib.apply_hybrid_validation_post_train(cfg_train)
         except Exception:
-            pass
+            raise
         if dist_lib.is_initialized():
             import torch.distributed as dist
 

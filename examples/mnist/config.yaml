@@ -12,6 +12,10 @@ train:
   out_dir: ./runs/mnist
   keep_last_k: 3
 
+  # Strict config validation defaults
+  strict_config: true         # raise on unknown/unused keys
+  config_warn_unknown: true   # when strict_config=false, warn instead of raising
+
 optim:
   optimizer:
     name: AdamW

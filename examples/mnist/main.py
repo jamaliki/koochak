@@ -125,15 +125,8 @@ def main():
     cfg_wandb = cfg_all.get("wandb")
     cfg_logging = dict(cfg_all.get("logging", {}))
 
-    # Schema validation (unknown keys)
-    schema = config_lib.default_schema()
-    unknown = config_lib.schema_validate(cfg_all, schema)
-    if unknown:
-        msg = "Unknown config keys: " + ", ".join(sorted(unknown))
-        if bool(cfg_train.get("strict_config", False)):
-            raise ValueError(msg)
-        else:
-            print("[koochak][config][warn]", msg)
+    # Pre-run summary + schema validation (strict by default)
+    config_lib.apply_hybrid_validation_pre(cfg_all, cfg_train, schema=config_lib.default_schema())
 
     # Defaults for train
     cfg_train.setdefault("max_steps", 1000)
@@ -193,14 +186,8 @@ def main():
         hooks=hooks,
     )
 
-    # Report unused keys in train section (usage-tracking)
-    unused = config_lib.report_unused("train", cfg_train, cfg_train)
-    if unused:
-        msg = "Unused train.* keys: " + ", ".join(sorted(unused))
-        if bool(cfg_train.get("strict_config", False)):
-            raise ValueError(msg)
-        elif bool(cfg_train.get("config_warn_unknown", True)):
-            print("[koochak][config][warn]", msg)
+    # Post-run: report/raise on unused train.* keys
+    config_lib.apply_hybrid_validation_post_train(cfg_train)
 
 
 if __name__ == "__main__":

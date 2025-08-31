@@ -69,6 +69,54 @@ This repo is intentionally lightweight — it is not a packaged PyPI install. Im
 
 This will download MNIST (via torchvision), print TSV logs to stdout, periodically evaluate, and write atomic checkpoints to `train.out_dir` (e.g., `./runs/mnist/step000000000.pt` and `latest.pt`).
 
+
+## Configuration
+
+By default, Koochak enforces strict configuration to minimize surprises.
+
+- Strict mode: unknown YAML keys cause an immediate error before training; unused `train.*` keys cause an error after training. To relax, set `train.strict_config: false`.
+- Warnings: if strict is disabled, unknown/unused keys print rank-0 warnings when `train.config_warn_unknown: true` (default true).
+
+Example YAML toggles:
+
+```
+train:
+  strict_config: true       # default
+  config_warn_unknown: true # default, applies when strict_config=false
+```
+
+At startup, a brief config summary prints sections present, unknown keys (if any), and strict status.
+
+
+
+## Generic CLI
+
+Koochak ships a generic YAML-driven CLI so you can run training without custom scripts.
+
+Run:
+
+`python -m koochak.cli.train --config path/to/your_config.yaml`
+
+Your YAML must include an `entry` section to locate user code, plus the standard sections:
+
+```
+entry:
+  model: your_pkg.model_defs:make_model     # returns nn.Module
+  dataset: your_pkg.data:train_dataset      # returns iterable (or DataLoader)
+  step: your_pkg.train:step_fn              # def step_fn(model, batch, ctx) -> dict
+  eval_dataset: your_pkg.data:val_dataset   # optional
+  eval_fn: your_pkg.train:eval_fn           # optional
+
+train: { ... }
+data:  { ... }
+optim: { optimizer: {...}, scheduler: {...} }
+logging: { csv_path: ..., jsonl_path: ... }
+wandb: { enabled: false, project: ... }
+```
+
+The CLI applies the same strict config validation and pre-run summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop`.
+
+
 ## Core API
 
 `koochak/loop.py` exposes:

@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import (
     StepLR,
     LinearLR,
     SequentialLR,
+    LambdaLR
 )
 
 __all__ = ["build_optimizer", "build_scheduler"]
@@ -60,7 +61,7 @@ def build_scheduler(optimizer: Optimizer, cfg: Optional[Mapping[str, Any]], trai
         scheds = []
         milestones = []
         if warmup_steps > 0:
-            scheds.append(LinearLR(optimizer, start_factor=0.0, end_factor=1.0, total_iters=warmup_steps))
+            scheds.append(LambdaLR(optimizer, lr_lambda=lambda x: x / warmup_steps))
             milestones.append(warmup_steps)
         scheds.append(CosineAnnealingLR(optimizer, T_max=cosine_steps, eta_min=eta_min))
         if not milestones:
