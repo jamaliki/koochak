@@ -90,3 +90,16 @@ New design TODOs
   - Hybrid: Support both. Use schema to catch typos early; usage-tracking to catch drift in forks/custom loops. Expose knobs: `train.strict_config: bool`, `train.config_warn_unknown: bool`.
   - Integration: Implement `config.validate(cfg_all, schema, accessed=None, strict=False)` and call once during startup (and optionally after hooks are registered). Emit a tidy summary with the unknown keys and their paths.
   - Docs: Document in README under Configuration; show how to enable strict mode and how to opt-out for experimental keys.
+
+New TODOs (Config validation and UX)
+
+- Promote hybrid config validation into a reusable helper [TODO]
+  - Create a small utility (e.g., `config.apply_hybrid_validation(cfg_all, schema, train_cfg)`) that runs schema validation + usage-tracking and handles warn/raise behavior based on `train.strict_config` and `train.config_warn_unknown`.
+  - Use this helper in all examples and later in `cli/train.py` to avoid repetition.
+
+- Document strict_config/config_warn_unknown in README [TODO]
+  - Add a section under Configuration explaining these toggles and showing example YAML snippets.
+
+- Pre-run config summary [TODO]
+  - Print a rank-0 summary at startup showing sections present, recognized keys, and unknown keys (if any), with clear guidance on how to enable strict mode.
+  - Implement as part of the hybrid validation helper and call from examples and future CLI.
