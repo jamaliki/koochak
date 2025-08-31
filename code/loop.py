@@ -17,6 +17,7 @@ from koochak.core import hooks as hooks_lib
 from koochak.core import dist as dist_lib
 from koochak.core.precision import Scaler as make_scaler, autocast_context
 from koochak.data.iterable import to_device
+from koochak.data.sharding import shard_iterable
 from koochak.utils import config as config_lib
 from koochak.utils.device import get_device, get_lr
 from koochak.utils.seed import get_rng_state
@@ -53,7 +54,7 @@ def training_loop(
     model.to(device)
 
     rank, world_size = dist_lib.rank(), dist_lib.world_size()
-    is_rank0 = rank == 0
+    is_rank0 = dist_lib.rank0()
 
     amp_mode = config_lib.get(config, "amp", "fp32")
     grad_accum = int(config_lib.get(config, "grad_accum", 1))
@@ -83,6 +84,9 @@ def training_loop(
     _emit(hooks, "on_train_start", ctx)
 
     it = iter(dataset)
+    # If user requested DDP semantics, shard the iterable by rank/world_size
+    if config_lib.get(config, "ddp", False) and world_size > 1:
+        it = iter(shard_iterable(it, rank, world_size))
     start_step = int(checkpoint_dict.get("step", 0)) if checkpoint_dict else 0
     last_out: Dict[str, Any] | None = None
     final_ckpt: Dict[str, Any] | None = checkpoint_dict
@@ -146,7 +150,9 @@ def training_loop(
                     _emit(hooks, "on_eval_end", metrics, {**ctx, "step": step})
 
             # Periodic checkpoint
-            if is_rank0 and (step % ckpt_every == 0):
+            if (step % ckpt_every == 0):
+                if dist_lib.is_initialized():
+                    dist_lib.barrier()
                 now = time.time()
                 ckpt = {
                     "step": step,
@@ -161,8 +167,11 @@ def training_loop(
                 }
                 os.makedirs(out_dir, exist_ok=True)
                 path = os.path.join(out_dir, f"step{step:09d}.pt")
-                saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=keep_last_k)
-                _emit(hooks, "on_checkpoint", saved_path, ckpt, {**ctx, "step": step})
+                if is_rank0:
+                    saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=keep_last_k)
+                    _emit(hooks, "on_checkpoint", saved_path, ckpt, {**ctx, "step": step})
+                if dist_lib.is_initialized():
+                    dist_lib.barrier()
                 final_ckpt = ckpt
 
             last_out = out

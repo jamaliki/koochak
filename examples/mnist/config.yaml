@@ -18,7 +18,8 @@ optim:
     lr: 0.0003
     weight_decay: 0.01
   scheduler:
-    name: cosine
+    name: cosine_warmup
+    warmup_steps: 100
     T_max: null  # uses train.max_steps if null
     eta_min: 0.0
 

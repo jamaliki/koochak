@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sys
 from typing import Any, Dict, Iterable, List, Optional
+from koochak.core.hooks import rank0_only
 
 __all__ = ["StdoutLogger", "make_stdout_hooks", "log_step_tsv"]
 
@@ -100,9 +101,8 @@ def make_stdout_hooks(file=None) -> Dict[str, List]:
     """Return a hooks dict wiring StdoutLogger into on_* events."""
     l = StdoutLogger(file=file)
     return {
-        "on_train_start": [l.on_train_start],
-        "on_log": [l.on_log],
-        "on_eval_end": [l.on_eval_end],
-        "on_train_end": [l.on_train_end],
+        "on_train_start": [rank0_only(l.on_train_start)],
+        "on_log": [rank0_only(l.on_log)],
+        "on_eval_end": [rank0_only(l.on_eval_end)],
+        "on_train_end": [rank0_only(l.on_train_end)],
     }
-

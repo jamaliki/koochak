@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from koochak.core.hooks import rank0_only
 
 
 def make_wandb_hooks(cfg) -> Dict[str, List]:
@@ -76,10 +77,9 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             pass
 
     return {
-        "on_train_start": [on_train_start],
-        "on_log": [on_log],
-        "on_eval_end": [on_eval_end],
-        "on_checkpoint": [on_checkpoint],
-        "on_train_end": [on_train_end],
+        "on_train_start": [rank0_only(on_train_start)],
+        "on_log": [rank0_only(on_log)],
+        "on_eval_end": [rank0_only(on_eval_end)],
+        "on_checkpoint": [rank0_only(on_checkpoint)],
+        "on_train_end": [rank0_only(on_train_end)],
     }
-
