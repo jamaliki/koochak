@@ -2,127 +2,33 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import time
 from contextlib import nullcontext
-from dataclasses import asdict, is_dataclass
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
-import torch
 import torch.nn as nn
-from torch.amp import autocast, GradScaler
+from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
 from storage import checkpoint as checkpoint_lib
 from koochak.core import hooks as hooks_lib
+from koochak.core import dist as dist_lib
+from koochak.core.precision import Scaler as make_scaler, autocast_context
+from koochak.data.iterable import to_device
+from koochak.utils import config as config_lib
+from koochak.utils.device import get_device, get_lr
+from koochak.utils.seed import get_rng_state
 
 # Type aliases per design
 StepFn = Callable[[nn.Module, Any, Mapping[str, Any]], Dict[str, Any]]
 EvalFn = Callable[[nn.Module, Iterable, Mapping[str, Any]], Dict[str, float]]
 
 
-def _cfg_get(mapping: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
-    if isinstance(mapping, Mapping):
-        return mapping.get(key, default)
-    return getattr(mapping, key, default)
-
-
-def _cfg_as_dict(cfg: Mapping[str, Any] | Any) -> Dict[str, Any]:
-    if is_dataclass(cfg):
-        return asdict(cfg)  # type: ignore[arg-type]
-    if isinstance(cfg, Mapping):
-        return dict(cfg)
-    # Fallback: pull public attributes
-    return {k: getattr(cfg, k) for k in dir(cfg) if not k.startswith("_")}
-
-
-def _get_device(cfg) -> torch.device:
-    dev = _cfg_get(cfg, "device", None)
-    if dev is None:
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-    return torch.device(dev)
-
-
-def _autocast_context(amp_mode: str, device: torch.device):
-    amp_mode = (amp_mode or "fp32").lower()
-    if amp_mode == "fp16":
-        return autocast(device_type="cuda" if device.type == "cuda" else "cpu", dtype=torch.float16)
-    if amp_mode == "bf16":
-        # bf16 autocast supported on CUDA and CPU (>=pytorch 1.10 for CPU)
-        return autocast(device_type=device.type, dtype=torch.bfloat16)
-    return nullcontext()
-
-
-class _NoOpScaler:
-    def __init__(self):
-        pass
-
-    def scale(self, loss):
-        return loss
-
-    def step(self, optimizer):
-        optimizer.step()
-
-    def update(self):
-        pass
-
-    def unscale_(self, optimizer):
-        pass
-
-
-def _make_scaler(amp_mode: str) -> GradScaler | _NoOpScaler:
-    amp_mode = (amp_mode or "fp32").lower()
-    if amp_mode == "fp16" and torch.cuda.is_available():
-        return GradScaler(enabled=True)
-    return _NoOpScaler()
-
-
-def _to_device(batch: Any, device: torch.device) -> Any:
-    if isinstance(batch, torch.Tensor):
-        return batch.to(device, non_blocking=True)
-    if isinstance(batch, dict):
-        return {k: _to_device(v, device) for k, v in batch.items()}
-    if isinstance(batch, (list, tuple)):
-        t = [_to_device(v, device) for v in batch]
-        return type(batch)(t) if isinstance(batch, tuple) else t
-    return batch
-
-
-def _get_lr(optimizer: Optimizer) -> float:
-    if not optimizer.param_groups:
-        return 0.0
-    return float(optimizer.param_groups[0].get("lr", 0.0))
-
-
-def _dist_info():
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_rank(), torch.distributed.get_world_size()
-    return 0, 1
-
-
 def _emit(hooks: Optional[Dict[str, list]], event: str, *args, **kwargs):
     # Backward-compatible shim to central hooks helper
     hooks_lib.emit(hooks, event, *args, **kwargs)
-
-
-def _rng_state() -> Dict[str, Any]:
-    state: Dict[str, Any] = {}
-    try:
-        import numpy as np  # type: ignore
-
-        state["numpy"] = np.random.get_state()
-    except Exception:
-        state["numpy"] = None
-    state.update(
-        {
-            "python": random.getstate(),
-            "torch_cpu": torch.get_rng_state(),
-            "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        }
-    )
-    return state
 
 
 def training_loop(
@@ -143,32 +49,32 @@ def training_loop(
     Returns the final checkpoint dict.
     """
 
-    device = _get_device(config)
+    device = get_device(config)
     model.to(device)
 
-    rank, world_size = _dist_info()
+    rank, world_size = dist_lib.rank(), dist_lib.world_size()
     is_rank0 = rank == 0
 
-    amp_mode = _cfg_get(config, "amp", "fp32")
-    grad_accum = int(_cfg_get(config, "grad_accum", 1))
-    grad_clip_norm = _cfg_get(config, "grad_clip_norm", None)
-    scheduler_step_policy = _cfg_get(config, "scheduler_step", "step")
-    max_steps = int(_cfg_get(config, "max_steps", 100_000))
-    log_every = int(_cfg_get(config, "log_every", 100))
-    eval_every = int(_cfg_get(config, "eval_every", 5_000))
-    ckpt_every = int(_cfg_get(config, "ckpt_every", 5_000))
-    out_dir = _cfg_get(config, "out_dir", "./runs/exp0")
-    keep_last_k = int(_cfg_get(config, "keep_last_k", 3))
+    amp_mode = config_lib.get(config, "amp", "fp32")
+    grad_accum = int(config_lib.get(config, "grad_accum", 1))
+    grad_clip_norm = config_lib.get(config, "grad_clip_norm", None)
+    scheduler_step_policy = config_lib.get(config, "scheduler_step", "step")
+    max_steps = int(config_lib.get(config, "max_steps", 100_000))
+    log_every = int(config_lib.get(config, "log_every", 100))
+    eval_every = int(config_lib.get(config, "eval_every", 5_000))
+    ckpt_every = int(config_lib.get(config, "ckpt_every", 5_000))
+    out_dir = config_lib.get(config, "out_dir", "./runs/exp0")
+    keep_last_k = int(config_lib.get(config, "keep_last_k", 3))
 
-    scaler = _make_scaler(amp_mode)
+    scaler = make_scaler(amp_mode)
 
     # Build context passed to step/eval and hooks
-    cfg_json = _cfg_as_dict(config)
+    cfg_json = config_lib.as_dict(config)
     ctx: Dict[str, Any] = {
         "device": device,
         "rank": rank,
         "world_size": world_size,
-        "autocast": _autocast_context(amp_mode, device),
+        "autocast": autocast_context(amp_mode, device),
         "scaler": scaler,
         "config_json": cfg_json,
     }
@@ -197,7 +103,7 @@ def training_loop(
                 with cm:
                     with ctx["autocast"]:
                         batch = next(it)
-                        out = step_fn(model, _to_device(batch, device), {**ctx, "step": step})
+                        out = step_fn(model, to_device(batch, device), {**ctx, "step": step})
                         if "loss" not in out:
                             raise RuntimeError("step_fn must return a dict containing a 'loss' Tensor")
                         loss = out["loss"] / grad_accum
@@ -226,7 +132,7 @@ def training_loop(
                     pass
 
             # Logs and hooks
-            logs = {"loss": total_loss_scalar, "lr": _get_lr(optimizer), **(out or {}), "step": step}
+            logs = {"loss": total_loss_scalar, "lr": get_lr(optimizer), **(out or {}), "step": step}
             if is_rank0 and (step % log_every == 0):
                 _emit(hooks, "on_log", logs, {**ctx, "step": step})
             _emit(hooks, "on_step_end", logs, {**ctx, "step": step})
@@ -249,7 +155,7 @@ def training_loop(
                     "scheduler": scheduler.state_dict() if scheduler is not None else None,
                     "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
                     "config": cfg_json,
-                    "rng": _rng_state(),
+                    "rng": get_rng_state(),
                     "wall_time": now,
                     "metrics": {},
                 }
@@ -279,7 +185,7 @@ def training_loop(
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
             "config": cfg_json,
-            "rng": _rng_state(),
+            "rng": get_rng_state(),
             "wall_time": time.time(),
             "metrics": {},
         }
