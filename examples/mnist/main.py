@@ -25,6 +25,7 @@ from koochak.logging.wandb_logger import make_wandb_hooks
 from koochak.data.iterable import cycle
 from koochak.optim.build import build_optimizer, build_scheduler
 from koochak.utils.seed import set_all_seeds, make_worker_init_fn
+from koochak.utils import config as config_lib
 
 try:
     import yaml  # type: ignore
@@ -124,6 +125,16 @@ def main():
     cfg_wandb = cfg_all.get("wandb")
     cfg_logging = dict(cfg_all.get("logging", {}))
 
+    # Schema validation (unknown keys)
+    schema = config_lib.default_schema()
+    unknown = config_lib.schema_validate(cfg_all, schema)
+    if unknown:
+        msg = "Unknown config keys: " + ", ".join(sorted(unknown))
+        if bool(cfg_train.get("strict_config", False)):
+            raise ValueError(msg)
+        else:
+            print("[koochak][config][warn]", msg)
+
     # Defaults for train
     cfg_train.setdefault("max_steps", 1000)
     cfg_train.setdefault("log_every", 50)
@@ -169,7 +180,7 @@ def main():
     latest = checkpoint_lib.latest(str(cfg_train["out_dir"]))
     ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
 
-    training_loop(
+    result = training_loop(
         model=model,
         dataset=train_iter,
         step_fn=step_fn,
@@ -181,6 +192,15 @@ def main():
         eval_fn=eval_fn,
         hooks=hooks,
     )
+
+    # Report unused keys in train section (usage-tracking)
+    unused = config_lib.report_unused("train", cfg_train, cfg_train)
+    if unused:
+        msg = "Unused train.* keys: " + ", ".join(sorted(unused))
+        if bool(cfg_train.get("strict_config", False)):
+            raise ValueError(msg)
+        elif bool(cfg_train.get("config_warn_unknown", True)):
+            print("[koochak][config][warn]", msg)
 
 
 if __name__ == "__main__":

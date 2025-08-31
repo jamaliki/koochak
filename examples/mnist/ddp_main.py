@@ -23,6 +23,7 @@ from koochak.logging.jsonl import make_jsonl_hooks
 from koochak.data.iterable import cycle
 from koochak.optim.build import build_optimizer, build_scheduler
 from koochak.utils.seed import set_all_seeds
+from koochak.utils import config as config_lib
 
 try:
     import yaml  # type: ignore
@@ -54,6 +55,15 @@ def main():
     cfg_optim = dict(cfg_all.get("optim", {}))
     cfg_wandb = cfg_all.get("wandb")
     cfg_logging = dict(cfg_all.get("logging", {}))
+    # Schema validation
+    schema = config_lib.default_schema()
+    unknown = config_lib.schema_validate(cfg_all, schema)
+    if unknown:
+        msg = "Unknown config keys: " + ", ".join(sorted(unknown))
+        if bool(cfg_train.get("strict_config", False)):
+            raise ValueError(msg)
+        else:
+            print("[koochak][config][warn]", msg)
 
     # Force DDP on and device to current CUDA device (logical)
     cfg_train["ddp"] = True
@@ -115,6 +125,17 @@ def main():
             hooks=hooks,
         )
     finally:
+        # Report unused keys in train section (usage tracking)
+        try:
+            unused = config_lib.report_unused("train", cfg_train, cfg_train)
+            if unused:
+                msg = "Unused train.* keys: " + ", ".join(sorted(unused))
+                if bool(cfg_train.get("strict_config", False)):
+                    raise ValueError(msg)
+                elif bool(cfg_train.get("config_warn_unknown", True)):
+                    print("[koochak][config][warn]", msg)
+        except Exception:
+            pass
         if dist_lib.is_initialized():
             import torch.distributed as dist
 
