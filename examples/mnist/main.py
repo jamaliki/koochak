@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 from typing import Any, Dict, Iterable, Mapping
 
@@ -14,8 +15,8 @@ except Exception as e:
     datasets = None
     transforms = None
 
-from code.loop import training_loop
-from storage import checkpoint as checkpoint_lib
+from koochak.loop import training_loop
+from koochak.storage import checkpoint as checkpoint_lib
 from koochak.core import hooks as hooks_lib
 from koochak.logging.stdout import make_stdout_hooks
 from koochak.logging.wandb_logger import make_wandb_hooks

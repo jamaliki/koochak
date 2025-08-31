@@ -1,11 +1,11 @@
 # Koochak – Agent Notes and Design Updates
 
-This doc tracks incremental design decisions and changes from the initial design_doc.md as we implement the stack.
+This doc tracks incremental design decisions and changes from the initial design_doc.md as we implement the stack. New contributors: please read README.md first to get oriented, then come back here for active notes and TODOs.
 
 ## Implemented so far
 
 - Core loop
-  - `code/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, eval hooks, and checkpointing. Loop returns a resume-ready checkpoint dict.
+  - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, eval hooks, and checkpointing. Loop returns a resume-ready checkpoint dict.
   - Loop uses small, focused helpers for precision, config, device, RNG state, sharding, and hooks dispatch.
 
 - Hooks
