@@ -13,6 +13,9 @@ __all__ = [
     "load",
     "latest",
     "best",
+    "strip_module_prefix",
+    "add_module_prefix",
+    "match_state_dict_to_model",
 ]
 
 from .atomic import atomic_write
@@ -88,3 +91,52 @@ def latest(directory: str) -> Optional[str]:
 
 def best(directory: str, key: str = "val_loss") -> Optional[str]:
     return fs_utils.best(directory, key=key, pattern=_STEP_RE.pattern)
+
+
+# ---------- DDP compatibility helpers ----------
+from collections import OrderedDict
+
+
+def _has_module_prefix(sd: "OrderedDict[str, torch.Tensor] | Dict[str, torch.Tensor]") -> bool:
+    try:
+        for k in sd.keys():
+            if isinstance(k, str) and k.startswith("module."):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def strip_module_prefix(sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
+    out: "OrderedDict[str, Any]" = OrderedDict()
+    for k, v in sd.items():
+        nk = k[7:] if isinstance(k, str) and k.startswith("module.") else k
+        out[nk] = v
+    return out
+
+
+def add_module_prefix(sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
+    out: "OrderedDict[str, Any]" = OrderedDict()
+    for k, v in sd.items():
+        nk = (f"module.{k}" if isinstance(k, str) and not k.startswith("module.") else k)
+        out[nk] = v
+    return out
+
+
+def match_state_dict_to_model(model: Any, sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
+    """Return a state_dict whose keys match the target model.
+
+    If model expects `module.*` keys but sd doesn't, add them; if the reverse, strip them.
+    Otherwise return sd unchanged.
+    """
+    try:
+        model_keys = list(getattr(model, "state_dict")().keys())
+    except Exception:
+        return OrderedDict(sd)
+    model_expects_module = any(isinstance(k, str) and k.startswith("module.") for k in model_keys)
+    sd_has_module = _has_module_prefix(sd)
+    if model_expects_module and not sd_has_module:
+        return add_module_prefix(sd)
+    if (not model_expects_module) and sd_has_module:
+        return strip_module_prefix(sd)
+    return OrderedDict(sd)

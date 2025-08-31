@@ -73,4 +73,10 @@ This list guides ongoing work. All contributors (agents and humans) should updat
   - Value: Consistent UX; reduces boilerplate; easier automation.
 - Tests: unit tests for precision helpers, checkpoint round-trip, shard_iterable [TODO]
 
+Updates:
+- DDP checkpoint compatibility work started: loop now saves `model.module.state_dict()` if present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` to simplify resuming across DDP vs non-DDP.
+
 Note: Keep this TODO section synchronized with the codebase state and design decisions.
+
+Updates:
+- DDP checkpoint compatibility implemented: loop saves `model.module.state_dict()` when present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` and README instructions for resuming across DDP/non-DDP.

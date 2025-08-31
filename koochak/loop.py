@@ -167,9 +167,10 @@ def training_loop(
                 if dist_lib.is_initialized():
                     dist_lib.barrier()
                 now = time.time()
+                model_to_save = getattr(model, "module", model)
                 ckpt = {
                     "step": step,
-                    "model": model.state_dict(),
+                    "model": model_to_save.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict() if scheduler is not None else None,
                     "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
@@ -200,9 +201,10 @@ def training_loop(
 
     # If we never saved inside the loop, construct a final ckpt snapshot
     if final_ckpt is None:
+        model_to_save = getattr(model, "module", model)
         final_ckpt = {
             "step": max_steps,
-            "model": model.state_dict(),
+            "model": model_to_save.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),

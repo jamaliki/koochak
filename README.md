@@ -134,6 +134,27 @@ If `csv_path`/`jsonl_path` are omitted, the MNIST example defaults to `<train.ou
 - `koochak.storage.checkpoint.latest(dir)` returns `latest.pt` if present or the most recent step checkpoint.
 - `koochak.storage.checkpoint.best(dir, key)` selects the lowest metric across checkpoints.
 
+DDP compatibility:
+- The loop saves the underlying module weights when the model is wrapped in `DistributedDataParallel` (i.e., uses `model.module.state_dict()`), making checkpoints portable across single-GPU and DDP.
+- When loading manually, use the provided helpers if your loading target differs in wrapping:
+  - `from koochak.storage.checkpoint import match_state_dict_to_model`
+  - `target = getattr(model, 'module', model)`
+  - `target.load_state_dict(match_state_dict_to_model(target, ckpt['model']))`
+
+## Resuming Across DDP/Single GPU
+
+When moving between single-GPU and DDP runs, key prefixes can differ (`module.`). The loop saves the underlying module weights for portability, but if you’re loading manually, use the helpers:
+
+````
+from koochak.storage.checkpoint import load, match_state_dict_to_model
+
+ckpt = load(path)
+target = getattr(model, 'module', model)
+state = match_state_dict_to_model(target, ckpt['model'])
+target.load_state_dict(state)
+````
+
+
 Checkpoint dict fields include: `step`, `model`, `optimizer`, `scheduler` (optional), `scaler` (optional), `config`, RNG state, `wall_time`, and `metrics`.
 
 ## Distributed (DDP)
@@ -189,6 +210,15 @@ optim:
 - See `AGENTS.md` for current implementation notes and a living TODO list. Keep it up to date as you work.
 - Code style: clear, minimal, single-purpose modules. Favor functions and plain dicts over classes.
 
+## Tests
+
+Unit tests live under `tests/`. Use your preferred runner (e.g., `pytest`) from the repo root:
+
+```
+pip install pytest
+pytest -q
+```
+
 ## License
 
-Apache 2.0 (see `LICENSE`).
+MIT (see `LICENSE`).
