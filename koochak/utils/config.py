@@ -116,6 +116,9 @@ def default_schema() -> Dict[str, Any]:
             "resume": None,
             "id": None,
             "log_artifacts": None,
+            # Artifact naming/integration
+            "artifact_name_prefix": None,
+            "artifact_type": None,
         },
     }
 

@@ -176,6 +176,13 @@ wandb:
 
 If `csv_path`/`jsonl_path` are omitted, the MNIST example defaults to `<train.out_dir>/log.csv` and `<train.out_dir>/log.jsonl`.
 
+W&B artifacts:
+- The W&B hook versions checkpoints as a single artifact per run named `<prefix>-<run_id>` (default prefix `model`).
+- Each upload includes aliases: `latest`, `step-<n>`, and when improved metrics are seen, `best` and `best-<metric>`.
+- Config overrides (optional) under `wandb`:
+  - `artifact_name_prefix` (str, default `model`)
+  - `artifact_type` (str, default `model`)
+
 ## Checkpointing
 
 - `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` performs atomic writes, keeps only the last `k` step-checkpoints, and maintains `latest.pt`.

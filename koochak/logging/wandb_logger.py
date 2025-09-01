@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from koochak.core.hooks import rank0_only
+from koochak.storage.naming import make_checkpoint_aliases
 
 
 def make_wandb_hooks(cfg) -> Dict[str, List]:
@@ -25,6 +26,10 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             return getattr(self._c, name)
 
     cfg = _Cfg(cfg)
+
+    # Track best metrics to alias artifacts accordingly
+    best_values: Dict[str, float] = {}
+    best_steps: Dict[str, int] = {}
 
     def on_train_start(ctx: Dict[str, Any]):
         if getattr(cfg, "enabled", True) is False:
@@ -62,13 +67,36 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             except Exception:
                 continue
             run.summary[f"best/{k}"] = min(prev, val)
+            # Track best step for aliasing artifacts later
+            if val <= prev:
+                best_values[k] = val
+                step = int(ctx.get("step", -1))
+                if step >= 0:
+                    best_steps[k] = step
+
+    def _artifact_base_name(run) -> str:
+        prefix = getattr(cfg, "artifact_name_prefix", None) or getattr(cfg, "artifact_name", None) or "model"
+        # Prefer stable run id for versioning within a collection
+        rid = getattr(run, "id", None) or getattr(run, "name", None) or "unknown"
+        return f"{prefix}-{rid}"
 
     def on_checkpoint(path: str, ckpt: Dict[str, Any], ctx: Dict[str, Any]):
         if not getattr(cfg, "log_artifacts", True):
             return
-        art = wandb.Artifact("checkpoint", type="model")
+        run = wandb.run
+        if run is None:
+            return
+        art_type = getattr(cfg, "artifact_type", "model")
+        name = _artifact_base_name(run)
+        art = wandb.Artifact(name=name, type=art_type, metadata={
+            "step": ctx.get("step"),
+        })
         art.add_file(path)
-        wandb.log_artifact(art, aliases=["latest", f"step-{ctx.get('step')}"])
+        # Determine if this step is best for any tracked key
+        step = int(ctx.get("step", -1))
+        best_keys_for_step: List[str] = [k for k, s in best_steps.items() if s == step]
+        aliases = make_checkpoint_aliases(step if step >= 0 else None, include_latest=True, best_keys=best_keys_for_step or None)
+        wandb.log_artifact(art, aliases=aliases)
 
     def on_train_end(ctx: Dict[str, Any]):
         try:

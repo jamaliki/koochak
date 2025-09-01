@@ -35,6 +35,9 @@ data:
 wandb:
   enabled: false
   project: koochak-mnist
+  # Optional artifact settings (used when enabled=true)
+  artifact_name_prefix: mnist-cnn   # artifact base name becomes '<prefix>-<run_id>'
+  artifact_type: model              # W&B artifact type
 
 logging:
   csv_path: ./runs/mnist/log.csv

@@ -168,8 +168,8 @@ Open TODOs (authoritative)
   - `koochak/utils/imports.py` with `import_object` and `call_with` + friendly errors; tests.
 - Refine stdout logging [TODO]
   - Optionally include smoothed stats (e.g., loss EMA/avg) and throughput in periodic prints.
-- Storage niceties [TODO]
-  - Optional artifact naming helpers; tighter integration with W&B artifact versioning.
+- Storage niceties [DONE]
+  - Added storage naming helpers (`koochak/storage/naming.py`) and improved W&B artifact integration: stable per-run artifact name with `latest`, `step-<n>`, and `best` aliases.
 - More tests [TODO]
   - Resume determinism across partial runs (single/DDR), scheduler-on-eval policy, grad-accum equivalence.
 - Documentation [TODO]
