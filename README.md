@@ -1,13 +1,13 @@
 # Koochak
 
-A tiny, hackable, function‑first training loop for PyTorch — built to be easy to read, fork, and extend. It favors explicit functions and small modules over opaque classes or global state.
+A tiny, hackable, function‑first training loop for PyTorch. Built to be easy to read, fork, and extend. It favors explicit functions and small modules over opaque classes or global state.
 
 ## Goals
 
 - Functional core: a single `training_loop(...)` with a clear, compact signature.
 - Hackable: pure-PyTorch, minimal magic, everything explicit via a small config mapping.
 - Iterable-first: data is any iterable (finite or infinite). No hidden epoch semantics.
-- Modern essentials: AMP, grad accumulation, grad clipping, logging, checkpointing, eval hooks, and DDP — each in small swappable modules.
+- Modern essentials: AMP, grad accumulation, grad clipping, logging, checkpointing, eval hooks, and DDP, each in small swappable modules.
 - Low dependency: standard library + PyTorch (OmegaConf for configs; optional: torchvision for examples, tqdm for niceties, wandb for logging).
 
 ## Repository Layout
@@ -51,7 +51,7 @@ A tiny, hackable, function‑first training loop for PyTorch — built to be eas
 - Required: `pip install omegaconf`
 - Optional: `pip install torchvision wandb tqdm`
 
-This repo is intentionally lightweight — it is not a packaged PyPI install. Import modules via the repo root (e.g., `python -m examples.mnist.main`).
+This repo is intentionally lightweight: it is not a packaged PyPI install. Import modules via the repo root (e.g., `python -m examples.mnist.main`).
 
 ## Quickstart (MNIST)
 
