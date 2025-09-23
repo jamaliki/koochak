@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from koochak.core.hooks import rank0_only
-from koochak.storage.naming import make_checkpoint_aliases
+from kaveh.koochak.core.hooks import rank0_only
+from kaveh.koochak.storage.naming import make_checkpoint_aliases
 
 
 def make_wandb_hooks(cfg) -> Dict[str, List]:
@@ -48,13 +48,54 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             resume=(getattr(cfg, "resume", "never") if getattr(cfg, "id", None) else "never"),
             id=getattr(cfg, "id", None),
             settings=settings,
-            config=ctx.get("config_json"),
+            config=ctx.get("config"),
         )
 
+        if getattr(cfg, "watch_model", True):
+            model = ctx.get("model")
+            if model is not None:
+                if getattr(cfg, "watch_unwrap_ddp", True) and hasattr(model, "module"):
+                    try:
+                        model = model.module
+                    except Exception:
+                        pass
+
+                watch_kwargs = {
+                    "log": getattr(cfg, "watch_log", "all") or "all",
+                    "log_freq": int(getattr(cfg, "watch_log_freq", 100) or 100),
+                    "log_graph": bool(getattr(cfg, "watch_log_graph", False)),
+                }
+
+                try:
+                    watch_fn = getattr(wandb, "watch_model", None)
+                    if callable(watch_fn):
+                        watch_fn(model, criterion=None, **watch_kwargs)
+                    else:
+                        wandb.watch(model, **watch_kwargs)
+                except Exception as exc:
+                    msg = (
+                        "wandb.watch/watch_model failed; gradients/parameters won't be tracked. "
+                        f"Error: {exc}"
+                    )
+                    try:
+                        wandb.termwarn(msg)
+                    except Exception:
+                        print(f"[wandb] {msg}")
+
     def on_log(logs: Dict[str, Any], ctx: Dict[str, Any]):
-        wandb.log(logs, step=ctx.get("step"), commit=True)
+        # Avoid W&B "out of order step" warnings when eval logs at same step.
+        # If this step will also emit eval metrics, delay the commit until on_eval_end.
+        step = int(ctx.get("step", 0))
+        cfg = ctx.get("config") or {}
+        try:
+            eval_every = int((cfg or {}).get("eval_every", 0))  # ctx["config"] is a plain dict
+        except Exception:
+            eval_every = 0
+        will_eval = eval_every > 0 and (step % eval_every == 0)
+        wandb.log(logs, step=step, commit=not will_eval)
 
     def on_eval_end(metrics: Dict[str, Any], ctx: Dict[str, Any]):
+        # Commit at eval time so training+eval logs share the same step without warnings
         wandb.log(metrics, step=ctx.get("step"), commit=True)
         run = wandb.run
         if run is None:

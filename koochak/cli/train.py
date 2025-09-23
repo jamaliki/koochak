@@ -5,16 +5,16 @@ import importlib
 import os
 from typing import Any, Dict
 
-from koochak.loop import training_loop
-from koochak.core import hooks as hooks_lib
-from koochak.logging.stdout import make_stdout_hooks
-from koochak.logging.csv import make_csv_hooks
-from koochak.logging.jsonl import make_jsonl_hooks
-from koochak.logging.wandb_logger import make_wandb_hooks
-from koochak.optim.build import build_optimizer, build_scheduler
-from koochak.utils.seed import set_all_seeds
-from koochak.utils import config as config_lib
-from koochak.storage import checkpoint as checkpoint_lib
+from kaveh.koochak.loop import training_loop
+from kaveh.koochak.core import hooks as hooks_lib
+from kaveh.koochak.logging.stdout import make_stdout_hooks
+from kaveh.koochak.logging.csv import make_csv_hooks
+from kaveh.koochak.logging.jsonl import make_jsonl_hooks
+from kaveh.koochak.logging.wandb_logger import make_wandb_hooks
+from kaveh.koochak.optim.build import build_optimizer, build_scheduler
+from kaveh.koochak.utils.seed import set_all_seeds
+from kaveh.koochak.utils import config as config_lib
+from kaveh.koochak.storage import checkpoint as checkpoint_lib
 
 try:
     from omegaconf import OmegaConf  # type: ignore
@@ -117,4 +117,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

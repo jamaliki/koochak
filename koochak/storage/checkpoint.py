@@ -82,7 +82,7 @@ def load(path: str) -> Dict[str, Any]:
     """Load a checkpoint dict from `path` (map to CPU)."""
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    return torch.load(path, map_location="cpu")
+    return torch.load(path, weights_only=False, map_location="cpu")
 
 
 def latest(directory: str) -> Optional[str]:

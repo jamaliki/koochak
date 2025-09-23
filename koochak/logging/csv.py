@@ -4,7 +4,7 @@ import csv
 import os
 from typing import Any, Dict, List
 
-from koochak.core.hooks import rank0_only
+from kaveh.koochak.core.hooks import rank0_only
 
 __all__ = ["CSVLogger", "make_csv_hooks"]
 

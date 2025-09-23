@@ -13,6 +13,13 @@ from torch.optim.lr_scheduler import (
     SequentialLR,
     LambdaLR
 )
+from .muon import MuonWithAuxAdam
+from .muon import SingleDeviceMuonWithAuxAdam  # fallback for single-process training
+try:
+    # Access project nn_utils for param tagging support when available
+    from kaveh.utils.nn_utils import prepare_param_groups_for_muon  # type: ignore
+except Exception:
+    prepare_param_groups_for_muon = None  # type: ignore
 
 __all__ = ["build_optimizer", "build_scheduler"]
 
@@ -26,19 +33,74 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
     cfg = cfg or {}
     name = _lower_name(cfg, "adamw")
     lr = float(cfg.get("lr", 3e-4))
+    muon_lr = cfg.get("muon_lr", None)
+    muon_lr = float(muon_lr) if muon_lr is not None else None
+    adam_lr = cfg.get("adam_lr", None)
+    adam_lr = float(adam_lr) if adam_lr is not None else None
     weight_decay = float(cfg.get("weight_decay", 0.0))
+    # Helper: allow passing a module instead of param iterable
+    def _as_params(p):
+        try:
+            import torch.nn as nn
+            if isinstance(p, nn.Module):
+                return p.parameters()
+        except Exception:
+            pass
+        return p
     if name == "adamw":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
         eps = float(cfg.get("eps", 1e-8))
-        return AdamW(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        return AdamW(_as_params(params), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
     if name == "adam":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
         eps = float(cfg.get("eps", 1e-8))
-        return Adam(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        return Adam(_as_params(params), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
     if name == "sgd":
         momentum = float(cfg.get("momentum", 0.9))
         nesterov = bool(cfg.get("nesterov", False))
-        return SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
+        return SGD(_as_params(params), lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
+    if name == "muon":
+        # Prefer to build param groups using module + tags when available
+        try:
+            import torch.nn as nn
+            if isinstance(params, nn.Module) and prepare_param_groups_for_muon is not None:
+                groups = prepare_param_groups_for_muon(params, lr=lr, weight_decay=weight_decay)  # type: ignore[misc]
+                # Optional per-group learning rates from config
+                if muon_lr is not None or adam_lr is not None:
+                    for g in groups:
+                        if g.get("use_muon", False) and (muon_lr is not None):
+                            g["lr"] = muon_lr
+                        if not g.get("use_muon", False) and (adam_lr is not None):
+                            g["lr"] = adam_lr
+                # Use single-process variant unless torch.distributed is initialized.
+                try:
+                    import torch.distributed as dist
+                    if dist.is_available() and dist.is_initialized():
+                        return MuonWithAuxAdam(groups)
+                except Exception:
+                    pass
+                return SingleDeviceMuonWithAuxAdam(groups)
+        except Exception:
+            pass
+        # Fallback: if already a param group list, pass through; else raise for clarity
+        if isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
+            # Optional per-group learning rates from config
+            if muon_lr is not None or adam_lr is not None:
+                for g in params:  # type: ignore[assignment]
+                    if not isinstance(g, dict):
+                        continue
+                    if g.get("use_muon", False) and (muon_lr is not None):
+                        g["lr"] = muon_lr
+                    if not g.get("use_muon", False) and (adam_lr is not None):
+                        g["lr"] = adam_lr
+            try:
+                import torch.distributed as dist
+                if dist.is_available() and dist.is_initialized():
+                    return MuonWithAuxAdam(params)  # type: ignore[arg-type]
+            except Exception:
+                pass
+            return SingleDeviceMuonWithAuxAdam(params)  # type: ignore[arg-type]
+        raise ValueError("For optimizer=name: 'Muon', please pass the model module (not .parameters()), or a list of param_groups with 'use_muon' flags.")
     raise ValueError(f"Unsupported optimizer name: {name}")
 
 

@@ -38,7 +38,7 @@ def best(directory: str, key: str = "val_loss", pattern: str = r"step(\d+)\.pt$"
     best_val: float = float("inf")
     for p in files:
         try:
-            ckpt = torch.load(p, map_location="cpu")
+            ckpt = torch.load(p, weights_only=False, map_location="cpu")
         except Exception:
             continue
         metrics = ckpt.get("metrics") or {}

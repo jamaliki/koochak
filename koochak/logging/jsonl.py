@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any, Dict, List
 
-from koochak.core.hooks import rank0_only
+from kaveh.koochak.core.hooks import rank0_only
 
 __all__ = ["JSONLLogger", "make_jsonl_hooks"]
 
@@ -34,4 +34,3 @@ def make_jsonl_hooks(path: str) -> Dict[str, List]:
         "on_log": [rank0_only(on_log)],
         "on_eval_end": [rank0_only(on_eval_end)],
     }
-

@@ -52,3 +52,7 @@ def world_size() -> int:
 
 def rank0() -> bool:
     return rank() == 0
+
+def print0(string: str):
+    if rank0():
+        print(string)
