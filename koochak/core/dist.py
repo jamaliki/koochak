@@ -15,7 +15,11 @@ __all__ = [
 
 
 def is_initialized() -> bool:
-    return torch.distributed.is_available() and torch.distributed.is_initialized()
+    try:
+        _dist_available = torch.distributed.is_available() and torch.distributed.is_initialized()
+    except ImportError:
+        _dist_available = False
+    return _dist_available
 
 
 def init_process_group(backend: str = "nccl", init_method: Optional[str] = None, timeout: Optional[float] = None) -> None:

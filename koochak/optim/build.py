@@ -13,13 +13,14 @@ from torch.optim.lr_scheduler import (
     SequentialLR,
     LambdaLR
 )
-from .muon import MuonWithAuxAdam
-from .muon import SingleDeviceMuonWithAuxAdam  # fallback for single-process training
-try:
-    # Access project nn_utils for param tagging support when available
-    from kaveh.utils.nn_utils import prepare_param_groups_for_muon  # type: ignore
-except Exception:
-    prepare_param_groups_for_muon = None  # type: ignore
+from .muon import (
+    MuonWithAuxAdam, 
+    SingleDeviceMuonWithAuxAdam, 
+    NorMuonWithAuxAdam, 
+    SingleDeviceNorMuonWithAuxAdam
+)
+from kaveh.utils.nn_utils import prepare_param_groups_for_muon  # type: ignore
+
 
 __all__ = ["build_optimizer", "build_scheduler"]
 
@@ -59,7 +60,13 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
         momentum = float(cfg.get("momentum", 0.9))
         nesterov = bool(cfg.get("nesterov", False))
         return SGD(_as_params(params), lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
-    if name == "muon":
+    if name in ["muon", "normuon"]:
+        if name == "muon":
+            single_device_class = SingleDeviceMuonWithAuxAdam
+            dist_class = MuonWithAuxAdam
+        else:
+            single_device_class = SingleDeviceNorMuonWithAuxAdam
+            dist_class = NorMuonWithAuxAdam
         # Prefer to build param groups using module + tags when available
         try:
             import torch.nn as nn
@@ -76,10 +83,10 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
                 try:
                     import torch.distributed as dist
                     if dist.is_available() and dist.is_initialized():
-                        return MuonWithAuxAdam(groups)
+                        return dist_class(groups)
                 except Exception:
                     pass
-                return SingleDeviceMuonWithAuxAdam(groups)
+                return single_device_class(groups)
         except Exception:
             pass
         # Fallback: if already a param group list, pass through; else raise for clarity
@@ -96,10 +103,10 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
             try:
                 import torch.distributed as dist
                 if dist.is_available() and dist.is_initialized():
-                    return MuonWithAuxAdam(params)  # type: ignore[arg-type]
+                    return dist_class(params)  # type: ignore[arg-type]
             except Exception:
                 pass
-            return SingleDeviceMuonWithAuxAdam(params)  # type: ignore[arg-type]
+            return single_device_class(params)  # type: ignore[arg-type]
         raise ValueError("For optimizer=name: 'Muon', please pass the model module (not .parameters()), or a list of param_groups with 'use_muon' flags.")
     raise ValueError(f"Unsupported optimizer name: {name}")
 

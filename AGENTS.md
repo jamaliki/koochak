@@ -5,8 +5,8 @@ This doc tracks incremental design decisions and changes from the initial design
 ## Implemented so far
 
 - Core loop
-  - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, eval hooks, and checkpointing. Loop returns a resume-ready checkpoint dict.
-  - Loop uses small, focused helpers for precision, config, device, RNG state, sharding, and hooks dispatch.
+  - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. Loop returns a resume-ready checkpoint dict.
+  - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner plus warnings when gradients become non-finite.
 
 - Hooks
   - `koochak/core/hooks.py` provides `merge`, `add`, and `emit` utilities.
@@ -26,6 +26,7 @@ This doc tracks incremental design decisions and changes from the initial design
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
   - `koochak/logging/wandb_logger.py` – lazy-import W&B hooks, logs metrics and artifacts, tracks `best/*` summaries.
+  - CSV/JSONL/W&B/Stdout loggers all record the resolved config via `on_train_start` so runs capture their inputs alongside metrics.
 
 - Optim
   - `koochak/optim/build.py` – tiny builders for optimizers (AdamW/Adam/SGD) and schedulers (cosine, step, plateau). Added cosine-with-warmup (`cosine_warmup`).
@@ -35,16 +36,16 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Deviations or clarifications
 
-- Package layout: We keep training loop under `code/loop.py` for clarity during early development, with helpers under `koochak/*` per design. We can relocate `code/loop.py` to `koochak/core/loop.py` later without behavioral changes.
 - Hook gating: The loop gates some events by rank 0; we also add rank-0 gating utilities and apply them inside built-in hooks so user code can safely emit hooks from any rank if desired.
-- Atomic/fs/pruning helpers currently live in `storage/checkpoint.py` for simplicity; will be split into `storage/atomic.py`, `storage/pruning.py`, and `storage/fs.py` as a follow-up.
+- Storage helpers now live in `storage.atomic`, `storage.pruning`, `storage.fs`, and `storage.naming`; checkpoint orchestrates them for atomic writes and pruning.
+- The loop auto-initializes a process group (when unset) and wraps models in DDP when `config.ddp=True`; set `config.find_unused_parameters` to forward the DDP flag.
 
 ## Next up
 
-- Add rank-0 gating helpers and update built-in hooks to use them.
-- Add CSV and JSONL loggers with simple hook factories.
-- Add `utils/stats.py` (SmoothedMeter, Throughput, EMA).
-- Optional: stats in stdout formatting, and JSON Lines schema.
+- Refine stdout formatting to surface optional smoothed stats and throughput.
+- Extract remaining storage helpers (artifact naming, etc.) if further splitting proves useful.
+- Ship the thin `cli/train.py` wrapper once schema/entry helpers stabilize.
+- Broaden unit test coverage (resume determinism, scheduler-on-eval policy, grad-accum equivalence).
 
 ## TODO (keep this list up-to-date)
 
@@ -59,12 +60,8 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - Refine stdout formatting to optionally include smoothed stats [TODO]
 - Extract remaining storage helpers (e.g., artifact naming) if needed [TODO]
 - Add `data/take.py` helper or extend iterable utils with `take(n)` [DONE]
-- DDP checkpoint compatibility [TODO]
-  - Problem: When the model is wrapped in `DistributedDataParallel`, `model.state_dict()` includes `module.` prefixes, which complicates resuming across DDP vs single-GPU. Our loop currently saves `model.state_dict()` directly.
-  - Plan:
-    1) Save the underlying module weights: if `hasattr(model, "module")`, save `model.module.state_dict()`; otherwise `model.state_dict()`.
-    2) Provide small load helpers to add/remove `module.` prefixes as needed when users load a checkpoint.
-    3) Document best practices in README (resuming with/without DDP).
+- DDP checkpoint compatibility [DONE]
+  - Loop saves underlying module weights when present, gathers per-rank RNG, and `checkpoint.match_state_dict_to_model` adapts prefixes for resume across DDP/non-DDP. README documents the flow.
 - DDP convenience: example torchrun entry that calls `dist.init_process_group` [DONE]
 - Optional: cli/train.py thin wrapper around `training_loop` [TODO]
   - Purpose: Generic CLI to run training from YAML without custom scripts.
@@ -72,9 +69,6 @@ This list guides ongoing work. All contributors (agents and humans) should updat
   - Behavior: Imports callables, builds model/optim/scheduler/datasets, attaches hooks (stdout/CSV/JSONL/W&B), handles resume via latest checkpoint, supports DDP (auto `init_process_group` + sharding), then calls `training_loop`.
   - Value: Consistent UX; reduces boilerplate; easier automation.
 - Tests: unit tests for precision helpers, checkpoint round-trip, shard_iterable [TODO]
-
-Updates:
-- DDP checkpoint compatibility work started: loop now saves `model.module.state_dict()` if present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` to simplify resuming across DDP vs non-DDP.
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
 
@@ -98,8 +92,8 @@ New TODOs (Config validation and UX)
   - Create a small utility (e.g., `config.apply_hybrid_validation(cfg_all, schema, train_cfg)`) that runs schema validation + usage-tracking and handles warn/raise behavior based on `train.strict_config` and `train.config_warn_unknown`.
   - Use this helper in all examples and later in `cli/train.py` to avoid repetition.
 
-- Document strict_config/config_warn_unknown in README [TODO]
-  - Add a section under Configuration explaining these toggles and showing example YAML snippets.
+- Document strict_config/config_warn_unknown in README [DONE]
+  - Configuration section now covers strict mode + warning toggles with YAML examples.
 
 - Pre-run config summary [DONE]
   - Print a rank-0 summary at startup showing sections present, recognized keys, and unknown keys (if any), with clear guidance on how to enable strict mode.

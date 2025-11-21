@@ -69,6 +69,7 @@ def default_schema() -> Dict[str, Any]:
             # Optional toggles for config behavior
             "strict_config": None,
             "config_warn_unknown": None,
+            "autocast_in_step_fn": None,
         },
         "data": {
             "data_dir": None,

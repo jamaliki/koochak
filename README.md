@@ -140,7 +140,9 @@ training_loop(
 
 - `step_fn(model, batch, ctx)` returns `{"loss": Tensor, ...}`; any additional scalar values are logged.
 - `ctx` contains `device`, `rank/world_size`, `autocast`, `scaler`, and `config_json`.
-- The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `config.scheduler_step`), evaluation hooks, and checkpointing.
+- The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `config.scheduler_step`), evaluation hooks, automatic DDP bootstrap/wrapping when `train.ddp` is true, and deterministic checkpointing.
+- Rank-0 prints a compact parameter count banner at startup to highlight model size changes.
+- Non-finite gradients are zeroed and skipped with a rank-0 warning instead of crashing the run.
 - Returns a plain checkpoint dict sufficient to resume.
 
 Minimal step_fn example:
@@ -157,11 +159,13 @@ def step_fn(model, batch, ctx):
 ## Hooks and Logging
 
 - Create hooks by event name: `{"on_log": [fn], "on_eval_end": [fn]}`.
+- Hook events emitted by the loop include `on_train_start`, `on_step_end`, `on_log`, `on_eval_end`, `on_checkpoint`, `on_train_end`, and `on_exception`.
 - Built-in hooks:
   - `koochak.logging.stdout.make_stdout_hooks()` – TSV prints; rank-0 only.
   - `koochak.logging.csv.make_csv_hooks(path)` – append metrics to CSV; rank-0 only.
   - `koochak.logging.jsonl.make_jsonl_hooks(path)` – one JSON per line; rank-0 only.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.
+- Each built-in logger records the resolved config once at `on_train_start` (stdout prints JSON, CSV/JSONL write a config row, W&B receives it via `wandb.init(config=...)`).
 - Compose hooks with `koochak.core.hooks.merge(a, b)`. Gate any custom hook via `koochak.core.hooks.rank0_only(fn)` to ensure single-emission under DDP.
 
 YAML-driven logging (example):
@@ -182,6 +186,13 @@ W&B artifacts:
 - Config overrides (optional) under `wandb`:
   - `artifact_name_prefix` (str, default `model`)
   - `artifact_type` (str, default `model`)
+
+## EMA Support
+
+- Enable EMA by setting `train.ema.enabled: true` (or providing `decay`/`profile` keys). Nested config lives under `train.ema.*`; legacy flat keys (`ema_decay`, `ema_eval`, etc.) are still honored.
+- Supported options: `decay`, `decay_init`, `warmup_steps`, `schedule` (`constant`, `linear`, `cosine`), `profile` (`constant`, `power`), `gamma`/`srel` for power-law schedules, `offload_to_cpu`, and `eval_with_ema` to run eval with shadow weights.
+- Dual EMA tracking is available via `train.ema.dual.enabled` plus `gamma1/gamma2` or `srel1/srel2`; both shadows are saved and restored from checkpoints.
+- EMA state is serialized alongside the model (and matches state-dict prefixes automatically) so resumes and manual loads stay seamless.
 
 ## Checkpointing
 
@@ -215,16 +226,9 @@ Checkpoint dict fields include: `step`, `model`, `optimizer`, `scheduler` (optio
 
 ## Distributed (DDP)
 
-- Initialize distributed (outside the loop):
-
-```
-from koochak.core import dist as dist_lib
-if need_ddp:
-    dist_lib.init_process_group(backend="nccl")   # or "gloo" on CPU
-```
-
-- In your YAML, set `train.ddp: true` to shard the iterable by rank/world via `koochak.data.sharding.shard_iterable`.
-- Only rank 0 writes checkpoints and logs via built-in hooks; barriers enclose checkpoint steps to align rank progress.
+- When `train.ddp: true`, the loop auto-initializes the process group (if needed), pins the model to the local device, and wraps it in `torch.nn.parallel.DistributedDataParallel`. Pass `train.find_unused_parameters: true` if you need the corresponding DDP flag.
+- Iterables are sharded per-rank via `koochak.data.sharding.shard_iterable`; only rank 0 writes checkpoints or logs through built-in hooks. Barriers around checkpointing keep ranks in sync.
+- If you prefer manual control, initialize ahead of time via `koochak.core.dist.init_process_group(...)`; the loop will detect the existing group and skip auto-init.
 - Launch with torchrun as usual:
 
 `torchrun --nproc_per_node=8 -m examples.mnist.ddp_main --config examples/mnist/config.yaml`

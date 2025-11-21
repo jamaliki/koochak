@@ -1,8 +1,21 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import re, hashlib
+from typing import Any, Dict, List
 from kaveh.koochak.core.hooks import rank0_only
 from kaveh.koochak.storage.naming import make_checkpoint_aliases
+
+
+def _run_id_from_name(name: str) -> str:
+    """
+    Deterministically map a human run name -> a stable W&B run id.
+    Returns a lowercase hex string (SHA1), which is W&B-safe.
+    """
+    if not name or not isinstance(name, str):
+        raise RuntimeError("W&B resume-by-name requires cfg.name to be a non-empty string.")
+    # Normalize the name to avoid accidental changes (spaces, case, punctuation)
+    canonical = re.sub(r"[^A-Za-z0-9-_]+", "-", name.strip().lower())
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()  # 40 chars
 
 
 def make_wandb_hooks(cfg) -> Dict[str, List]:
@@ -35,20 +48,25 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         if getattr(cfg, "enabled", True) is False:
             return
         settings = wandb.Settings(start_method="thread")
+
+        run_name = getattr(cfg, "name", None)
+        run_id = _run_id_from_name(run_name)
+
         wandb.init(
             project=getattr(cfg, "project", "koochak"),
             entity=getattr(cfg, "entity", None),
-            name=getattr(cfg, "name", None),
+            name=run_name,                                
             group=getattr(cfg, "group", None),
             job_type=getattr(cfg, "job_type", None),
             tags=getattr(cfg, "tags", None),
             notes=getattr(cfg, "notes", None),
             mode=getattr(cfg, "mode", "online"),
             dir=getattr(cfg, "dir", None),
-            resume=(getattr(cfg, "resume", "never") if getattr(cfg, "id", None) else "never"),
-            id=getattr(cfg, "id", None),
+            id=run_id,                                    
+            resume="allow",                               
             settings=settings,
             config=ctx.get("config"),
+            allow_val_change=True,                        
         )
 
         if getattr(cfg, "watch_model", True):
