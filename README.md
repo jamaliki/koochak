@@ -14,6 +14,7 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
 
 - `koochak/`
   - `loop.py` – the core `training_loop` implementation (imports tiny helpers; loop remains minimal).
+  - `config.py` – OmegaConf + dataclass config loader, defaults, and summary helpers.
   - `core/`
     - `hooks.py` – tiny hook system: `merge/add/emit` and `rank0_only` wrapper.
     - `precision.py` – `autocast_context(mode, device)` and `Scaler(mode)`.
@@ -34,14 +35,15 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
   - `utils/`
-    - `config.py` – `get(cfg, key, default)` and `as_dict(cfg)` helpers.
+    - `config.py` – thin compatibility wrappers around `koochak.config` (`get/as_dict`).
     - `device.py` – `get_device(cfg)` and `get_lr(optimizer)`.
     - `seed.py` – `set_all_seeds(seed)`, `make_worker_init_fn(seed)`, `get_rng_state()`.
     - `stats.py` – `SmoothedMeter`, `Throughput`, `EMA`.
     - `timeit.py` – `Timer` and `time_block(...)` context utilities.
 - `examples/mnist/`
-  - `config.yaml` – YAML-driven config split into `train`, `data`, `optim`, `wandb` sections.
+  - `config.yaml` – YAML-driven config split into `train`, `data`, `optim`, `logging`, `wandb` sections.
   - `main.py` – minimal end-to-end example (YAML-only CLI), stdout hooks by default, optional W&B.
+- `examples/config_template.yaml` – canonical template with all supported keys.
 - `AGENTS.md` – running design notes + TODOs for contributors.
 
 ## Installation
@@ -62,6 +64,7 @@ This repo is intentionally lightweight: it is not a packaged PyPI install. Impor
 - `train`: loop behavior (max_steps, log/eval/ckpt cadence, grad_accum, amp, seed, device, out_dir, keep_last_k, ddp flag).
 - `data`: `data_dir`, `batch_size`, `num_workers`.
 - `optim`: optimizer + scheduler (e.g., AdamW + cosine_warmup).
+- `logging`: `csv_path`, `jsonl_path`.
 - `wandb`: set `enabled: true` to turn on W&B logging.
 
 2) Run:
@@ -73,10 +76,13 @@ This will download MNIST (via torchvision), print TSV logs to stdout, periodical
 
 ## Configuration
 
+Configs are OmegaConf-first with structured dataclass defaults. Defaults fill missing keys, user YAML overrides defaults, and CLI overrides (if any) apply last.
+Use OmegaConf interpolation for cross-section reuse (e.g., `logging.csv_path: ${train.out_dir}/log.csv`).
+
 By default, Koochak enforces strict configuration to minimize surprises.
 
-- Strict mode: unknown YAML keys cause an immediate error before training; unused `train.*` keys cause an error after training. To relax, set `train.strict_config: false`.
-- Warnings: if strict is disabled, unknown/unused keys print rank-0 warnings when `train.config_warn_unknown: true` (default true).
+- Strict mode: unknown YAML keys cause an immediate error before training. To relax, set `train.strict_config: false`.
+- Warnings: if strict is disabled, unknown keys print rank-0 warnings when `train.config_warn_unknown: true` (default true).
 
 Example YAML toggles:
 
@@ -88,6 +94,10 @@ train:
 
 At startup, a brief config summary prints sections present, unknown keys (if any), and strict status.
 
+Canonical template: `examples/config_template.yaml`.
+
+In code, use `koochak.config.load_config(path)` and `koochak.config.get_section(cfg, "train")` (or similar) to access sections.
+
 DDP sharding is explicit and opt-in:
 
 - `train.shard_dataset: true` with `train.shard_dataset_mode: iterable|map` to shard the training dataset.
@@ -95,6 +105,15 @@ DDP sharding is explicit and opt-in:
 - `train.warn_unsharded: false` to disable rank-0 warnings when DDP runs without Koochak sharding.
 
 You can also shard manually in custom code via `koochak.data.sharding.shard_dataset(...)`.
+
+## Config Map
+
+- `train` – consumed by `koochak/loop.py` and utilities (device, DDP/sharding, logging cadence, checkpoints, EMA, AMP).
+- `data` – consumed by examples or your dataset builders; use OmegaConf interpolation for shared values.
+- `optim` – consumed by `koochak/optim/build.py` for optimizer + scheduler construction.
+- `logging` – consumed by CLI/examples to configure stdout/CSV/JSONL hooks.
+- `wandb` – consumed by `koochak/logging/wandb_logger.py`.
+- `entry` – consumed by `koochak/cli/train.py` to import user callables.
 
 
 
@@ -123,7 +142,7 @@ logging: { csv_path: ..., jsonl_path: ... }
 wandb: { enabled: false, project: ... }
 ```
 
-The CLI applies the same strict config validation and pre-run summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop`.
+The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop` with `train_cfg`.
 
 
 ## Core API
@@ -138,7 +157,8 @@ training_loop(
   step_fn: Callable,                 # returns {"loss": Tensor, ...}
   optimizer: Optimizer,
   scheduler: Optional[_LRScheduler] = None,
-  config: Mapping[str, Any],
+  train_cfg: Mapping[str, Any],
+  config_json: Optional[Mapping[str, Any]] = None,
   checkpoint_dict: Optional[Dict[str, Any]] = None,
   eval_dataset: Optional[Iterable] = None,
   eval_fn: Optional[Callable] = None,
@@ -147,8 +167,8 @@ training_loop(
 ```
 
 - `step_fn(model, batch, ctx)` returns `{"loss": Tensor, ...}`; any additional scalar values are logged.
-- `ctx` contains `device`, `rank/world_size`, `autocast`, `scaler`, and `config_json`.
-- The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `config.scheduler_step`), evaluation hooks, automatic DDP bootstrap/wrapping when `train.ddp` is true, and deterministic checkpointing.
+- `ctx` contains `device`, `rank/world_size`, `autocast`, `scaler`, `config_json`, and `train_cfg`.
+- The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `train.scheduler_step`), evaluation hooks, automatic DDP bootstrap/wrapping when `train.ddp` is true, and deterministic checkpointing.
 - Rank-0 prints a compact parameter count banner at startup to highlight model size changes.
 - Non-finite gradients are zeroed and skipped with a rank-0 warning instead of crashing the run.
 - Returns a plain checkpoint dict sufficient to resume.
@@ -197,7 +217,7 @@ W&B artifacts:
 
 ## EMA Support
 
-- Enable EMA by setting `train.ema.enabled: true` (or providing `decay`/`profile` keys). Nested config lives under `train.ema.*`; legacy flat keys (`ema_decay`, `ema_eval`, etc.) are still honored.
+- Enable EMA by setting `train.ema.enabled: true` (or by providing `decay`/`profile` keys while `enabled` is unset). Nested config lives under `train.ema.*`; legacy flat keys (`ema_decay`, `ema_eval`, etc.) are still honored.
 - Supported options: `decay`, `decay_init`, `warmup_steps`, `schedule` (`constant`, `linear`, `cosine`), `profile` (`constant`, `power`), `gamma`/`srel` for power-law schedules, `offload_to_cpu`, and `eval_with_ema` to run eval with shadow weights.
 - Dual EMA tracking is available via `train.ema.dual.enabled` plus `gamma1/gamma2` or `srel1/srel2`; both shadows are saved and restored from checkpoints.
 - EMA state is serialized alongside the model (and matches state-dict prefixes automatically) so resumes and manual loads stay seamless.

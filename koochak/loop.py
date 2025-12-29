@@ -54,24 +54,37 @@ def training_loop(
     step_fn: StepFn,
     optimizer: Optimizer,
     scheduler: Optional[_LRScheduler] = None,
-    config: Mapping[str, Any] | Any,
+    train_cfg: Mapping[str, Any] | Any,
+    config_json: Optional[Mapping[str, Any]] = None,
     checkpoint_dict: Optional[Dict[str, Any]] = None,
     eval_dataset: Optional[Iterable] = None,
     eval_fn: Optional[EvalFn] = None,
     hooks: Optional[Dict[str, list[Callable]]] = None,
 ) -> Dict[str, Any]:
-    """Runs training until `config.max_steps` or dataset exhaustion.
+    """Runs training until `train.max_steps` or dataset exhaustion.
 
     Returns the final checkpoint dict.
     """
 
-    train_config = config_lib.get(config, "train")
-    if train_config is None and isinstance(config, Mapping):
-        train_config = config
-    train_config = train_config or {}
-    ddp_enabled = bool(config_lib.get(train_config, "ddp", config_lib.get(config, "ddp", False)))
+    def _looks_like_root(cfg: Mapping[str, Any] | Any) -> bool:
+        if isinstance(cfg, Mapping):
+            if "train" not in cfg:
+                return False
+            return any(k in cfg for k in ("data", "optim", "logging", "wandb", "entry"))
+        return all(hasattr(cfg, k) for k in ("train", "data", "optim", "logging", "wandb", "entry"))
 
-    device_cfg = train_config if isinstance(train_config, Mapping) else config
+    train_config = train_cfg
+    if _looks_like_root(train_config):
+        warnings.warn(
+            "training_loop now expects train_cfg only; passing the full root config is deprecated.",
+            DeprecationWarning,
+        )
+        config_json = config_json or train_config
+        train_config = config_lib.get(train_config, "train", {})
+    train_config = train_config or {}
+    ddp_enabled = bool(config_lib.get(train_config, "ddp", False))
+
+    device_cfg = train_config
     device = get_device(device_cfg)
     device = ensure_process_device(device)
     model.to(device)
@@ -97,14 +110,24 @@ def training_loop(
 
     scaler = make_scaler(amp_mode)
 
-    # ----- EMA configuration (nested under 'ema' or flat keys) -----
+    # ----- EMA configuration (nested under train.ema or legacy flat keys) -----
     def _ema_get(key: str, default=None):
         try:
-            ema_cfg = config.get("ema", {}) if isinstance(config, dict) else {}
+            ema_cfg = config_lib.get(train_config, "ema", {})
         except Exception:
             ema_cfg = {}
-        if isinstance(ema_cfg, dict) and key in ema_cfg:
-            return ema_cfg.get(key, default)
+        if isinstance(ema_cfg, Mapping):
+            if key in ema_cfg:
+                val = config_lib.get(ema_cfg, key, default)
+                if val is not None:
+                    return val
+        else:
+            try:
+                val = getattr(ema_cfg, key)
+            except Exception:
+                val = None
+            if val is not None:
+                return val
         # flat fallback
         flat = {
             "enabled": "ema_enabled",
@@ -112,15 +135,28 @@ def training_loop(
             "decay_init": "ema_decay_init",
             "warmup_steps": "ema_warmup_steps",
             "schedule": "ema_schedule",
+            "profile": "ema_profile",
+            "gamma": "ema_gamma",
+            "srel": "ema_srel",
             "eval_with_ema": "ema_eval",
         }
         fkey = flat.get(key)
         try:
-            return (config.get(fkey, default) if (fkey is not None and isinstance(config, dict)) else default)
+            if fkey is None:
+                return default
+            val = config_lib.get(train_config, fkey, default)
+            return default if val is None else val
         except Exception:
             return default
 
-    ema_enabled = bool(_ema_get("enabled", _ema_get("decay", None) is not None or _ema_get("profile", None) is not None))
+    ema_flag = _ema_get("enabled", None)
+    if ema_flag is None:
+        ema_profile_val = _ema_get("profile", None)
+        ema_enabled = (_ema_get("decay", None) is not None) or (
+            ema_profile_val is not None and str(ema_profile_val).lower() not in ("", "none", "constant")
+        )
+    else:
+        ema_enabled = bool(ema_flag)
     ema_profile = str(_ema_get("profile", "constant")).lower() if ema_enabled else "constant"
     ema_target_decay = float(_ema_get("decay", 0.999)) if ema_enabled else None
     ema_decay_init = float(_ema_get("decay_init", min(0.9, ema_target_decay or 0.999))) if ema_enabled else None
@@ -131,7 +167,7 @@ def training_loop(
     ema_eval = bool(_ema_get("eval_with_ema", False)) if ema_enabled else False
 
     # Build context passed to step/eval and hooks
-    cfg_json = config_lib.as_dict(config)
+    cfg_json = config_lib.as_dict(config_json if config_json is not None else train_config)
 
     def _autocast_factory():
         return autocast_context(amp_mode, device)
@@ -143,6 +179,8 @@ def training_loop(
         "autocast": _autocast_factory,
         "scaler": scaler,
         "config": cfg_json,
+        "config_json": cfg_json,
+        "train_cfg": train_config,
         "model": model,
     }
 

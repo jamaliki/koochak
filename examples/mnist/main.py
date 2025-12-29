@@ -25,12 +25,7 @@ from koochak.logging.wandb_logger import make_wandb_hooks
 from koochak.data.iterable import cycle
 from koochak.optim.build import build_optimizer, build_scheduler
 from koochak.utils.seed import set_all_seeds, make_worker_init_fn
-from koochak.utils import config as config_lib
-
-try:
-    from omegaconf import OmegaConf  # type: ignore
-except Exception as _e:
-    OmegaConf = None  # will error at runtime with a helpful message
+from koochak import config as config_lib
 
 
 class SmallCNN(nn.Module):
@@ -117,63 +112,47 @@ def main():
     parser.add_argument("--config", default=os.path.join(os.path.dirname(__file__), "config.yaml"), help="YAML config path")
     args = parser.parse_args()
 
-    if OmegaConf is None:
-        raise RuntimeError("omegaconf is required for the MNIST example. Please `pip install omegaconf`. ")
+    cfg_all = config_lib.load_config(args.config)
 
-    cfg_all: Dict[str, Any] = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)  # type: ignore
-
-    cfg_train = cfg_all.get("train", {})
-    cfg_data = dict(cfg_all.get("data", {}))
-    cfg_optim = dict(cfg_all.get("optim", {}))
-    cfg_wandb = cfg_all.get("wandb")
-    cfg_logging = dict(cfg_all.get("logging", {}))
+    cfg_train = config_lib.get_section(cfg_all, "train")
+    cfg_data = config_lib.get_section(cfg_all, "data")
+    cfg_optim = config_lib.get_section(cfg_all, "optim")
+    cfg_wandb = config_lib.get_section(cfg_all, "wandb")
+    cfg_logging = config_lib.get_section(cfg_all, "logging")
 
     # Pre-run summary + schema validation (strict by default)
-    config_lib.apply_hybrid_validation_pre(cfg_all, cfg_train, schema=config_lib.default_schema())
+    config_lib.summarize(
+        cfg_all,
+        strict=bool(getattr(cfg_train, "strict_config", True)),
+        warn_unknown=bool(getattr(cfg_train, "config_warn_unknown", True)),
+    )
 
-    # Defaults for train
-    cfg_train.setdefault("max_steps", 1000)
-    cfg_train.setdefault("log_every", 50)
-    cfg_train.setdefault("eval_every", 200)
-    cfg_train.setdefault("ckpt_every", 200)
-    cfg_train.setdefault("amp", "fp32")
-    cfg_train.setdefault("seed", 42)
-    cfg_train.setdefault("device", "cuda")
-    cfg_train.setdefault("out_dir", "./runs/mnist")
-    cfg_train.setdefault("keep_last_k", 3)
-
-    # Defaults for data and optim
-    cfg_optim.setdefault("lr", 3e-4)
-    cfg_data.setdefault("data_dir", "./data")
-    cfg_data.setdefault("batch_size", 128)
-    cfg_data.setdefault("num_workers", 4)
-
-    set_all_seeds(int(cfg_train["seed"]))
+    set_all_seeds(int(cfg_train.seed))
 
     model = SmallCNN()
-    opt = build_optimizer(model.parameters(), cfg_optim.get("optimizer"))
-    sched = build_scheduler(opt, cfg_optim.get("scheduler"), cfg_train)
+    opt = build_optimizer(model.parameters(), cfg_optim.optimizer)
+    sched = build_scheduler(opt, cfg_optim.scheduler, cfg_train)
 
     train_loader, test_loader = build_dataloaders(
-        str(cfg_data["data_dir"]), int(cfg_data["batch_size"]), int(cfg_data["num_workers"]), int(cfg_train["seed"]))
+        str(cfg_data.data_dir), int(cfg_data.batch_size), int(cfg_data.num_workers), int(cfg_train.seed))
 
     # Dataset can be finite; we cycle it to satisfy max_steps
     train_iter = cycle(train_loader)
 
     hooks = hooks_lib.merge({}, make_stdout_hooks())
     # CSV/JSONL logging
-    csv_path = cfg_logging.get("csv_path") or os.path.join(str(cfg_train["out_dir"]), "log.csv")
-    jsonl_path = cfg_logging.get("jsonl_path") or os.path.join(str(cfg_train["out_dir"]), "log.jsonl")
+    csv_path = cfg_logging.csv_path or os.path.join(str(cfg_train.out_dir), "log.csv")
+    jsonl_path = cfg_logging.jsonl_path or os.path.join(str(cfg_train.out_dir), "log.jsonl")
     if csv_path:
         hooks = hooks_lib.merge(hooks, make_csv_hooks(csv_path))
     if jsonl_path:
         hooks = hooks_lib.merge(hooks, make_jsonl_hooks(jsonl_path))
     wb = cfg_wandb
-    if wb and isinstance(wb, dict) and wb.get("enabled", False):
+    if wb and getattr(wb, "enabled", False):
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(wb))
 
     # Resume if available
-    latest = checkpoint_lib.latest(str(cfg_train["out_dir"]))
+    latest = checkpoint_lib.latest(str(cfg_train.out_dir))
     ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
 
     result = training_loop(
@@ -182,15 +161,13 @@ def main():
         step_fn=step_fn,
         optimizer=opt,
         scheduler=sched,
-        config=cfg_all,
+        train_cfg=cfg_train,
+        config_json=config_lib.as_dict(cfg_all),
         checkpoint_dict=ckpt,
         eval_dataset=test_loader,
         eval_fn=eval_fn,
         hooks=hooks,
     )
-
-    # Post-run: report/raise on unused train.* keys
-    config_lib.apply_hybrid_validation_post_train(cfg_train)
 
 
 if __name__ == "__main__":

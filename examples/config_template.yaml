@@ -1,0 +1,112 @@
+# Koochak config template (OmegaConf + structured defaults)
+
+entry:
+  model: your_pkg.model:make_model
+  dataset: your_pkg.data:train_dataset
+  step: your_pkg.train:step_fn
+  eval_dataset: your_pkg.data:val_dataset
+  eval_fn: your_pkg.train:eval_fn
+
+train:
+  max_steps: 100000
+  log_every: 100
+  eval_every: 5000
+  ckpt_every: 5000
+  grad_accum: 1
+  grad_clip_norm: null
+  nonfinite_grad_check_every: 0
+  scheduler_step: step
+  amp: fp32   # fp32 | fp16 | bf16
+  ddp: false
+  find_unused_parameters: false
+  seed: 42
+  compile: null
+  prefetch_batches: 0
+  device: null
+  out_dir: ./runs/exp0
+  keep_last_k: 3
+  shard_dataset: false
+  shard_dataset_mode: null
+  shard_eval_dataset: false
+  shard_eval_dataset_mode: null
+  warn_unsharded: true
+  strict_config: true
+  config_warn_unknown: true
+  autocast_in_step_fn: false
+
+  ema:
+    enabled: null
+    decay: null
+    decay_init: null
+    warmup_steps: 0
+    schedule: constant
+    profile: null
+    gamma: null
+    srel: null
+    eval_with_ema: false
+
+  # Legacy flat EMA keys (optional)
+  ema_enabled: null
+  ema_decay: null
+  ema_decay_init: null
+  ema_warmup_steps: null
+  ema_schedule: null
+  ema_profile: null
+  ema_gamma: null
+  ema_srel: null
+  ema_eval: null
+
+data:
+  data_dir: ./data
+  batch_size: 128
+  num_workers: 4
+
+optim:
+  optimizer:
+    name: adamw
+    lr: 0.0003
+    weight_decay: 0.0
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    momentum: 0.9
+    nesterov: false
+    muon_lr: null
+    adam_lr: null
+  scheduler:
+    name: none
+    T_max: null
+    t_max: null
+    eta_min: 0.0
+    warmup_steps: 0
+    step_size: 1000
+    gamma: 0.1
+    mode: min
+    factor: 0.1
+    patience: 10
+
+logging:
+  csv_path: null
+  jsonl_path: null
+
+wandb:
+  enabled: false
+  project: null
+  entity: null
+  name: null
+  group: null
+  job_type: null
+  tags: null
+  notes: null
+  mode: null
+  dir: null
+  resume: null
+  id: null
+  log_artifacts: null
+  artifact_name_prefix: null
+  artifact_name: null
+  artifact_type: null
+  watch_model: null
+  watch_unwrap_ddp: null
+  watch_log: null
+  watch_log_freq: null
+  watch_log_graph: null

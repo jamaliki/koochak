@@ -2,6 +2,11 @@
 
 This doc tracks incremental design decisions and changes from the initial design_doc.md as we implement the stack. New contributors: please read README.md first to get oriented, then come back here for active notes and TODOs. Always update README.md and this TODO list whenever behavior, layout, or usage changes.
 
+## Important things to keep in mind
+
+- The philosophy is *functions first*
+- Do not catch exceptions unless necessary, fail *fast and loud* if an unexpected error occurs. If we are expected to have some errors, those should be caught explicitly and not silently.
+
 ## Implemented so far
 
 - Core loop
@@ -57,6 +62,7 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - CSV and JSONL loggers [DONE]
 - Wire CSV/JSONL logging via YAML and attach hooks in example [DONE]
 - Stats utils: SmoothedMeter, Throughput, EMA [DONE]
+- Config system overhaul (OmegaConf structured defaults + section-based loader) [DONE]
 - Refine stdout formatting to optionally include smoothed stats [TODO]
 - Extract remaining storage helpers (e.g., artifact naming) if needed [TODO]
 - Add `data/take.py` helper or extend iterable utils with `take(n)` [DONE]
@@ -79,26 +85,9 @@ Updates:
 
 New design TODOs
 
-- Config validation and unused-key detection [DESIGN TODO]
-  - Goal: Minimize silent misconfiguration by warning (or erroring) on YAML keys that are not used during a run.
-  - Approach A (schema-based): Define allowed keys per section (`train`, `data`, `optim`, `logging`, `wandb`) and recursively validate the YAML against this schema. Unknown keys cause a rank0 warning or error depending on `train.strict_config: true`.
-  - Approach B (usage-tracking): Enhance `koochak.utils.config.get` to record all accessed keys (with dotted paths). Provide a context (e.g., `with config.track(cfg)`) that at the end computes `unused = yaml_keys - accessed_keys` and emits rank0 warnings (or raises in strict mode). This also catches keys used by user code as long as they use `config.get`.
-  - Hybrid: Support both. Use schema to catch typos early; usage-tracking to catch drift in forks/custom loops. Expose knobs: `train.strict_config: bool`, `train.config_warn_unknown: bool`.
-  - Integration: Implement `config.validate(cfg_all, schema, accessed=None, strict=False)` and call once during startup (and optionally after hooks are registered). Emit a tidy summary with the unknown keys and their paths.
-  - Docs: Document in README under Configuration; show how to enable strict mode and how to opt-out for experimental keys.
-
-New TODOs (Config validation and UX)
-
-- Promote hybrid config validation into a reusable helper [DONE]
-  - Create a small utility (e.g., `config.apply_hybrid_validation(cfg_all, schema, train_cfg)`) that runs schema validation + usage-tracking and handles warn/raise behavior based on `train.strict_config` and `train.config_warn_unknown`.
-  - Use this helper in all examples and later in `cli/train.py` to avoid repetition.
-
-- Document strict_config/config_warn_unknown in README [DONE]
-  - Configuration section now covers strict mode + warning toggles with YAML examples.
-
-- Pre-run config summary [DONE]
-  - Print a rank-0 summary at startup showing sections present, recognized keys, and unknown keys (if any), with clear guidance on how to enable strict mode.
-  - Implement as part of the hybrid validation helper and call from examples and future CLI.
+- Config system overhaul (OmegaConf structured defaults + section-based loader + schema-based unknown-key summary) [DONE]
+  - New `koochak/config.py` with dataclasses, `load_config`, `summarize`, and `get_section`.
+  - Legacy usage-tracking/unused-key detection retired in favor of schema-based unknown-key checks.
 
 
 CLI enhancements (design TODOs)
@@ -148,7 +137,7 @@ Done recently
 - DDP-safe checkpoints: save underlying module weights; helpers to adapt state_dict keys; README guidance.
 - RNG management: global seeding; rank-aware worker seeding; per‑rank RNG save/restore on resume.
 - Data: `cycle`, `take`, and `shard_dataset`.
-- Hybrid config validation: strict summary pre-run (default strict), post-run unused detection, helper wrappers.
+- Config system overhaul: structured defaults + section-based loader + schema-based unknown-key summary.
 - Config: adopted OmegaConf for YAML loading and interpolation/resolution.
 - Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).
 - Generic CLI: `python -m koochak.cli.train --config ...` with strict validation and standard hooks.

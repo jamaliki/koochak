@@ -41,6 +41,14 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
     best_values: Dict[str, float] = {}
     best_steps: Dict[str, int] = {}
 
+    def _cfg_get(obj, key: str, default=None):
+        try:
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+        except Exception:
+            pass
+        return getattr(obj, key, default)
+
     def on_train_start(ctx: Dict[str, Any]):
         if getattr(cfg, "enabled", True) is False:
             return
@@ -62,7 +70,7 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             id=run_id,                                    
             resume="allow",                               
             settings=settings,
-            config=ctx.get("config"),
+            config=ctx.get("config_json") or ctx.get("config"),
             allow_val_change=True,                        
         )
 
@@ -101,9 +109,9 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         # Avoid W&B "out of order step" warnings when eval logs at same step.
         # If this step will also emit eval metrics, delay the commit until on_eval_end.
         step = int(ctx.get("step", 0))
-        cfg = ctx.get("config") or {}
+        train_cfg = ctx.get("train_cfg") or {}
         try:
-            eval_every = int((cfg or {}).get("eval_every", 0))  # ctx["config"] is a plain dict
+            eval_every = int(_cfg_get(train_cfg, "eval_every", 0))
         except Exception:
             eval_every = 0
         will_eval = eval_every > 0 and (step % eval_every == 0)
