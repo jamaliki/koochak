@@ -18,9 +18,10 @@ from .storage import checkpoint as checkpoint_lib
 from .core import hooks as hooks_lib
 from .core import dist as dist_lib
 from .core.precision import Scaler as make_scaler, autocast_context
-from .data.iterable import to_device
+from .data.iterable import prefetch, to_device
 from .data.sharding import shard_iterable
 from .utils import config as config_lib
+from kaveh.utils import flags as flags_lib
 from .utils.device import get_device, ensure_process_device, get_lr
 from .utils.ema import EMA
 from .utils.seed import get_rng_state, set_rng_state
@@ -77,6 +78,7 @@ def training_loop(
     amp_mode = config_lib.get(train_config, "amp", "fp32")
     grad_accum = int(config_lib.get(train_config, "grad_accum", 1))
     grad_clip_norm = config_lib.get(train_config, "grad_clip_norm", None)
+    nonfinite_grad_check_every = int(config_lib.get(train_config, "nonfinite_grad_check_every", 0))
     scheduler_step_policy = config_lib.get(train_config, "scheduler_step", "step")
     max_steps = int(config_lib.get(train_config, "max_steps", 100_000))
     log_every = int(config_lib.get(train_config, "log_every", 100))
@@ -139,7 +141,6 @@ def training_loop(
     # Allow hooks to see start of training
     _emit(hooks, "on_train_start", ctx)
 
-    it = iter(dataset)
     # Optionally wrap with DistributedDataParallel; device_ids bound to current device for CUDA
     if ddp_enabled and world_size > 1:
         from torch.nn.parallel import DistributedDataParallel
@@ -152,6 +153,57 @@ def training_loop(
             ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
         model = DistributedDataParallel(model, **ddp_kwargs)
         ctx["model"] = model
+
+    compile_cfg = config_lib.get(train_config, "compile", None)
+    if compile_cfg:
+        compile_kwargs: Dict[str, Any] = {}
+        enabled = True
+        preset = None
+        if isinstance(compile_cfg, Mapping):
+            enabled = bool(compile_cfg.get("enabled", True))
+            preset = compile_cfg.get("preset", None)
+            compile_kwargs = {k: v for k, v in compile_cfg.items() if k not in ("enabled", "preset")}
+        elif isinstance(compile_cfg, str):
+            preset = compile_cfg
+        elif isinstance(compile_cfg, bool):
+            enabled = compile_cfg
+        if preset is not None:
+            preset_key = str(preset).lower()
+            if preset_key in ("full", "full-model", "full_model"):
+                compile_kwargs.setdefault("mode", "max-autotune")
+            else:
+                compile_kwargs.setdefault("mode", str(preset))
+        if enabled:
+            def _is_compile_wrap_module(mod: nn.Module) -> bool:
+                descriptor = getattr(type(mod), "forward", None)
+                return isinstance(descriptor, flags_lib.compile_wrap)
+
+            disabled_forwards: list[tuple[nn.Module, Any]] = []
+            if preset is not None and str(preset).lower() in ("wraps", "wraps-only", "merge-wraps", "merge_wraps"):
+                def _visit(mod: nn.Module, in_wrapped: bool) -> None:
+                    is_wrapped = _is_compile_wrap_module(mod)
+                    now_wrapped = in_wrapped or is_wrapped
+                    if mod is not model and not now_wrapped:
+                        orig_forward = mod.forward
+                        mod.forward = torch._dynamo.disable(mod.forward)
+                        disabled_forwards.append((mod, orig_forward))
+                    for child in mod.children():
+                        _visit(child, now_wrapped)
+
+                _visit(model, False)
+
+            compile_wrap_prev = flags_lib.get_compile_wrap_enabled()
+            if preset is not None and str(preset).lower() in ("full", "full-model", "full_model"):
+                flags_lib.set_compile_wrap_enabled(False)
+            try:
+                model = torch.compile(model, **compile_kwargs)
+                ctx["model"] = model
+            except Exception as exc:
+                for mod, orig_forward in disabled_forwards:
+                    mod.forward = orig_forward
+                flags_lib.set_compile_wrap_enabled(compile_wrap_prev)
+                if dist_lib.rank0():
+                    warnings.warn(f"torch.compile failed; falling back to eager: {exc}", RuntimeWarning)
 
     # Report parameter counts once before training begins
     if dist_lib.rank0():
@@ -227,6 +279,10 @@ def training_loop(
             except Exception:
                 start_step = int(checkpoint_dict.get("step", 0)) if checkpoint_dict else 0
 
+        prefetch_batches = int(config_lib.get(train_config, "prefetch_batches", 0))
+        use_prefetch = getattr(device, "type", "cpu") == "cuda" and prefetch_batches > 0
+        it = prefetch(iter(dataset), device, prefetch=prefetch_batches) if use_prefetch else iter(dataset)
+
         for step in range(start_step, max_steps):
             model.train()
             optimizer.zero_grad(set_to_none=True)
@@ -246,7 +302,10 @@ def training_loop(
                 )
                 with cm:
                     with ac:
-                        batch = to_device(next(it), device)
+                        if use_prefetch:
+                            batch = next(it)
+                        else:
+                            batch = to_device(next(it), device)
                         out = step_fn(model, batch, {**ctx, "step": step})
                         if "loss" not in out:
                             raise RuntimeError("step_fn must return a dict containing a 'loss' Tensor")
@@ -262,30 +321,32 @@ def training_loop(
             except Exception:
                 pass
 
-            nonfinite_grad: list[str] = []
-            finite_grad: list[str] = []
-            for name, param in getattr(model, "named_parameters", lambda: [])():
-                if param.grad is None or not torch.is_floating_point(param.grad):
-                    continue
-                if not torch.isfinite(param.grad).all():
-                    torch.nan_to_num_(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
-                    nonfinite_grad.append(name)
-                else:
-                    finite_grad.append(name)
+            do_nonfinite_check = nonfinite_grad_check_every > 0 and (step % nonfinite_grad_check_every == 0)
+            if do_nonfinite_check:
+                nonfinite_grad: list[str] = []
+                finite_grad: list[str] = []
+                for name, param in getattr(model, "named_parameters", lambda: [])():
+                    if param.grad is None or not torch.is_floating_point(param.grad):
+                        continue
+                    if not torch.isfinite(param.grad).all():
+                        torch.nan_to_num_(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                        nonfinite_grad.append(name)
+                    else:
+                        finite_grad.append(name)
 
-            if nonfinite_grad:
-                if dist_lib.rank0():
-                    preview_nans = ", ".join(nonfinite_grad)
-                    preview_non_nans = ", ".join(finite_grad)
-                    msg = f"Zeroed gradients containing non-finite values in {len(nonfinite_grad)} parameters\n"
-                    msg += f"However, {len(finite_grad)} params are fine"
-                    if preview_nans:
-                        if len(nonfinite_grad) > 5:
-                            msg += f" (e.g. nans: {preview_nans}, ...)\n"
-                            msg += f" (non-nans: {preview_non_nans}, ...)"
-                        else:
-                            msg += f": {preview_nans}"
-                    warnings.warn(msg, RuntimeWarning)
+                if nonfinite_grad:
+                    if dist_lib.rank0():
+                        preview_nans = ", ".join(nonfinite_grad)
+                        preview_non_nans = ", ".join(finite_grad)
+                        msg = f"Zeroed gradients containing non-finite values in {len(nonfinite_grad)} parameters\n"
+                        msg += f"However, {len(finite_grad)} params are fine"
+                        if preview_nans:
+                            if len(nonfinite_grad) > 5:
+                                msg += f" (e.g. nans: {preview_nans}, ...)\n"
+                                msg += f" (non-nans: {preview_non_nans}, ...)"
+                            else:
+                                msg += f": {preview_nans}"
+                        warnings.warn(msg, RuntimeWarning)
 
             if grad_clip_norm is not None:
                 clip_grad_norm_(model.parameters(), float(grad_clip_norm), foreach=True)
@@ -319,24 +380,30 @@ def training_loop(
                     pass
 
             # Logs and hooks: convert tensors to floats and avoid overriding scalar loss
-            safe_out: Dict[str, Any] = {}
-            if out:
-                for k, v in out.items():
-                    if k == "loss":
-                        # keep computed scalar loss instead
-                        continue
-                    try:
-                        if isinstance(v, torch.Tensor):
-                            v = float(v.detach())
-                    except Exception:
+            # Only materialize logs if it's a logging step
+            logs = None
+            if is_rank0 and (step % log_every == 0):
+                safe_out: Dict[str, Any] = {}
+                if out:
+                    for k, v in out.items():
+                        if k == "loss": continue
                         try:
-                            v = float(v)
+                            if isinstance(v, torch.Tensor):
+                                v = float(v.detach()) # Sync happens only here
                         except Exception:
                             pass
-                    safe_out[k] = v
-            logs = {"loss": total_loss_scalar, "lr": get_lr(optimizer), **safe_out, "step": step}
-            if is_rank0 and (step % log_every == 0):
+                        safe_out[k] = v
+                
+                # logs includes "loss" which is already a float from earlier in the loop
+                logs = {"loss": total_loss_scalar, "lr": get_lr(optimizer), **safe_out, "step": step}
                 _emit(hooks, "on_log", logs, {**ctx, "step": step})
+            
+            # Pass logs to on_step_end if available, otherwise just basic loss/lr
+            if logs is None:
+                # Minimal logs for step_end hooks if they need something every step (rare)
+                # Avoid triggering sync by not including detailed tensor metrics
+                logs = {"loss": total_loss_scalar, "lr": get_lr(optimizer), "step": step}
+            
             _emit(hooks, "on_step_end", logs, {**ctx, "step": step})
 
             # Periodic eval

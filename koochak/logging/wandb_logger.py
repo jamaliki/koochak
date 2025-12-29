@@ -23,10 +23,7 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
 
     Soft-depends on `wandb`; returns an empty dict if unavailable or disabled.
     """
-    try:
-        import wandb  # type: ignore
-    except Exception:
-        return {}
+    import wandb  # type: ignore
 
     # If a simple dict-like is passed, mimic attribute access
     class _Cfg:

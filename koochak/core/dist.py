@@ -22,7 +22,14 @@ def is_initialized() -> bool:
     return _dist_available
 
 
-def init_process_group(backend: str = "nccl", init_method: Optional[str] = None, timeout: Optional[float] = None) -> None:
+def init_process_group(
+    backend: str = "nccl",
+    init_method: Optional[str] = None,
+    timeout: Optional[float] = None,
+    *,
+    rank: Optional[int] = None,
+    world_size: Optional[int] = None,
+) -> None:
     if not torch.distributed.is_available():
         raise RuntimeError("torch.distributed not available in this build")
     if is_initialized():
@@ -34,6 +41,10 @@ def init_process_group(backend: str = "nccl", init_method: Optional[str] = None,
         import datetime
 
         kwargs["timeout"] = datetime.timedelta(seconds=float(timeout))
+    if rank is not None:
+        kwargs["rank"] = int(rank)
+    if world_size is not None:
+        kwargs["world_size"] = int(world_size)
     torch.distributed.init_process_group(**kwargs)
 
 

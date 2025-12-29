@@ -1,7 +1,8 @@
 import torch
 import torch.distributed as dist
+from kaveh.utils import flags
 
-
+@flags.compile_wrap
 def zeropower_via_newtonschulz5(G, steps: int):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -31,6 +32,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
+@flags.compile_wrap
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
@@ -41,6 +43,8 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     update *= (0.2 * max(grad.size(-2), grad.size(-1))**0.5)
     return update
 
+
+@flags.compile_wrap
 def normuon_update(grad, momentum, second_momentum, beta=0.95, beta2=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
@@ -215,7 +219,7 @@ class SingleDeviceNorMuon(torch.optim.Optimizer):
         return loss
     
 
-
+@flags.compile_wrap
 def adam_update(grad, buf1, buf2, step, betas, eps):
     buf1.lerp_(grad, 1 - betas[0])
     buf2.lerp_(grad.square(), 1 - betas[1])
