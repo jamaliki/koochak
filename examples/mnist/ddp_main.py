@@ -49,7 +49,7 @@ def main():
 
     cfg_all: Dict[str, Any] = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)  # type: ignore
 
-    cfg_train = dict(cfg_all.get("train", {}))
+    cfg_train = cfg_all.get("train", {})
     cfg_data = dict(cfg_all.get("data", {}))
     cfg_optim = dict(cfg_all.get("optim", {}))
     cfg_wandb = cfg_all.get("wandb")
@@ -59,6 +59,8 @@ def main():
 
     # Force DDP on and device to current CUDA device (logical)
     cfg_train["ddp"] = True
+    cfg_train.setdefault("shard_dataset", True)
+    cfg_train.setdefault("shard_dataset_mode", "iterable")
     if torch.cuda.is_available():
         cfg_train["device"] = "cuda"
 
@@ -111,7 +113,7 @@ def main():
             step_fn=step_fn,
             optimizer=opt,
             scheduler=sched,
-            config=cfg_train,
+            config=cfg_all,
             checkpoint_dict=ckpt,
             eval_dataset=test_loader,
             eval_fn=eval_fn,

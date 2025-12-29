@@ -44,7 +44,7 @@ def main():
     cfg_all: Dict[str, Any] = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)  # type: ignore
 
     # Sections
-    cfg_train = dict(cfg_all.get("train", {}))
+    cfg_train = cfg_all.get("train", {})
     cfg_data = dict(cfg_all.get("data", {}))
     cfg_optim = dict(cfg_all.get("optim", {}))
     cfg_logging = dict(cfg_all.get("logging", {}))
@@ -104,7 +104,7 @@ def main():
         step_fn=step_fn,
         optimizer=opt,
         scheduler=sched,
-        config=cfg_train,
+        config=cfg_all,
         checkpoint_dict=ckpt,
         eval_dataset=eval_dataset,
         eval_fn=eval_fn,

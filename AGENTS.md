@@ -17,7 +17,7 @@ This doc tracks incremental design decisions and changes from the initial design
 
 - Distributed
   - `koochak/core/dist.py` adds `init_process_group`, `barrier`, `rank`, `world_size`, and `rank0` helpers.
-  - `koochak/data/sharding.py` provides `shard_iterable(iterable, rank, world_size)` for deterministic striding on IterableDataset-like sources.
+- `koochak/data/sharding.py` provides `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, and `shard_map_dataset` for explicit DDP sharding.
   - The loop shards the dataset when `config.ddp=True`, and places `barrier()` calls around checkpointing. Only rank 0 writes checkpoints.
 
 - Storage
@@ -63,12 +63,13 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - DDP checkpoint compatibility [DONE]
   - Loop saves underlying module weights when present, gathers per-rank RNG, and `checkpoint.match_state_dict_to_model` adapts prefixes for resume across DDP/non-DDP. README documents the flow.
 - DDP convenience: example torchrun entry that calls `dist.init_process_group` [DONE]
+- DDP dataset sharding helpers + config toggles + warnings [DONE]
 - Optional: cli/train.py thin wrapper around `training_loop` [TODO]
   - Purpose: Generic CLI to run training from YAML without custom scripts.
   - Inputs: YAML pointing to Python callables (module:function) for `model_fn`, `dataset_fn` or `dataloader_fn`, `step_fn`, optional `eval_fn`. Also uses `train`/`optim`/`logging`/`wandb` sections.
   - Behavior: Imports callables, builds model/optim/scheduler/datasets, attaches hooks (stdout/CSV/JSONL/W&B), handles resume via latest checkpoint, supports DDP (auto `init_process_group` + sharding), then calls `training_loop`.
   - Value: Consistent UX; reduces boilerplate; easier automation.
-- Tests: unit tests for precision helpers, checkpoint round-trip, shard_iterable [TODO]
+- Tests: unit tests for precision helpers, checkpoint round-trip, sharding helpers [TODO]
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
 
@@ -146,7 +147,7 @@ Done recently
 - Precision helpers (autocast + scaler), stats (SmoothedMeter/Throughput/EMA), and timeit utility.
 - DDP-safe checkpoints: save underlying module weights; helpers to adapt state_dict keys; README guidance.
 - RNG management: global seeding; rank-aware worker seeding; per‑rank RNG save/restore on resume.
-- Data: `cycle`, `take`, and `shard_iterable`.
+- Data: `cycle`, `take`, and `shard_dataset`.
 - Hybrid config validation: strict summary pre-run (default strict), post-run unused detection, helper wrappers.
 - Config: adopted OmegaConf for YAML loading and interpolation/resolution.
 - Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).

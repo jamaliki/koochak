@@ -20,7 +20,7 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
     - `dist.py` – DDP helpers: `init_process_group`, `barrier`, `rank/world_size`, `rank0`.
   - `data/`
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
-    - `sharding.py` – `shard_iterable(iterable, rank, world_size)`.
+    - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -87,6 +87,14 @@ train:
 ```
 
 At startup, a brief config summary prints sections present, unknown keys (if any), and strict status.
+
+DDP sharding is explicit and opt-in:
+
+- `train.shard_dataset: true` with `train.shard_dataset_mode: iterable|map` to shard the training dataset.
+- `train.shard_eval_dataset: true` with `train.shard_eval_dataset_mode: iterable|map` to shard the eval dataset.
+- `train.warn_unsharded: false` to disable rank-0 warnings when DDP runs without Koochak sharding.
+
+You can also shard manually in custom code via `koochak.data.sharding.shard_dataset(...)`.
 
 
 
@@ -227,7 +235,7 @@ Checkpoint dict fields include: `step`, `model`, `optimizer`, `scheduler` (optio
 ## Distributed (DDP)
 
 - When `train.ddp: true`, the loop auto-initializes the process group (if needed), pins the model to the local device, and wraps it in `torch.nn.parallel.DistributedDataParallel`. Pass `train.find_unused_parameters: true` if you need the corresponding DDP flag.
-- Iterables are sharded per-rank via `koochak.data.sharding.shard_iterable`; only rank 0 writes checkpoints or logs through built-in hooks. Barriers around checkpointing keep ranks in sync.
+- Sharding is explicit: use `train.shard_dataset`/`train.shard_dataset_mode` (and the eval equivalents) or call `koochak.data.sharding.shard_dataset(...)` in custom code. If DDP is enabled and datasets are not marked as sharded, rank 0 emits a warning by default.
 - If you prefer manual control, initialize ahead of time via `koochak.core.dist.init_process_group(...)`; the loop will detect the existing group and skip auto-init.
 - Launch with torchrun as usual:
 

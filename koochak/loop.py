@@ -19,7 +19,7 @@ from .core import hooks as hooks_lib
 from .core import dist as dist_lib
 from .core.precision import Scaler as make_scaler, autocast_context
 from .data.iterable import prefetch, to_device
-from .data.sharding import shard_iterable
+from .data.sharding import shard_dataset, warn_if_unsharded
 from .utils import config as config_lib
 from kaveh.utils import flags as flags_lib
 from .utils.device import get_device, ensure_process_device, get_lr
@@ -65,7 +65,10 @@ def training_loop(
     Returns the final checkpoint dict.
     """
 
-    train_config = config_lib.get(config, "train") or {}
+    train_config = config_lib.get(config, "train")
+    if train_config is None and isinstance(config, Mapping):
+        train_config = config
+    train_config = train_config or {}
     ddp_enabled = bool(config_lib.get(train_config, "ddp", config_lib.get(config, "ddp", False)))
 
     device_cfg = train_config if isinstance(train_config, Mapping) else config
@@ -75,6 +78,11 @@ def training_loop(
 
     rank, world_size = dist_lib.rank(), dist_lib.world_size()
     is_rank0 = dist_lib.rank0()
+    shard_dataset_enabled = bool(config_lib.get(train_config, "shard_dataset", False))
+    shard_dataset_mode = config_lib.get(train_config, "shard_dataset_mode", None)
+    shard_eval_dataset_enabled = bool(config_lib.get(train_config, "shard_eval_dataset", False))
+    shard_eval_dataset_mode = config_lib.get(train_config, "shard_eval_dataset_mode", None)
+    warn_unsharded = bool(config_lib.get(train_config, "warn_unsharded", True))
     amp_mode = config_lib.get(train_config, "amp", "fp32")
     grad_accum = int(config_lib.get(train_config, "grad_accum", 1))
     grad_clip_norm = config_lib.get(train_config, "grad_clip_norm", None)
@@ -137,6 +145,28 @@ def training_loop(
         "config": cfg_json,
         "model": model,
     }
+
+    def _validate_shard_mode(enabled: bool, mode: Any, label: str) -> Optional[str]:
+        if not enabled:
+            return None
+        if mode is None:
+            raise ValueError(f"train.{label}_mode must be set when train.{label}=true")
+        mode_key = str(mode).lower()
+        if mode_key not in ("iterable", "map"):
+            raise ValueError(f"Invalid train.{label}_mode: {mode!r} (expected 'iterable' or 'map')")
+        return mode_key
+
+    train_shard_mode = _validate_shard_mode(shard_dataset_enabled, shard_dataset_mode, "shard_dataset")
+    eval_shard_mode = _validate_shard_mode(shard_eval_dataset_enabled, shard_eval_dataset_mode, "shard_eval_dataset")
+
+    if ddp_enabled and shard_dataset_enabled and train_shard_mode is not None:
+        dataset = shard_dataset(dataset, rank=rank, world_size=world_size, mode=train_shard_mode)
+    if ddp_enabled and eval_dataset is not None and shard_eval_dataset_enabled and eval_shard_mode is not None:
+        eval_dataset = shard_dataset(eval_dataset, rank=rank, world_size=world_size, mode=eval_shard_mode)
+
+    if ddp_enabled and warn_unsharded and is_rank0:
+        warn_if_unsharded(dataset, enabled=True, name="train dataset")
+        warn_if_unsharded(eval_dataset, enabled=True, name="eval dataset")
 
     # Allow hooks to see start of training
     _emit(hooks, "on_train_start", ctx)

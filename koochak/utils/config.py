@@ -68,6 +68,11 @@ def default_schema() -> Dict[str, Any]:
             "device": None,
             "out_dir": None,
             "keep_last_k": None,
+            "shard_dataset": None,
+            "shard_dataset_mode": None,
+            "shard_eval_dataset": None,
+            "shard_eval_dataset_mode": None,
+            "warn_unsharded": None,
             # Optional toggles for config behavior
             "strict_config": None,
             "config_warn_unknown": None,
