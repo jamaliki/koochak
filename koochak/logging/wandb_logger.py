@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re, hashlib
 from typing import Any, Dict, List
-from kaveh.koochak.core.hooks import rank0_only
-from kaveh.koochak.storage.naming import make_checkpoint_aliases
+from ..core.hooks import rank0_only
+from ..storage.naming import make_checkpoint_aliases
 
 
 def _run_id_from_name(name: str) -> str:

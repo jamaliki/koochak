@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import sys
 from typing import Any, Dict, Iterable, List, Optional
-from kaveh.koochak.core.hooks import rank0_only
+from ..core.hooks import rank0_only
 
 __all__ = ["StdoutLogger", "make_stdout_hooks", "log_step_tsv"]
 

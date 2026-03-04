@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from kaveh.utils import flags
+from ..utils import flags
 
 @flags.compile_wrap
 def zeropower_via_newtonschulz5(G, steps: int):

@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any, Dict, List
 
-from kaveh.koochak.core.hooks import rank0_only
+from ..core.hooks import rank0_only
 
 __all__ = ["JSONLLogger", "make_jsonl_hooks"]
 

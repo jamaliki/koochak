@@ -5,16 +5,16 @@ import importlib
 import os
 from typing import Any
 
-from kaveh.koochak.loop import training_loop
-from kaveh.koochak.core import hooks as hooks_lib
-from kaveh.koochak.logging.stdout import make_stdout_hooks
-from kaveh.koochak.logging.csv import make_csv_hooks
-from kaveh.koochak.logging.jsonl import make_jsonl_hooks
-from kaveh.koochak.logging.wandb_logger import make_wandb_hooks
-from kaveh.koochak.optim.build import build_optimizer, build_scheduler
-from kaveh.koochak.utils.seed import set_all_seeds
-from kaveh.koochak import config as config_lib
-from kaveh.koochak.storage import checkpoint as checkpoint_lib
+from ..loop import training_loop
+from ..core import hooks as hooks_lib
+from ..logging.stdout import make_stdout_hooks
+from ..logging.csv import make_csv_hooks
+from ..logging.jsonl import make_jsonl_hooks
+from ..logging.wandb_logger import make_wandb_hooks
+from ..optim.build import build_optimizer, build_scheduler
+from ..utils.seed import set_all_seeds
+from .. import config as config_lib
+from ..storage import checkpoint as checkpoint_lib
 
 
 def _import_obj(path: str):

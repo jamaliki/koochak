@@ -21,7 +21,7 @@ from .core.precision import Scaler as make_scaler, autocast_context
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
 from .utils import config as config_lib
-from kaveh.utils import flags as flags_lib
+from .utils import flags as flags_lib
 from .utils.device import get_device, ensure_process_device, get_lr
 from .utils.ema import EMA
 from .utils.seed import get_rng_state, set_rng_state

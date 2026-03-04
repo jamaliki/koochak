@@ -2,23 +2,22 @@ from __future__ import annotations
 
 """Deprecated: compatibility shim for config helpers. Prefer koochak.config."""
 
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping, Optional, Set
 
 from .. import config as config_lib
 
 __all__ = ["get", "as_dict"]
 
+_ACCESS_LOG: Dict[int, Set[str]] = {}
+
 
 def get(cfg: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
+    _ACCESS_LOG.setdefault(id(cfg), set()).add(str(key))
     return config_lib.get(cfg, key, default)
 
 
 def as_dict(cfg: Mapping[str, Any] | Any) -> Dict[str, Any]:
-    if is_dataclass(cfg):
-        return asdict(cfg)  # type: ignore[arg-type]
-    if isinstance(cfg, Mapping):
-        return dict(cfg)
-    return {k: getattr(cfg, k) for k in dir(cfg) if not k.startswith("_")}
+    return config_lib.as_dict(cfg)
 
 
 def accessed_keys(cfg: Mapping[str, Any] | Any) -> Set[str]:
@@ -30,81 +29,10 @@ def reset_access_log() -> None:
 
 
 def default_schema() -> Dict[str, Any]:
-    # Allowed keys per top-level section, nested where appropriate
-    return {
-        "train": {
-            "max_steps": None,
-            "log_every": None,
-            "eval_every": None,
-            "ckpt_every": None,
-            "grad_accum": None,
-            "grad_clip_norm": None,
-            "nonfinite_grad_check_every": None,
-            "scheduler_step": None,
-            "amp": None,
-            "ddp": None,
-            "find_unused_parameters": None,
-            "seed": None,
-            "compile": None,
-            "device": None,
-            "out_dir": None,
-            "keep_last_k": None,
-            # Optional toggles for config behavior
-            "strict_config": None,
-            "config_warn_unknown": None,
-            "autocast_in_step_fn": None,
-        },
-        "data": {
-            "data_dir": None,
-            "batch_size": None,
-            "num_workers": None,
-        },
-        "optim": {
-            "optimizer": {
-                "name": None,
-                "lr": None,
-                "weight_decay": None,
-                "betas": None,
-                "eps": None,
-                "momentum": None,
-                "nesterov": None,
-            },
-            "scheduler": {
-                "name": None,
-                "T_max": None,
-                "t_max": None,
-                "eta_min": None,
-                "warmup_steps": None,
-                "step_size": None,
-                "gamma": None,
-                "mode": None,
-                "factor": None,
-                "patience": None,
-            },
-        },
-        "logging": {
-            "csv_path": None,
-            "jsonl_path": None,
-        },
-        "wandb": {
-            "enabled": None,
-            "project": None,
-            "entity": None,
-            "name": None,
-            "group": None,
-            "job_type": None,
-            "tags": None,
-            "notes": None,
-            "mode": None,
-            "dir": None,
-            "resume": None,
-            "id": None,
-            "log_artifacts": None,
-            # Artifact naming/integration
-            "artifact_name_prefix": None,
-            "artifact_type": None,
-        },
-    }
+    schema = getattr(config_lib, "SCHEMA", None)
+    if isinstance(schema, dict):
+        return schema
+    return {}
 
 
 def _collect_paths(d: Dict[str, Any], prefix: str = "") -> Set[str]:
@@ -155,7 +83,7 @@ def summarize_and_check(
     schema = schema or default_schema()
     sections = sorted(cfg_all.keys())
     print("[koochak][config] sections:", ", ".join(sections) or "<none>")
-    unknown = schema_validate(cfg_all, schema)
+    unknown = schema_validate(as_dict(cfg_all), schema)
     if unknown:
         msg = "[koochak][config] unknown keys: " + ", ".join(sorted(unknown))
         if strict:

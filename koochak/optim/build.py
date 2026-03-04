@@ -19,7 +19,7 @@ from .muon import (
     NorMuonWithAuxAdam, 
     SingleDeviceNorMuonWithAuxAdam
 )
-from kaveh.utils.nn_utils import prepare_param_groups_for_muon  # type: ignore
+from ..utils.nn_utils import prepare_param_groups_for_muon  # type: ignore
 
 
 __all__ = ["build_optimizer", "build_scheduler"]
