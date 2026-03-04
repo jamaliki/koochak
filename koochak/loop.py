@@ -352,6 +352,7 @@ def training_loop(
         it = prefetch(iter(dataset), device, prefetch=prefetch_batches) if use_prefetch else iter(dataset)
 
         for step in range(start_step, max_steps):
+            step_start = time.perf_counter()
             model.train()
             optimizer.zero_grad(set_to_none=True)
 
@@ -447,6 +448,8 @@ def training_loop(
                     # Some schedulers require metrics; skip here
                     pass
 
+            step_time_s = time.perf_counter() - step_start
+
             # Logs and hooks: convert tensors to floats and avoid overriding scalar loss
             # Only materialize logs if it's a logging step
             logs = None
@@ -463,14 +466,25 @@ def training_loop(
                         safe_out[k] = v
                 
                 # logs includes "loss" which is already a float from earlier in the loop
-                logs = {"loss": total_loss_scalar, "lr": get_lr(optimizer), **safe_out, "step": step}
+                logs = {
+                    "loss": total_loss_scalar,
+                    "lr": get_lr(optimizer),
+                    "step_time_s": step_time_s,
+                    **safe_out,
+                    "step": step,
+                }
                 _emit(hooks, "on_log", logs, {**ctx, "step": step})
             
             # Pass logs to on_step_end if available, otherwise just basic loss/lr
             if logs is None:
                 # Minimal logs for step_end hooks if they need something every step (rare)
                 # Avoid triggering sync by not including detailed tensor metrics
-                logs = {"loss": total_loss_scalar, "lr": get_lr(optimizer), "step": step}
+                logs = {
+                    "loss": total_loss_scalar,
+                    "lr": get_lr(optimizer),
+                    "step_time_s": step_time_s,
+                    "step": step,
+                }
             
             _emit(hooks, "on_step_end", logs, {**ctx, "step": step})
 
