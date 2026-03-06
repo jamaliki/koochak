@@ -2,6 +2,13 @@
 
 A tiny, hackable, function‑first training loop for PyTorch. Built to be easy to read, fork, and extend. It favors explicit functions and small modules over opaque classes or global state.
 
+## Project Roadmap Context
+
+When Koochak is used from this repository's cryo-EM training stack, the
+project-level phased plan lives in [`../roadmap.md`](../roadmap.md). Use that
+roadmap for ModelAngelo++ milestones; use this README for Koochak-specific API
+and training-loop behavior.
+
 ## Goals
 
 - Functional core: a single `training_loop(...)` with a clear, compact signature.
