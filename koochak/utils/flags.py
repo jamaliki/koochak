@@ -113,6 +113,12 @@ class compile_wrap:
         if instance is None:
             return self
 
+        # When wrapper-level compile is disabled, expose the original bound
+        # method directly so full-model torch.compile does not trace a synthetic
+        # closure per module instance.
+        if not get_use_compile():
+            return self.function.__get__(instance, owner)
+
         def bound(*args, **kwargs):
             return self(instance, *args, **kwargs)
 
