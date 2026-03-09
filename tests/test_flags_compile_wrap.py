@@ -34,3 +34,23 @@ def test_compile_wrap_returns_original_bound_method_when_disabled(monkeypatch) -
         assert module.calls == 1
     finally:
         flags.set_compile_wrap_enabled(prev_enabled)
+
+
+def test_compile_wrap_returns_original_bound_method_even_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("SEE_MORE_ALPHA_USE_COMPILE", "1")
+    prev_enabled = flags.get_compile_wrap_enabled()
+    flags.set_compile_wrap_enabled(True)
+    try:
+        module = _ToyModule()
+        bound = module.forward
+
+        assert bound.__self__ is module
+        assert bound.__func__ is _ToyModule.forward.function
+
+        x = torch.tensor([2.0])
+        y = bound(x)
+
+        assert torch.equal(y, torch.tensor([3.0]))
+        assert module.calls == 1
+    finally:
+        flags.set_compile_wrap_enabled(prev_enabled)
