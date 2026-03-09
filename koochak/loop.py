@@ -209,19 +209,6 @@ def training_loop(
     # Allow hooks to see start of training
     _emit(hooks, "on_train_start", ctx)
 
-    # Optionally wrap with DistributedDataParallel; device_ids bound to current device for CUDA
-    if ddp_enabled and world_size > 1:
-        from torch.nn.parallel import DistributedDataParallel
-        assert dist_lib.is_initialized()
-
-        ddp_kwargs = {
-            "find_unused_parameters": bool(config_lib.get(train_config, "find_unused_parameters", False)),
-        }
-        if getattr(device, "type", "cpu") == "cuda":
-            ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
-        model = DistributedDataParallel(model, **ddp_kwargs)
-        ctx["model"] = model
-
     compile_cfg = config_lib.get(train_config, "compile", None)
     if compile_cfg:
         compile_kwargs: Dict[str, Any] = {}
@@ -278,6 +265,20 @@ def training_loop(
                 flags_lib.set_compile_wrap_enabled(compile_wrap_prev)
                 if dist_lib.rank0():
                     warnings.warn(f"torch.compile failed; falling back to eager: {exc}", RuntimeWarning)
+
+    # Compile the inner module first, then wrap with DDP. torch.compile does not
+    # handle wrapper modules like DDP robustly, especially with Inductor.
+    if ddp_enabled and world_size > 1:
+        from torch.nn.parallel import DistributedDataParallel
+
+        assert dist_lib.is_initialized()
+        ddp_kwargs = {
+            "find_unused_parameters": bool(config_lib.get(train_config, "find_unused_parameters", False)),
+        }
+        if getattr(device, "type", "cpu") == "cuda":
+            ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
+        model = DistributedDataParallel(model, **ddp_kwargs)
+        ctx["model"] = model
 
     # Report parameter counts once before training begins
     if dist_lib.rank0():
