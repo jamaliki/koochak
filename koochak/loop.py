@@ -233,7 +233,22 @@ def training_loop(
                 descriptor = getattr(type(mod), "forward", None)
                 return isinstance(descriptor, flags_lib.compile_wrap)
 
+            def _unwrap_compile_wrap_methods(root: nn.Module) -> list[tuple[type[nn.Module], Any]]:
+                changed: list[tuple[type[nn.Module], Any]] = []
+                seen: set[type[nn.Module]] = set()
+                for mod in root.modules():
+                    cls = type(mod)
+                    if cls in seen:
+                        continue
+                    seen.add(cls)
+                    descriptor = getattr(cls, "forward", None)
+                    if isinstance(descriptor, flags_lib.compile_wrap):
+                        setattr(cls, "forward", descriptor.function)
+                        changed.append((cls, descriptor))
+                return changed
+
             disabled_forwards: list[tuple[nn.Module, Any]] = []
+            unwrapped_methods: list[tuple[type[nn.Module], Any]] = []
             if preset is not None and str(preset).lower() in ("wraps", "wraps-only", "merge-wraps", "merge_wraps"):
                 def _visit(mod: nn.Module, in_wrapped: bool) -> None:
                     is_wrapped = _is_compile_wrap_module(mod)
@@ -256,12 +271,15 @@ def training_loop(
             )
             if not wraps_only_preset:
                 flags_lib.set_compile_wrap_enabled(False)
+                unwrapped_methods = _unwrap_compile_wrap_methods(model)
             try:
                 model = torch.compile(model, **compile_kwargs)
                 ctx["model"] = model
             except Exception as exc:
                 for mod, orig_forward in disabled_forwards:
                     mod.forward = orig_forward
+                for cls, descriptor in unwrapped_methods:
+                    setattr(cls, "forward", descriptor)
                 flags_lib.set_compile_wrap_enabled(compile_wrap_prev)
                 if dist_lib.rank0():
                     warnings.warn(f"torch.compile failed; falling back to eager: {exc}", RuntimeWarning)
