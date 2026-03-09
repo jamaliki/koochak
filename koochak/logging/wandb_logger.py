@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import re, hashlib
-from typing import Any, Dict, List
+import hashlib
+import re
+from typing import Any, Dict, List, Mapping
 from ..core.hooks import rank0_only
 from ..storage.naming import make_checkpoint_aliases
 
@@ -43,19 +44,31 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
 
     def _cfg_get(obj, key: str, default=None):
         try:
-            if isinstance(obj, dict):
+            if isinstance(obj, Mapping):
                 return obj.get(key, default)
         except Exception:
             pass
         return getattr(obj, key, default)
 
+    def _compile_enabled(ctx: Dict[str, Any]) -> bool:
+        train_cfg = ctx.get("train_cfg") or {}
+        compile_cfg = _cfg_get(train_cfg, "compile", None)
+        if isinstance(compile_cfg, Mapping):
+            return bool(compile_cfg.get("enabled", True))
+        if isinstance(compile_cfg, bool):
+            return bool(compile_cfg)
+        return bool(compile_cfg)
+
     def on_train_start(ctx: Dict[str, Any]):
         if getattr(cfg, "enabled", True) is False:
             return
-        settings = wandb.Settings(start_method="thread")
+        settings = wandb.Settings()
 
         run_name = getattr(cfg, "name", None)
-        run_id = _run_id_from_name(run_name)
+        resume_mode = getattr(cfg, "resume", None)
+        run_id = getattr(cfg, "id", None)
+        if run_id is None and resume_mode in {"allow", "must"} and run_name:
+            run_id = _run_id_from_name(run_name)
 
         wandb.init(
             project=getattr(cfg, "project", "koochak"),
@@ -68,13 +81,17 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             mode=getattr(cfg, "mode", "online"),
             dir=getattr(cfg, "dir", None),
             id=run_id,                                    
-            resume="allow",                               
+            resume=resume_mode,
             settings=settings,
             config=ctx.get("config_json") or ctx.get("config"),
             allow_val_change=True,                        
         )
 
-        if getattr(cfg, "watch_model", True):
+        watch_model = getattr(cfg, "watch_model", None)
+        if watch_model is None:
+            watch_model = not _compile_enabled(ctx)
+
+        if watch_model:
             model = ctx.get("model")
             if model is not None:
                 if getattr(cfg, "watch_unwrap_ddp", True) and hasattr(model, "module"):

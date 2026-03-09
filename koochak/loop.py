@@ -261,7 +261,13 @@ def training_loop(
                 _visit(model, False)
 
             compile_wrap_prev = flags_lib.get_compile_wrap_enabled()
-            if preset is not None and str(preset).lower() in ("full", "full-model", "full_model"):
+            wraps_only_preset = preset is not None and str(preset).lower() in (
+                "wraps",
+                "wraps-only",
+                "merge-wraps",
+                "merge_wraps",
+            )
+            if not wraps_only_preset:
                 flags_lib.set_compile_wrap_enabled(False)
             try:
                 model = torch.compile(model, **compile_kwargs)
