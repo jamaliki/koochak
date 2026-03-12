@@ -36,7 +36,7 @@ class _FakeWandb:
         pass
 
 
-def test_wandb_compile_run_disables_watch_by_default():
+def test_wandb_named_run_uses_stable_id_and_disables_watch_by_default():
     fake = _FakeWandb()
     sys.modules["wandb"] = fake  # type: ignore
 
@@ -54,7 +54,7 @@ def test_wandb_compile_run_disables_watch_by_default():
     assert fake.init_kwargs is not None
     assert fake.watch_calls == []
     assert fake.init_kwargs["resume"] is None
-    assert fake.init_kwargs["id"] is None
+    assert fake.init_kwargs["id"] == hashlib.sha1(b"compile-run").hexdigest()
 
 
 def test_wandb_resume_allow_uses_stable_id():
@@ -77,3 +77,24 @@ def test_wandb_resume_allow_uses_stable_id():
     assert fake.init_kwargs is not None
     assert fake.init_kwargs["resume"] == "allow"
     assert fake.init_kwargs["id"] == expected
+
+
+def test_wandb_explicit_id_overrides_name_hash():
+    fake = _FakeWandb()
+    sys.modules["wandb"] = fake  # type: ignore
+
+    hooks = make_wandb_hooks(
+        {
+            "enabled": True,
+            "project": "proj",
+            "name": "resume-name",
+            "id": "manual-id",
+            "resume": "allow",
+        }
+    )
+
+    for fn in hooks.get("on_train_start", []):
+        fn({"config_json": {}, "train_cfg": {"compile": {"enabled": False}}, "model": object()})
+
+    assert fake.init_kwargs is not None
+    assert fake.init_kwargs["id"] == "manual-id"

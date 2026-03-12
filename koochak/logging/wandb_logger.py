@@ -13,7 +13,7 @@ def _run_id_from_name(name: str) -> str:
     Returns a lowercase hex string (SHA1), which is W&B-safe.
     """
     if not name or not isinstance(name, str):
-        raise RuntimeError("W&B resume-by-name requires cfg.name to be a non-empty string.")
+        raise RuntimeError("W&B stable-id-by-name requires cfg.name to be a non-empty string.")
     # Normalize the name to avoid accidental changes (spaces, case, punctuation)
     canonical = re.sub(r"[^A-Za-z0-9-_]+", "-", name.strip().lower())
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()  # 40 chars
@@ -67,7 +67,7 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         run_name = getattr(cfg, "name", None)
         resume_mode = getattr(cfg, "resume", None)
         run_id = getattr(cfg, "id", None)
-        if run_id is None and resume_mode in {"allow", "must"} and run_name:
+        if not run_id and run_name:
             run_id = _run_id_from_name(run_name)
 
         wandb.init(
