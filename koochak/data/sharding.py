@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Iterable, Iterator
+import warnings
 
 __all__ = [
     "is_sharded",
@@ -15,7 +16,14 @@ _KOOCHAK_SHARDED_ATTR = "__koochak_sharded__"
 
 
 def is_sharded(obj: Any) -> bool:
-    return bool(getattr(obj, _KOOCHAK_SHARDED_ATTR, False))
+    if obj is None:
+        return False
+    if bool(getattr(obj, _KOOCHAK_SHARDED_ATTR, False)):
+        return True
+    dataset = getattr(obj, "dataset", None)
+    if dataset is not None and dataset is not obj:
+        return is_sharded(dataset)
+    return False
 
 
 def mark_sharded(obj: Any) -> Any:
@@ -66,12 +74,20 @@ class ShardedMapDataset:
 
 def shard_iterable_dataset(iterable: Iterable[Any], rank: int, world_size: int) -> Iterable[Any]:
     if is_sharded(iterable):
+        mark_sharded(iterable)
         return iterable
+    if getattr(iterable, "dataset", None) is not None:
+        warnings.warn(
+            "[koochak][ddp] sharding an outer DataLoader/iterable by batch. "
+            "If the underlying dataset is expensive, this can discard work and create rank skew.",
+            stacklevel=2,
+        )
     return ShardedIterable(iterable, rank, world_size)
 
 
 def shard_map_dataset(dataset: Any, rank: int, world_size: int) -> Any:
     if is_sharded(dataset):
+        mark_sharded(dataset)
         return dataset
     return ShardedMapDataset(dataset, rank, world_size)
 

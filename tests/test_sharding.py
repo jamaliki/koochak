@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import importlib.util
 import math
+from pathlib import Path
 
 import pytest
 
-from koochak.data.sharding import (
-    is_sharded,
-    shard_dataset,
-    shard_iterable_dataset,
-    shard_map_dataset,
-    warn_if_unsharded,
-)
+MODULE_PATH = Path(__file__).resolve().parents[1] / "koochak" / "data" / "sharding.py"
+SPEC = importlib.util.spec_from_file_location("_koochak_data_sharding", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+_sharding = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(_sharding)
+
+is_sharded = _sharding.is_sharded
+mark_sharded = _sharding.mark_sharded
+shard_dataset = _sharding.shard_dataset
+shard_iterable_dataset = _sharding.shard_iterable_dataset
+shard_map_dataset = _sharding.shard_map_dataset
+warn_if_unsharded = _sharding.warn_if_unsharded
 
 
 def test_shard_iterable_dataset_disjoint_and_complete():
@@ -65,3 +72,35 @@ def test_warn_if_unsharded_emits_warning():
     data = [1, 2, 3]
     with pytest.warns(UserWarning, match="not sharded"):
         warn_if_unsharded(data, enabled=True, name="train dataset")
+
+
+def test_loader_is_sharded_when_dataset_is_marked():
+    torch = pytest.importorskip("torch")
+
+    class TinyDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 4
+
+        def __getitem__(self, idx):
+            return idx
+
+    dataset = TinyDataset()
+    mark_sharded(dataset)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+
+    assert is_sharded(loader)
+    assert shard_dataset(loader, rank=0, world_size=2, mode="iterable") is loader
+
+
+def test_sharding_outer_loader_emits_warning():
+    torch = pytest.importorskip("torch")
+
+    class TinyIterable(torch.utils.data.IterableDataset):
+        def __iter__(self):
+            yield from range(4)
+
+    loader = torch.utils.data.DataLoader(TinyIterable(), batch_size=1, num_workers=0)
+
+    with pytest.warns(UserWarning, match="outer DataLoader/iterable"):
+        sharded = shard_dataset(loader, rank=0, world_size=2, mode="iterable")
+    assert is_sharded(sharded)

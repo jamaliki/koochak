@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import statistics
 import time
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
@@ -51,6 +52,47 @@ def _parameter_counts(module: nn.Module) -> Dict[str, int]:
         "trainable": int(trainable),
         "frozen": int(total - trainable),
     }
+
+
+def _batch_mean_value(batch: Any, key: str) -> float:
+    if not isinstance(batch, Mapping) or key not in batch:
+        return 0.0
+    value = batch[key]
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().to(dtype=torch.float32).mean().item())
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0.0
+        return float(sum(float(v) for v in value) / len(value))
+    return float(value)
+
+
+def _rank_timing_fragment(entries: list[dict[str, Any]], key: str) -> str:
+    if not entries:
+        return f"{key}=n/a"
+    ordered = sorted(
+        (float(entry.get(key, 0.0)), int(entry.get("rank", 0))) for entry in entries
+    )
+    values = [value for value, _ in ordered]
+    slowest_value, slowest_rank = ordered[-1]
+    span = slowest_value - ordered[0][0]
+    return (
+        f"{key}={ordered[0][0]:.3f}/{statistics.median(values):.3f}/{slowest_value:.3f}"
+        f"@r{slowest_rank} span={span:.3f}"
+    )
+
+
+def _format_rank_timing(entries: list[dict[str, Any]], step: int) -> str:
+    fragments = [
+        _rank_timing_fragment(entries, "batch_wait_s"),
+        _rank_timing_fragment(entries, "step_compute_s"),
+        _rank_timing_fragment(entries, "total_step_s"),
+        _rank_timing_fragment(entries, "render_time_s"),
+        _rank_timing_fragment(entries, "target_rasterization_time_s"),
+        _rank_timing_fragment(entries, "expanded_atom_count_mean"),
+        _rank_timing_fragment(entries, "strict_atom_count_mean"),
+    ]
+    return f"[rank-timing] step={step} " + " ".join(fragments)
 
 
 def training_loop(
@@ -111,6 +153,7 @@ def training_loop(
     log_every = int(config_lib.get(train_config, "log_every", 100))
     eval_every = int(config_lib.get(train_config, "eval_every", 5_000))
     ckpt_every = int(config_lib.get(train_config, "ckpt_every", 5_000))
+    rank_timing_every = int(config_lib.get(train_config, "rank_timing_every", 0))
     out_dir = os.path.abspath(os.path.expanduser(str(config_lib.get(train_config, "out_dir", "./runs/exp0"))))
     keep_last_k = int(config_lib.get(train_config, "keep_last_k", 3))
 
@@ -389,6 +432,17 @@ def training_loop(
 
             total_loss_scalar = 0.0
             out: Dict[str, Any] | None = None
+            collect_rank_timing = (
+                ddp_enabled
+                and world_size > 1
+                and rank_timing_every > 0
+                and (step % rank_timing_every == 0)
+            )
+            batch_wait_s = 0.0
+            render_time_s_total = 0.0
+            target_rasterization_means: list[float] = []
+            expanded_atom_count_means: list[float] = []
+            strict_atom_count_means: list[float] = []
 
             for micro in range(grad_accum):
                 use_no_sync = (
@@ -402,11 +456,28 @@ def training_loop(
                 )
                 with cm:
                     with ac:
+                        batch_wait_start = time.perf_counter()
                         if use_prefetch:
                             batch = next(it)
                         else:
                             batch = to_device(next(it), device)
+                        batch_wait_s += time.perf_counter() - batch_wait_start
+                        if collect_rank_timing:
+                            target_rasterization_means.append(
+                                _batch_mean_value(batch, "target_rasterization_time_s")
+                            )
+                            expanded_atom_count_means.append(
+                                _batch_mean_value(batch, "expanded_atom_count")
+                            )
+                            strict_atom_count_means.append(
+                                _batch_mean_value(batch, "strict_atom_count")
+                            )
                         out = step_fn(model, batch, {**ctx, "step": step})
+                        if collect_rank_timing and out is not None:
+                            try:
+                                render_time_s_total += float(out.get("render_time_s", 0.0))
+                            except Exception:
+                                pass
                         if "loss" not in out:
                             raise RuntimeError("step_fn must return a dict containing a 'loss' Tensor")
                         loss = out["loss"] / grad_accum
@@ -480,6 +551,38 @@ def training_loop(
                     pass
 
             step_time_s = time.perf_counter() - step_start
+            step_compute_s = max(0.0, step_time_s - batch_wait_s)
+
+            if collect_rank_timing:
+                timing_payload = {
+                    "rank": rank,
+                    "batch_wait_s": float(batch_wait_s),
+                    "step_compute_s": float(step_compute_s),
+                    "total_step_s": float(step_time_s),
+                    "render_time_s": float(render_time_s_total),
+                    "target_rasterization_time_s": (
+                        float(sum(target_rasterization_means) / len(target_rasterization_means))
+                        if target_rasterization_means
+                        else 0.0
+                    ),
+                    "expanded_atom_count_mean": (
+                        float(sum(expanded_atom_count_means) / len(expanded_atom_count_means))
+                        if expanded_atom_count_means
+                        else 0.0
+                    ),
+                    "strict_atom_count_mean": (
+                        float(sum(strict_atom_count_means) / len(strict_atom_count_means))
+                        if strict_atom_count_means
+                        else 0.0
+                    ),
+                }
+                gathered_timings: list[dict[str, Any] | None] = [None for _ in range(world_size)]
+                torch.distributed.all_gather_object(gathered_timings, timing_payload)
+                if is_rank0:
+                    rank_timings = [
+                        item for item in gathered_timings if isinstance(item, dict)
+                    ]
+                    print(_format_rank_timing(rank_timings, step))
 
             # Logs and hooks: convert tensors to floats and avoid overriding scalar loss
             # Only materialize logs if it's a logging step
