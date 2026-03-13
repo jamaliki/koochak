@@ -31,9 +31,15 @@ StepFn = Callable[[nn.Module, Any, Mapping[str, Any]], Dict[str, Any]]
 EvalFn = Callable[[nn.Module, Iterable, Mapping[str, Any]], Dict[str, float]]
 
 
-def _emit(hooks: Optional[Dict[str, list]], event: str, *args, **kwargs):
+def _emit(
+    hooks: Optional[Dict[str, list]],
+    event: str,
+    *args,
+    suppress_exceptions: bool = True,
+    **kwargs,
+):
     # Backward-compatible shim to central hooks helper
-    hooks_lib.emit(hooks, event, *args, **kwargs)
+    hooks_lib.emit(hooks, event, *args, suppress_exceptions=suppress_exceptions, **kwargs)
 
 
 def _parameter_counts(module: nn.Module) -> Dict[str, int]:
@@ -207,7 +213,7 @@ def training_loop(
         warn_if_unsharded(eval_dataset, enabled=True, name="eval dataset")
 
     # Allow hooks to see start of training
-    _emit(hooks, "on_train_start", ctx)
+    _emit(hooks, "on_train_start", ctx, suppress_exceptions=False)
 
     compile_cfg = config_lib.get(train_config, "compile", None)
     if compile_cfg:

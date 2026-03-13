@@ -28,13 +28,21 @@ def add(hooks: Hooks, event: str, fn: Callable) -> Hooks:
     return hooks
 
 
-def emit(hooks: Optional[Hooks], event: str, *args, **kwargs) -> None:
+def emit(
+    hooks: Optional[Hooks],
+    event: str,
+    *args,
+    suppress_exceptions: bool = True,
+    **kwargs,
+) -> None:
     if not hooks:
         return
     for fn in hooks.get(event, []) or []:
         try:
             fn(*args, **kwargs)
         except Exception:
+            if not suppress_exceptions:
+                raise
             # Hooks should not crash the training loop.
             continue
 
