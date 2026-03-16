@@ -67,6 +67,19 @@ def _batch_mean_value(batch: Any, key: str) -> float:
     return float(value)
 
 
+def _batch_total_value(batch: Any, key: str) -> float:
+    if not isinstance(batch, Mapping) or key not in batch:
+        return 0.0
+    value = batch[key]
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().to(dtype=torch.float32).sum().item())
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0.0
+        return float(sum(float(v) for v in value))
+    return float(value)
+
+
 def _rank_timing_fragment(entries: list[dict[str, Any]], key: str) -> str:
     if not entries:
         return f"{key}=n/a"
@@ -87,7 +100,11 @@ def _format_rank_timing(entries: list[dict[str, Any]], step: int) -> str:
         _rank_timing_fragment(entries, "batch_wait_s"),
         _rank_timing_fragment(entries, "step_compute_s"),
         _rank_timing_fragment(entries, "total_step_s"),
+        _rank_timing_fragment(entries, "cache_get_time_s"),
+        _rank_timing_fragment(entries, "crop_selection_time_s"),
         _rank_timing_fragment(entries, "render_time_s"),
+        _rank_timing_fragment(entries, "atom_index_build_time_s"),
+        _rank_timing_fragment(entries, "atom_index_built_count"),
         _rank_timing_fragment(entries, "target_rasterization_time_s"),
         _rank_timing_fragment(entries, "expanded_atom_count_mean"),
         _rank_timing_fragment(entries, "strict_atom_count_mean"),
@@ -440,9 +457,15 @@ def training_loop(
             )
             batch_wait_s = 0.0
             render_time_s_total = 0.0
+            cache_get_time_means: list[float] = []
+            crop_selection_time_means: list[float] = []
+            atom_index_build_time_means: list[float] = []
+            atom_index_built_count = 0.0
             target_rasterization_means: list[float] = []
             expanded_atom_count_means: list[float] = []
             strict_atom_count_means: list[float] = []
+            crop_budget_skip_count_total = 0.0
+            render_budget_skip_count_total = 0.0
 
             for micro in range(grad_accum):
                 use_no_sync = (
@@ -462,7 +485,28 @@ def training_loop(
                         else:
                             batch = to_device(next(it), device)
                         batch_wait_s += time.perf_counter() - batch_wait_start
+                        crop_budget_skip_count_total += _batch_total_value(
+                            batch,
+                            "crop_budget_skip_count",
+                        )
+                        render_budget_skip_count_total += _batch_total_value(
+                            batch,
+                            "render_budget_skip_count",
+                        )
                         if collect_rank_timing:
+                            cache_get_time_means.append(
+                                _batch_mean_value(batch, "cache_get_time_s")
+                            )
+                            crop_selection_time_means.append(
+                                _batch_mean_value(batch, "crop_selection_time_s")
+                            )
+                            atom_index_build_time_means.append(
+                                _batch_mean_value(batch, "atom_index_build_time_s")
+                            )
+                            atom_index_built_count += _batch_total_value(
+                                batch,
+                                "atom_index_built",
+                            )
                             target_rasterization_means.append(
                                 _batch_mean_value(batch, "target_rasterization_time_s")
                             )
@@ -559,7 +603,23 @@ def training_loop(
                     "batch_wait_s": float(batch_wait_s),
                     "step_compute_s": float(step_compute_s),
                     "total_step_s": float(step_time_s),
+                    "cache_get_time_s": (
+                        float(sum(cache_get_time_means) / len(cache_get_time_means))
+                        if cache_get_time_means
+                        else 0.0
+                    ),
+                    "crop_selection_time_s": (
+                        float(sum(crop_selection_time_means) / len(crop_selection_time_means))
+                        if crop_selection_time_means
+                        else 0.0
+                    ),
                     "render_time_s": float(render_time_s_total),
+                    "atom_index_build_time_s": (
+                        float(sum(atom_index_build_time_means) / len(atom_index_build_time_means))
+                        if atom_index_build_time_means
+                        else 0.0
+                    ),
+                    "atom_index_built_count": float(atom_index_built_count),
                     "target_rasterization_time_s": (
                         float(sum(target_rasterization_means) / len(target_rasterization_means))
                         if target_rasterization_means
@@ -604,6 +664,8 @@ def training_loop(
                     "loss": total_loss_scalar,
                     "lr": get_lr(optimizer),
                     "step_time_s": step_time_s,
+                    "crop_budget_skip_count": float(crop_budget_skip_count_total),
+                    "render_budget_skip_count": float(render_budget_skip_count_total),
                     **safe_out,
                     "step": step,
                 }
