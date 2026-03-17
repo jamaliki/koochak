@@ -80,6 +80,18 @@ def _batch_total_value(batch: Any, key: str) -> float:
     return float(value)
 
 
+def _batch_skip_count_totals(batch: Any) -> Dict[str, float]:
+    if not isinstance(batch, Mapping):
+        return {}
+    totals: Dict[str, float] = {}
+    for key in batch.keys():
+        key_str = str(key)
+        if not key_str.endswith("_skip_count"):
+            continue
+        totals[key_str] = totals.get(key_str, 0.0) + _batch_total_value(batch, key_str)
+    return totals
+
+
 def _rank_timing_fragment(entries: list[dict[str, Any]], key: str) -> str:
     if not entries:
         return f"{key}=n/a"
@@ -464,8 +476,7 @@ def training_loop(
             target_rasterization_means: list[float] = []
             expanded_atom_count_means: list[float] = []
             strict_atom_count_means: list[float] = []
-            crop_budget_skip_count_total = 0.0
-            render_budget_skip_count_total = 0.0
+            skip_count_totals: Dict[str, float] = {}
 
             for micro in range(grad_accum):
                 use_no_sync = (
@@ -485,14 +496,8 @@ def training_loop(
                         else:
                             batch = to_device(next(it), device)
                         batch_wait_s += time.perf_counter() - batch_wait_start
-                        crop_budget_skip_count_total += _batch_total_value(
-                            batch,
-                            "crop_budget_skip_count",
-                        )
-                        render_budget_skip_count_total += _batch_total_value(
-                            batch,
-                            "render_budget_skip_count",
-                        )
+                        for key, value in _batch_skip_count_totals(batch).items():
+                            skip_count_totals[key] = skip_count_totals.get(key, 0.0) + float(value)
                         if collect_rank_timing:
                             cache_get_time_means.append(
                                 _batch_mean_value(batch, "cache_get_time_s")
@@ -664,8 +669,7 @@ def training_loop(
                     "loss": total_loss_scalar,
                     "lr": get_lr(optimizer),
                     "step_time_s": step_time_s,
-                    "crop_budget_skip_count": float(crop_budget_skip_count_total),
-                    "render_budget_skip_count": float(render_budget_skip_count_total),
+                    **{key: float(value) for key, value in skip_count_totals.items()},
                     **safe_out,
                     "step": step,
                 }
