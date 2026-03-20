@@ -9,6 +9,8 @@ import threading
 
 import torch
 
+from ..core.precision import prepare_compile_backend
+
 _FALLBACK_EXCEPTION_TYPES = []
 try:  # pragma: no cover - torch-version dependent
     from torch._dynamo import exc as _dynamo_exc  # type: ignore
@@ -127,6 +129,7 @@ class compile_wrap:
                 compile_kwargs = {"fullgraph": False, "dynamic": False}
                 compile_kwargs.update(self.kwargs)
                 compile_kwargs.setdefault("mode", get_compile_mode())
+                prepare_compile_backend()
                 self._compiled_function = torch.compile(self.function, *self.args, **compile_kwargs)
             except RuntimeError:
                 self._compiled_function = self.function

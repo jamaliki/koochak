@@ -18,7 +18,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 from .storage import checkpoint as checkpoint_lib
 from .core import hooks as hooks_lib
 from .core import dist as dist_lib
-from .core.precision import Scaler as make_scaler, autocast_context
+from .core.precision import Scaler as make_scaler, autocast_context, prepare_compile_backend
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
 from .utils import config as config_lib
@@ -351,6 +351,7 @@ def training_loop(
                 flags_lib.set_compile_wrap_enabled(False)
                 unwrapped_methods = _unwrap_compile_wrap_methods(model)
             try:
+                prepare_compile_backend()
                 model = torch.compile(model, **compile_kwargs)
                 ctx["model"] = model
             except Exception as exc:
