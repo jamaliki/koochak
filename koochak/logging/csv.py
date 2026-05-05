@@ -17,17 +17,17 @@ class CSVLogger:
         self._writer = None
         self._file = None
 
-    def _ensure_writer(self, keys: List[str]):
+    def _ensure_writer(self, keys: List[str]) -> None:
         if self._writer is None:
             # Decide header
             fieldnames = self.fieldnames or ["step"] + sorted(k for k in keys if k != "step")
             exists = os.path.exists(self.path)
-            self._file = open(self.path, "a", newline="")
+            self._file = open(self.path, "a", newline="", encoding="utf-8")
             self._writer = csv.DictWriter(self._file, fieldnames=fieldnames)
             if not exists:
                 self._writer.writeheader()
 
-    def write(self, payload: Dict[str, Any]):
+    def write(self, payload: Dict[str, Any]) -> None:
         keys = list(payload.keys())
         self._ensure_writer(keys)
         # Permit extra keys by filtering to known fieldnames
@@ -35,6 +35,12 @@ class CSVLogger:
         self._writer.writerow(row)
         if self._file is not None:
             self._file.flush()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+            self._writer = None
 
 
 def make_csv_hooks(path: str) -> Dict[str, List]:
@@ -47,7 +53,11 @@ def make_csv_hooks(path: str) -> Dict[str, List]:
         payload = {"step": ctx.get("step"), **metrics}
         logger.write(payload)
 
+    def on_train_end(ctx):
+        logger.close()
+
     return {
         "on_log": [rank0_only(on_log)],
         "on_eval_end": [rank0_only(on_eval_end)],
+        "on_train_end": [rank0_only(on_train_end)],
     }

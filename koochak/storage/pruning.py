@@ -13,7 +13,7 @@ def _extract_step(name: str, pattern: re.Pattern[str]) -> int:
     for g in reversed(m.groups()):
         try:
             return int(g)
-        except Exception:
+        except ValueError:
             continue
     return -1
 
@@ -36,4 +36,3 @@ def prune_keep_last_k(directory: str, pattern: str, k: int) -> None:
             os.remove(p)
         except OSError:
             pass
-

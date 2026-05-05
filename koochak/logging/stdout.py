@@ -1,23 +1,22 @@
 from __future__ import annotations
 
+import json
 import math
 import sys
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List
+
+import torch
+
 from ..core.hooks import rank0_only
 
 __all__ = ["StdoutLogger", "make_stdout_hooks", "log_step_tsv"]
 
 
 def _to_scalar(x: Any) -> Any:
-    try:
-        import torch
-
-        if isinstance(x, torch.Tensor):
-            if x.numel() == 1:
-                return x.item()
-            return x.detach().float().mean().item()
-    except Exception:
-        pass
+    if isinstance(x, torch.Tensor):
+        if x.numel() == 1:
+            return x.item()
+        return x.detach().float().mean().item()
     return x
 
 
@@ -86,12 +85,7 @@ class StdoutLogger:
         cfg = ctx.get("config_json")
         print(f"[koochak] device={dev} rank={rank}/{world}", file=self.file, flush=True)
         if cfg is not None:
-            try:
-                import json
-
-                print("[config] " + json.dumps(cfg, sort_keys=True), file=self.file, flush=True)
-            except Exception:
-                pass
+            print("[config] " + json.dumps(cfg, sort_keys=True, default=str), file=self.file, flush=True)
 
     def on_train_end(self, ctx: Dict[str, Any]) -> None:
         print("[koochak] training finished", file=self.file, flush=True)

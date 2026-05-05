@@ -26,7 +26,7 @@ def parse_step_from_name(name: str, pattern: str = r"step(\d+)\.pt$") -> Optiona
     try:
         # Use the last captured group as the step if multiple are present
         return int([g for g in m.groups() if g][-1])
-    except Exception:
+    except (IndexError, ValueError):
         return None
 
 
@@ -57,4 +57,3 @@ def make_checkpoint_aliases(
         for k in best_keys:
             aliases.append(f"best-{k}")
     return aliases
-
