@@ -4,6 +4,7 @@ import io
 import os
 import re
 import shutil
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 import torch
@@ -18,9 +19,9 @@ __all__ = [
     "match_state_dict_to_model",
 ]
 
+from . import fs as fs_utils
 from .atomic import atomic_write
 from .pruning import prune_keep_last_k
-from . import fs as fs_utils
 
 
 def _torch_save_to_bytes(obj: Any) -> bytes:
@@ -93,18 +94,8 @@ def best(directory: str, key: str = "val_loss") -> Optional[str]:
     return fs_utils.best(directory, key=key, pattern=_STEP_RE.pattern)
 
 
-# ---------- DDP compatibility helpers ----------
-from collections import OrderedDict
-
-
 def _has_module_prefix(sd: "OrderedDict[str, torch.Tensor] | Dict[str, torch.Tensor]") -> bool:
-    try:
-        for k in sd.keys():
-            if isinstance(k, str) and k.startswith("module."):
-                return True
-    except Exception:
-        pass
-    return False
+    return any(isinstance(k, str) and k.startswith("module.") for k in sd.keys())
 
 
 def strip_module_prefix(sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
@@ -118,7 +109,7 @@ def strip_module_prefix(sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
 def add_module_prefix(sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
     out: "OrderedDict[str, Any]" = OrderedDict()
     for k, v in sd.items():
-        nk = (f"module.{k}" if isinstance(k, str) and not k.startswith("module.") else k)
+        nk = f"module.{k}" if isinstance(k, str) and not k.startswith("module.") else k
         out[nk] = v
     return out
 

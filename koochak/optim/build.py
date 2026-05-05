@@ -1,53 +1,104 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Mapping, Optional
 
-import torch
-from torch.optim import Adam, AdamW, SGD, Optimizer
+import torch.distributed as dist
+import torch.nn as nn
+from torch.optim import Adam, AdamW, Optimizer, SGD
 from torch.optim.lr_scheduler import (
     _LRScheduler,
     CosineAnnealingLR,
+    LambdaLR,
     ReduceLROnPlateau,
-    StepLR,
-    LinearLR,
     SequentialLR,
-    LambdaLR
+    StepLR,
 )
+
 from .muon import (
-    MuonWithAuxAdam, 
-    SingleDeviceMuonWithAuxAdam, 
-    NorMuonWithAuxAdam, 
-    SingleDeviceNorMuonWithAuxAdam
+    MuonWithAuxAdam,
+    NorMuonWithAuxAdam,
+    SingleDeviceMuonWithAuxAdam,
+    SingleDeviceNorMuonWithAuxAdam,
 )
-from ..utils.nn_utils import prepare_param_groups_for_muon  # type: ignore
+from ..utils.nn_utils import prepare_param_groups_for_muon
 
 
 __all__ = ["build_optimizer", "build_scheduler"]
 
 
 def _lower_name(cfg: Mapping[str, Any], default: str) -> str:
-    name = cfg.get("name", default) if isinstance(cfg, Mapping) else default
-    return str(name).lower()
+    return str(cfg.get("name", default)).lower()
+
+
+def _as_params(params):
+    return params.parameters() if isinstance(params, nn.Module) else params
+
+
+def _distributed_initialized() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _apply_muon_group_lrs(
+    groups: list[dict[str, Any]],
+    *,
+    muon_lr: Optional[float],
+    adam_lr: Optional[float],
+) -> None:
+    if muon_lr is None and adam_lr is None:
+        return
+    for group in groups:
+        if group.get("use_muon", False):
+            if muon_lr is not None:
+                group["lr"] = muon_lr
+        elif adam_lr is not None:
+            group["lr"] = adam_lr
+
+
+def _muon_classes(name: str):
+    if name == "muon":
+        return SingleDeviceMuonWithAuxAdam, MuonWithAuxAdam
+    return SingleDeviceNorMuonWithAuxAdam, NorMuonWithAuxAdam
+
+
+def _build_muon_optimizer(
+    params,
+    *,
+    name: str,
+    lr: float,
+    weight_decay: float,
+    muon_lr: Optional[float],
+    adam_lr: Optional[float],
+) -> Optimizer:
+    single_device_class, distributed_class = _muon_classes(name)
+
+    if isinstance(params, nn.Module):
+        groups = prepare_param_groups_for_muon(params, lr=lr, weight_decay=weight_decay)
+        _apply_muon_group_lrs(groups, muon_lr=muon_lr, adam_lr=adam_lr)
+        cls = distributed_class if _distributed_initialized() else single_device_class
+        return cls(groups)
+
+    if isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
+        groups = list(params)
+        _apply_muon_group_lrs(groups, muon_lr=muon_lr, adam_lr=adam_lr)
+        cls = distributed_class if _distributed_initialized() else single_device_class
+        return cls(groups)
+
+    raise ValueError(
+        "For optimizer=name: 'Muon' or 'NorMuon', pass the model module or a list "
+        "of param_groups with 'use_muon' flags."
+    )
 
 
 def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
     cfg = cfg or {}
     name = _lower_name(cfg, "adamw")
     lr = float(cfg.get("lr", 3e-4))
-    muon_lr = cfg.get("muon_lr", None)
-    muon_lr = float(muon_lr) if muon_lr is not None else None
-    adam_lr = cfg.get("adam_lr", None)
-    adam_lr = float(adam_lr) if adam_lr is not None else None
+    muon_lr_raw = cfg.get("muon_lr")
+    adam_lr_raw = cfg.get("adam_lr")
+    muon_lr = float(muon_lr_raw) if muon_lr_raw is not None else None
+    adam_lr = float(adam_lr_raw) if adam_lr_raw is not None else None
     weight_decay = float(cfg.get("weight_decay", 0.0))
-    # Helper: allow passing a module instead of param iterable
-    def _as_params(p):
-        try:
-            import torch.nn as nn
-            if isinstance(p, nn.Module):
-                return p.parameters()
-        except Exception:
-            pass
-        return p
+
     if name == "adamw":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
         eps = float(cfg.get("eps", 1e-8))
@@ -60,54 +111,15 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
         momentum = float(cfg.get("momentum", 0.9))
         nesterov = bool(cfg.get("nesterov", False))
         return SGD(_as_params(params), lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
-    if name in ["muon", "normuon"]:
-        if name == "muon":
-            single_device_class = SingleDeviceMuonWithAuxAdam
-            dist_class = MuonWithAuxAdam
-        else:
-            single_device_class = SingleDeviceNorMuonWithAuxAdam
-            dist_class = NorMuonWithAuxAdam
-        # Prefer to build param groups using module + tags when available
-        try:
-            import torch.nn as nn
-            if isinstance(params, nn.Module) and prepare_param_groups_for_muon is not None:
-                groups = prepare_param_groups_for_muon(params, lr=lr, weight_decay=weight_decay)  # type: ignore[misc]
-                # Optional per-group learning rates from config
-                if muon_lr is not None or adam_lr is not None:
-                    for g in groups:
-                        if g.get("use_muon", False) and (muon_lr is not None):
-                            g["lr"] = muon_lr
-                        if not g.get("use_muon", False) and (adam_lr is not None):
-                            g["lr"] = adam_lr
-                # Use single-process variant unless torch.distributed is initialized.
-                try:
-                    import torch.distributed as dist
-                    if dist.is_available() and dist.is_initialized():
-                        return dist_class(groups)
-                except Exception:
-                    pass
-                return single_device_class(groups)
-        except Exception:
-            pass
-        # Fallback: if already a param group list, pass through; else raise for clarity
-        if isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
-            # Optional per-group learning rates from config
-            if muon_lr is not None or adam_lr is not None:
-                for g in params:  # type: ignore[assignment]
-                    if not isinstance(g, dict):
-                        continue
-                    if g.get("use_muon", False) and (muon_lr is not None):
-                        g["lr"] = muon_lr
-                    if not g.get("use_muon", False) and (adam_lr is not None):
-                        g["lr"] = adam_lr
-            try:
-                import torch.distributed as dist
-                if dist.is_available() and dist.is_initialized():
-                    return dist_class(params)  # type: ignore[arg-type]
-            except Exception:
-                pass
-            return single_device_class(params)  # type: ignore[arg-type]
-        raise ValueError("For optimizer=name: 'Muon', please pass the model module (not .parameters()), or a list of param_groups with 'use_muon' flags.")
+    if name in {"muon", "normuon"}:
+        return _build_muon_optimizer(
+            params,
+            name=name,
+            lr=lr,
+            weight_decay=weight_decay,
+            muon_lr=muon_lr,
+            adam_lr=adam_lr,
+        )
     raise ValueError(f"Unsupported optimizer name: {name}")
 
 

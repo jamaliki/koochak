@@ -15,9 +15,12 @@ class JSONLLogger:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         self._file = open(self.path, "a", encoding="utf-8")
 
-    def write(self, payload: Dict[str, Any]):
-        self._file.write(json.dumps(payload, sort_keys=True) + "\n")
+    def write(self, payload: Dict[str, Any]) -> None:
+        self._file.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
         self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
 
 
 def make_jsonl_hooks(path: str) -> Dict[str, List]:
@@ -30,7 +33,11 @@ def make_jsonl_hooks(path: str) -> Dict[str, List]:
         payload = {"step": ctx.get("step"), **metrics}
         logger.write(payload)
 
+    def on_train_end(ctx):
+        logger.close()
+
     return {
         "on_log": [rank0_only(on_log)],
         "on_eval_end": [rank0_only(on_eval_end)],
+        "on_train_end": [rank0_only(on_train_end)],
     }

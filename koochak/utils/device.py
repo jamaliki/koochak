@@ -4,6 +4,7 @@ import os
 from typing import Any, Mapping
 
 import torch
+import torch.distributed as dist
 
 __all__ = ["get_device", "ensure_process_device", "get_lr"]
 
@@ -36,16 +37,10 @@ def _detect_local_rank(default: int = 0) -> int:
             except ValueError:
                 continue
 
-    if torch.cuda.is_available():
-        try:
-            import torch.distributed as dist
-
-            if dist.is_available() and dist.is_initialized():
-                world_rank = dist.get_rank()
-                device_count = max(1, torch.cuda.device_count())
-                return world_rank % device_count
-        except Exception:
-            pass
+    if torch.cuda.is_available() and dist.is_available() and dist.is_initialized():
+        world_rank = dist.get_rank()
+        device_count = max(1, torch.cuda.device_count())
+        return world_rank % device_count
 
     return default
 
@@ -66,11 +61,7 @@ def ensure_process_device(device: torch.device) -> torch.device:
         index = _detect_local_rank()
         device = torch.device("cuda", index)
 
-    try:
-        torch.cuda.set_device(device)
-    except Exception:
-        # Fall back to best-effort assignment; subsequent CUDA ops will raise if invalid.
-        pass
+    torch.cuda.set_device(device)
     return device
 
 
