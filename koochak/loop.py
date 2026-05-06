@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import statistics
 import time
+import json
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 import math
@@ -21,6 +22,7 @@ from .core import dist as dist_lib
 from .core.precision import Scaler as make_scaler, autocast_context, prepare_compile_backend
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
+from .health.gpu import GpuHealthWatchdog, summarize_failures_for_stdout
 from .utils import config as config_lib
 from .utils import flags as flags_lib
 from .utils.device import get_device, ensure_process_device, get_lr
@@ -391,6 +393,39 @@ def training_loop(
     # Optional EMA of parameters
     ema: EMA | None = None
 
+    gpu_health = GpuHealthWatchdog(device=device, out_dir=out_dir, rank=rank, world_size=world_size)
+
+    def _build_checkpoint(step: int, *, metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        now = time.time()
+        model_to_save = getattr(model, "module", model)
+        try:
+            rng_record = get_rng_state()  # local-only; no cross-rank gather
+        except Exception:
+            rng_record = None
+
+        ckpt = {
+            "step": step,
+            "model": model_to_save.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
+            "config": cfg_json,
+            "rng": rng_record,
+            "wall_time": now,
+            "metrics": dict(metrics or {}),
+        }
+        if ema is not None:
+            ckpt["ema"] = ema.state_dict()
+        return ckpt
+
+    def _save_checkpoint(step: int, *, metrics: Optional[Dict[str, Any]] = None) -> tuple[str, Dict[str, Any]]:
+        ckpt = _build_checkpoint(step, metrics=metrics)
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"step{step:09d}.pt")
+        saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=keep_last_k)
+        _emit(hooks, "on_checkpoint", saved_path, ckpt, {**ctx, "step": step})
+        return saved_path, ckpt
+
     # If using DDP, wrap model here so state_dict key mapping can be adjusted accordingly
     # and then restore model/optimizer/scheduler/scaler from checkpoint if provided.
     try:
@@ -689,6 +724,56 @@ def training_loop(
             
             _emit(hooks, "on_step_end", logs, {**ctx, "step": step})
 
+            # Always-on CUDA health watchdog. This is deliberately not a hook:
+            # hooks may suppress exceptions, while a confirmed GPU fault must
+            # save and stop/requeue the job deterministically.
+            if gpu_health.should_check_step(step):
+                local_failure = gpu_health.check_local(step)
+                failures = gpu_health.gather_failures(local_failure)
+                if failures:
+                    if is_rank0:
+                        bad_nodes = gpu_health.bad_nodes_from_failures(failures)
+                        health_metrics = {
+                            "gpu_health": {
+                                "event": "gpu_health_shutdown",
+                                "failures": failures,
+                                "bad_nodes": bad_nodes,
+                                "slurm_action": gpu_health.slurm_action,
+                                "slurm_disabled": gpu_health.slurm_disabled,
+                            }
+                        }
+                        saved_path, final_ckpt = _save_checkpoint(step, metrics=health_metrics)
+                        summary_path = gpu_health.write_failure_summary(
+                            step=step,
+                            failures=failures,
+                            checkpoint_path=saved_path,
+                        )
+                        print(f"[gpu-health] FAIL step={step} {summarize_failures_for_stdout(failures)}", flush=True)
+                        print(
+                            "[gpu-health] checkpoint="
+                            f"{saved_path} summary={summary_path} slurm_action={gpu_health.slurm_action} "
+                            f"bad_nodes={','.join(bad_nodes)}",
+                            flush=True,
+                        )
+
+                    if dist_lib.is_initialized():
+                        dist_lib.barrier()
+
+                    if is_rank0:
+                        slurm_results = gpu_health.perform_slurm_recovery(failures)
+                        if slurm_results:
+                            print(f"[gpu-health] slurm_results={json.dumps(slurm_results, sort_keys=True)}", flush=True)
+                    elif (
+                        os.environ.get("SLURM_JOB_ID")
+                        and not gpu_health.slurm_disabled
+                        and gpu_health.slurm_action in {"requeue", "cancel"}
+                    ):
+                        # Give rank 0 time to mutate the Slurm job before the
+                        # launcher tears down the rest of the ranks.
+                        time.sleep(30.0)
+
+                    raise SystemExit(gpu_health.exit_code)
+
             # Periodic eval
             if eval_fn is not None and eval_dataset is not None and (step % eval_every == 0):
                 # Optionally evaluate with EMA weights
@@ -710,30 +795,7 @@ def training_loop(
 
             # Periodic checkpoint
             if (step > 0) and (step % ckpt_every == 0) and is_rank0:
-                now = time.time()
-                model_to_save = getattr(model, "module", model)
-                try:
-                    rng_record = get_rng_state()  # local-only; no cross-rank gather
-                except Exception:
-                    rng_record = None
-
-                ckpt = {
-                    "step": step,
-                    "model": model_to_save.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict() if scheduler is not None else None,
-                    "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
-                    "config": cfg_json,
-                    "rng": rng_record,
-                    "wall_time": now,
-                    "metrics": {},
-                }
-                if ema is not None: ckpt["ema"] = ema.state_dict()
-
-                os.makedirs(out_dir, exist_ok=True)
-                path = os.path.join(out_dir, f"step{step:09d}.pt")
-                saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=keep_last_k)
-                _emit(hooks, "on_checkpoint", saved_path, ckpt, {**ctx, "step": step})
+                saved_path, ckpt = _save_checkpoint(step)
                 final_ckpt = ckpt
 
             last_out = out
@@ -749,23 +811,6 @@ def training_loop(
 
     # If we never saved inside the loop, construct a final ckpt snapshot
     if final_ckpt is None:
-        model_to_save = getattr(model, "module", model)
-        # No per-rank gather here; this is a final constructed dict for return
-        final_ckpt = {
-            "step": max_steps,
-            "model": model_to_save.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict() if scheduler is not None else None,
-            "scaler": (scaler.state_dict() if isinstance(scaler, GradScaler) else None),
-            "config": cfg_json,
-            "rng": get_rng_state(),
-            "wall_time": time.time(),
-            "metrics": {},
-        }
-        try:
-            if ema is not None:
-                final_ckpt["ema"] = ema.state_dict()
-        except Exception:
-            pass
+        final_ckpt = _build_checkpoint(max_steps)
 
     return final_ckpt
