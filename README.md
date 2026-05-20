@@ -27,6 +27,10 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
     - `jsonl.py` – `JSONLLogger` and `make_jsonl_hooks(path)`.
     - `wandb_logger.py` – optional W&B hooks (lazy import), artifact upload.
+  - `jobs/`
+    - `specs.py` – typed job specs, Slurm resources, runtime flags, config patches, and handles.
+    - `ssh.py` – injected SSH command runner, compatible with plain SSH or multiplexing helpers.
+    - `slurm.py` – render, stage, submit, status, tail, and JSONL metrics helpers for Slurm jobs.
   - `optim/`
     - `build.py` – tiny builders for optimizers/schedulers (supports cosine, step, plateau, cosine_warmup).
   - `storage/`
@@ -143,6 +147,64 @@ wandb: { enabled: false, project: ... }
 ```
 
 The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop` with `train_cfg`.
+
+## SSH/Slurm Job API
+
+Koochak also includes a small publishable job-launch layer for config-driven
+Slurm training over an injected SSH command. It does not know any private
+cluster hostnames, users, or paths. Pass either a plain SSH command or a local
+multiplexing helper as `ssh_command`; Koochak treats it as an opaque executable
+that accepts one remote shell command argument.
+
+```
+from koochak.jobs import (
+    ConfigPatch,
+    RemotePaths,
+    SlurmResources,
+    SshSlurmBackend,
+    TrainJobSpec,
+)
+
+backend = SshSlurmBackend(
+    ssh_command=["ssh", "-o", "ConnectTimeout=60", "cluster-login"],
+    remote_paths=RemotePaths(
+        repo="/remote/repo",
+        run_root="/remote/repo/runs",
+        python="/remote/env/bin/python",
+    ),
+)
+
+job = TrainJobSpec(
+    name="smoke_len128",
+    base_config="configs/train.yaml",
+    patches=[
+        ConfigPatch("train.max_steps", 500),
+        ConfigPatch("data.max_length", 128),
+        ConfigPatch("wandb.enabled", False),
+    ],
+    command=["-m", "my_pkg.train", "--config", "{config}"],
+    resources=SlurmResources(
+        partition="gpu",
+        gpus=1,
+        cpus=32,
+        mem_gb=128,
+        time="02:00:00",
+    ),
+)
+
+rendered = backend.render(job, local_dir="./rendered-smoke")  # dry-run
+handle = backend.submit(job)
+print(handle.job_id, handle.run_dir)
+```
+
+Config patches are applied in Python with OmegaConf, then written as a
+materialized YAML file. The generated sbatch file only points to that config
+path; it does not embed YAML in shell heredocs. `SlurmResources.mem_gb` is
+required so launchers do not accidentally submit unbounded-memory jobs.
+
+See `examples/clusters/slurm_ssh.toml` for a sanitized profile shape. Keep real
+cluster details in user-local config such as
+`~/.config/koochak/clusters/<name>.toml`.
 
 
 ## Core API
