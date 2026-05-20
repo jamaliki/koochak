@@ -33,6 +33,10 @@ This doc tracks incremental design decisions and changes from the initial design
   - `koochak/logging/wandb_logger.py` – lazy-import W&B hooks, logs metrics and artifacts, tracks `best/*` summaries.
   - CSV/JSONL/W&B/Stdout loggers all record the resolved config via `on_train_start` so runs capture their inputs alongside metrics.
 
+- Jobs
+  - `koochak/jobs` provides a generic SSH/Slurm launch layer: typed resources, config patches, runtime env flags, render/stage/submit, status, tail, and JSONL metrics helpers.
+  - The backend accepts an injected SSH command prefix, so plain SSH and local multiplexing helpers are supported without hard-coding private cluster details.
+
 - Optim
   - `koochak/optim/build.py` – tiny builders for optimizers (AdamW/Adam/SGD) and schedulers (cosine, step, plateau). Added cosine-with-warmup (`cosine_warmup`).
 
@@ -76,6 +80,10 @@ This list guides ongoing work. All contributors (agents and humans) should updat
   - Behavior: Imports callables, builds model/optim/scheduler/datasets, attaches hooks (stdout/CSV/JSONL/W&B), handles resume via latest checkpoint, supports DDP (auto `init_process_group` + sharding), then calls `training_loop`.
   - Value: Consistent UX; reduces boilerplate; easier automation.
 - Tests: unit tests for precision helpers, checkpoint round-trip, sharding helpers [TODO]
+- SSH/Slurm jobs API [DONE]
+  - Generic `koochak.jobs` package with no private cluster backend.
+  - Config materialization uses OmegaConf patches; sbatch files reference config paths rather than embedding YAML.
+  - Tests cover rendering, submit/status parsing, SSH command injection, and private-string scanning.
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
 

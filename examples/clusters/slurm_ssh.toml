@@ -1,0 +1,10 @@
+# Sanitized example only. Keep real cluster hostnames, user names, and paths in
+# user-local config such as ~/.config/koochak/clusters/<name>.toml.
+
+ssh_command = ["ssh", "-o", "ConnectTimeout=60", "cluster-login"]
+
+[remote_paths]
+repo = "/remote/project/repo"
+run_root = "/remote/project/repo/runs"
+python = "/remote/env/bin/python"
+path_prefixes = ["/remote/env/bin"]
