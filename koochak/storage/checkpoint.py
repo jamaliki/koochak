@@ -39,21 +39,29 @@ def _maybe_symlink_latest(step_path: str) -> Optional[str]:
 
     directory = os.path.dirname(os.path.abspath(step_path))
     latest_path = os.path.join(directory, "latest.pt")
+    if os.path.islink(latest_path) or os.path.exists(latest_path):
+        # An existing symlink/file may refuse atomic replace on some filesystems;
+        # unlink eagerly and treat absence as success.
+        try:
+            os.remove(latest_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Permission/in-use error: skip symlink, try copy below.
+            return _copy_latest(step_path, latest_path)
     try:
-        if os.path.islink(latest_path) or os.path.exists(latest_path):
-            try:
-                os.remove(latest_path)
-            except OSError:
-                pass
         os.symlink(os.path.basename(step_path), latest_path)
         return latest_path
     except (OSError, NotImplementedError):
-        # Fallback: copy file (not atomic but acceptable as a convenience)
-        try:
-            shutil.copy2(step_path, latest_path)
-            return latest_path
-        except OSError:
-            return None
+        return _copy_latest(step_path, latest_path)
+
+
+def _copy_latest(step_path: str, latest_path: str) -> Optional[str]:
+    try:
+        shutil.copy2(step_path, latest_path)
+        return latest_path
+    except OSError:
+        return None
 
 
 _STEP_RE = re.compile(r"step(\d+)\.pt$")
@@ -95,7 +103,15 @@ def best(directory: str, key: str = "val_loss") -> Optional[str]:
 
 
 def _has_module_prefix(sd: "OrderedDict[str, torch.Tensor] | Dict[str, torch.Tensor]") -> bool:
-    return any(isinstance(k, str) and k.startswith("module.") for k in sd.keys())
+    """Treat a state dict as DDP-wrapped only when every key carries the prefix.
+
+    Mixed dicts (some prefixed, some not) are returned unchanged by
+    `match_state_dict_to_model`, since either transformation would silently drop keys.
+    """
+    keys = list(sd.keys())
+    if not keys:
+        return False
+    return all(isinstance(k, str) and k.startswith("module.") for k in keys)
 
 
 def strip_module_prefix(sd: Dict[str, Any]) -> "OrderedDict[str, Any]":
@@ -120,10 +136,10 @@ def match_state_dict_to_model(model: Any, sd: Dict[str, Any]) -> "OrderedDict[st
     If model expects `module.*` keys but sd doesn't, add them; if the reverse, strip them.
     Otherwise return sd unchanged.
     """
-    try:
-        model_keys = list(getattr(model, "state_dict")().keys())
-    except Exception:
+    state_dict_fn = getattr(model, "state_dict", None)
+    if state_dict_fn is None:
         return OrderedDict(sd)
+    model_keys = list(state_dict_fn().keys())
     model_expects_module = any(isinstance(k, str) and k.startswith("module.") for k in model_keys)
     sd_has_module = _has_module_prefix(sd)
     if model_expects_module and not sd_has_module:

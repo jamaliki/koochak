@@ -4,25 +4,21 @@ import os
 import re
 from typing import List
 
+from .naming import _step_from_match
+
 
 def _extract_step(name: str, pattern: re.Pattern[str]) -> int:
+    """Return the integer step from `name`, or -1 if it cannot be parsed."""
     m = pattern.search(name)
     if not m:
         return -1
-    # Choose the last captured group that is an int
-    for g in reversed(m.groups()):
-        try:
-            return int(g)
-        except ValueError:
-            continue
-    return -1
+    step = _step_from_match(m)
+    return -1 if step is None else step
 
 
 def prune_keep_last_k(directory: str, pattern: str, k: int) -> None:
     """Delete older matching files, keeping the last `k` by numeric step."""
-    if k <= 0:
-        return
-    if not os.path.isdir(directory):
+    if k <= 0 or not os.path.isdir(directory):
         return
     rx = re.compile(pattern)
     files: List[str] = [

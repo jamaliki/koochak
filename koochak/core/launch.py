@@ -98,7 +98,8 @@ def _set_cuda_device(local_rank: Optional[int]) -> Optional[int]:
     # Fall back to current device, or default to 0 when CUDA is present
     try:
         current = torch.cuda.current_device()
-    except Exception:
+    except RuntimeError:
+        # Raised when CUDA is reported available but no device has been initialised yet.
         current = 0
     torch.cuda.set_device(current)
     return int(current)

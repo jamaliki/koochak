@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any, Dict, List, Mapping
+
+from .. import config as config_lib
 from ..core.hooks import rank0_only
 from ..storage.naming import make_checkpoint_aliases
 
@@ -19,6 +21,16 @@ def _run_id_from_name(name: str) -> str:
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()  # 40 chars
 
 
+def _compile_enabled_from_ctx(ctx: Mapping[str, Any]) -> bool:
+    train_cfg = ctx.get("train_cfg") or {}
+    compile_cfg = config_lib.get(train_cfg, "compile", None)
+    if isinstance(compile_cfg, Mapping):
+        return bool(compile_cfg.get("enabled", True))
+    if isinstance(compile_cfg, bool):
+        return bool(compile_cfg)
+    return bool(compile_cfg)
+
+
 def make_wandb_hooks(cfg) -> Dict[str, List]:
     """Factory returning W&B hook callbacks per design_doc.
 
@@ -26,110 +38,84 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
     """
     import wandb  # type: ignore
 
-    # If a simple dict-like is passed, mimic attribute access
-    class _Cfg:
-        def __init__(self, c):
-            self._c = c
-
-        def __getattr__(self, name):
-            if isinstance(self._c, dict):
-                return self._c.get(name)
-            return getattr(self._c, name)
-
-    cfg = _Cfg(cfg)
+    # Read-through accessor handling both Mapping and attr-bearing cfgs uniformly.
+    def get(key: str, default: Any = None) -> Any:
+        return config_lib.get(cfg, key, default)
 
     # Track best metrics to alias artifacts accordingly
     best_values: Dict[str, float] = {}
     best_steps: Dict[str, int] = {}
 
-    def _cfg_get(obj, key: str, default=None):
-        try:
-            if isinstance(obj, Mapping):
-                return obj.get(key, default)
-        except Exception:
-            pass
-        return getattr(obj, key, default)
-
-    def _compile_enabled(ctx: Dict[str, Any]) -> bool:
-        train_cfg = ctx.get("train_cfg") or {}
-        compile_cfg = _cfg_get(train_cfg, "compile", None)
-        if isinstance(compile_cfg, Mapping):
-            return bool(compile_cfg.get("enabled", True))
-        if isinstance(compile_cfg, bool):
-            return bool(compile_cfg)
-        return bool(compile_cfg)
-
     def on_train_start(ctx: Dict[str, Any]):
-        if getattr(cfg, "enabled", True) is False:
+        if get("enabled", True) is False:
             return
         settings = wandb.Settings()
 
-        run_name = getattr(cfg, "name", None)
-        resume_mode = getattr(cfg, "resume", None)
-        run_id = getattr(cfg, "id", None)
+        run_name = get("name", None)
+        resume_mode = get("resume", None)
+        run_id = get("id", None)
         if not run_id and run_name:
             run_id = _run_id_from_name(run_name)
 
         wandb.init(
-            project=getattr(cfg, "project", "koochak"),
-            entity=getattr(cfg, "entity", None),
-            name=run_name,                                
-            group=getattr(cfg, "group", None),
-            job_type=getattr(cfg, "job_type", None),
-            tags=getattr(cfg, "tags", None),
-            notes=getattr(cfg, "notes", None),
-            mode=getattr(cfg, "mode", "online"),
-            dir=getattr(cfg, "dir", None),
-            id=run_id,                                    
+            project=get("project", "koochak"),
+            entity=get("entity", None),
+            name=run_name,
+            group=get("group", None),
+            job_type=get("job_type", None),
+            tags=get("tags", None),
+            notes=get("notes", None),
+            mode=get("mode", "online"),
+            dir=get("dir", None),
+            id=run_id,
             resume=resume_mode,
             settings=settings,
             config=ctx.get("config_json") or ctx.get("config"),
-            allow_val_change=True,                        
+            allow_val_change=True,
         )
 
-        watch_model = getattr(cfg, "watch_model", None)
+        watch_model = get("watch_model", None)
         if watch_model is None:
-            watch_model = not _compile_enabled(ctx)
+            watch_model = not _compile_enabled_from_ctx(ctx)
 
-        if watch_model:
-            model = ctx.get("model")
-            if model is not None:
-                if getattr(cfg, "watch_unwrap_ddp", True) and hasattr(model, "module"):
-                    try:
-                        model = model.module
-                    except Exception:
-                        pass
-
-                watch_kwargs = {
-                    "log": getattr(cfg, "watch_log", "all") or "all",
-                    "log_freq": int(getattr(cfg, "watch_log_freq", 100) or 100),
-                    "log_graph": bool(getattr(cfg, "watch_log_graph", False)),
-                }
-
-                try:
-                    watch_fn = getattr(wandb, "watch_model", None)
-                    if callable(watch_fn):
-                        watch_fn(model, criterion=None, **watch_kwargs)
-                    else:
-                        wandb.watch(model, **watch_kwargs)
-                except Exception as exc:
-                    msg = (
-                        "wandb.watch/watch_model failed; gradients/parameters won't be tracked. "
-                        f"Error: {exc}"
-                    )
-                    try:
-                        wandb.termwarn(msg)
-                    except Exception:
-                        print(f"[wandb] {msg}")
+        if not watch_model:
+            return
+        model = ctx.get("model")
+        if model is None:
+            return
+        if get("watch_unwrap_ddp", True):
+            model = getattr(model, "module", model)
+        watch_kwargs = {
+            "log": get("watch_log", "all") or "all",
+            "log_freq": int(get("watch_log_freq", 100) or 100),
+            "log_graph": bool(get("watch_log_graph", False)),
+        }
+        try:
+            watch_fn = getattr(wandb, "watch_model", None)
+            if callable(watch_fn):
+                watch_fn(model, criterion=None, **watch_kwargs)
+            else:
+                wandb.watch(model, **watch_kwargs)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            msg = (
+                "wandb.watch/watch_model failed; gradients/parameters won't be tracked. "
+                f"Error: {exc}"
+            )
+            termwarn = getattr(wandb, "termwarn", None)
+            if callable(termwarn):
+                termwarn(msg)
+            else:
+                print(f"[wandb] {msg}")
 
     def on_log(logs: Dict[str, Any], ctx: Dict[str, Any]):
         # Avoid W&B "out of order step" warnings when eval logs at same step.
         # If this step will also emit eval metrics, delay the commit until on_eval_end.
         step = int(ctx.get("step", 0))
         train_cfg = ctx.get("train_cfg") or {}
+        eval_every_raw = config_lib.get(train_cfg, "eval_every", 0)
         try:
-            eval_every = int(_cfg_get(train_cfg, "eval_every", 0))
-        except Exception:
+            eval_every = int(eval_every_raw) if eval_every_raw is not None else 0
+        except (TypeError, ValueError):
             eval_every = 0
         will_eval = eval_every > 0 and (step % eval_every == 0)
         wandb.log(logs, step=step, commit=not will_eval)
@@ -141,14 +127,13 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         if run is None:
             return
         for k, v in metrics.items():
-            prev = run.summary.get(f"best/{k}", float("inf"))
+            prev_raw = run.summary.get(f"best/{k}", float("inf"))
             try:
-                prev = float(prev)
+                prev = float(prev_raw)
                 val = float(v)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             run.summary[f"best/{k}"] = min(prev, val)
-            # Track best step for aliasing artifacts later
             if val <= prev:
                 best_values[k] = val
                 step = int(ctx.get("step", -1))
@@ -156,34 +141,37 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
                     best_steps[k] = step
 
     def _artifact_base_name(run) -> str:
-        prefix = getattr(cfg, "artifact_name_prefix", None) or getattr(cfg, "artifact_name", None) or "model"
-        # Prefer stable run id for versioning within a collection
+        prefix = get("artifact_name_prefix", None) or get("artifact_name", None) or "model"
         rid = getattr(run, "id", None) or getattr(run, "name", None) or "unknown"
         return f"{prefix}-{rid}"
 
     def on_checkpoint(path: str, ckpt: Dict[str, Any], ctx: Dict[str, Any]):
-        if not getattr(cfg, "log_artifacts", True):
+        if not get("log_artifacts", True):
             return
         run = wandb.run
         if run is None:
             return
-        art_type = getattr(cfg, "artifact_type", "model")
+        art_type = get("artifact_type", "model")
         name = _artifact_base_name(run)
-        art = wandb.Artifact(name=name, type=art_type, metadata={
-            "step": ctx.get("step"),
-        })
+        art = wandb.Artifact(name=name, type=art_type, metadata={"step": ctx.get("step")})
         art.add_file(path)
-        # Determine if this step is best for any tracked key
         step = int(ctx.get("step", -1))
         best_keys_for_step: List[str] = [k for k, s in best_steps.items() if s == step]
-        aliases = make_checkpoint_aliases(step if step >= 0 else None, include_latest=True, best_keys=best_keys_for_step or None)
+        aliases = make_checkpoint_aliases(
+            step if step >= 0 else None,
+            include_latest=True,
+            best_keys=best_keys_for_step or None,
+        )
         wandb.log_artifact(art, aliases=aliases)
 
     def on_train_end(ctx: Dict[str, Any]):
-        try:
-            wandb.finish()
-        except Exception:
-            pass
+        finish = getattr(wandb, "finish", None)
+        if callable(finish):
+            try:
+                finish()
+            except RuntimeError:
+                # wandb may already be torn down (e.g., crashed sub-run); nothing to do.
+                pass
 
     return {
         "on_train_start": [rank0_only(on_train_start)],

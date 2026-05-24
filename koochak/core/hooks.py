@@ -41,9 +41,10 @@ def emit(
         try:
             fn(*args, **kwargs)
         except Exception:
+            # User-supplied callbacks may raise anything; by default we swallow so the
+            # training loop is not destabilised by logging/wandb/csv errors.
             if not suppress_exceptions:
                 raise
-            # Hooks should not crash the training loop.
             continue
 
 
