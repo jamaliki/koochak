@@ -36,7 +36,7 @@ def prepare_compile_backend() -> None:
         return
     try:
         from torch._dynamo import graph_region_tracker
-    except Exception:
+    except ImportError:
         return
 
     current = getattr(graph_region_tracker, "get_global_state_key", None)

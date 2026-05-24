@@ -37,13 +37,20 @@ _thread_state = threading.local()
 _COMPILE_WRAP_ENABLED = True
 
 
-def _env_flag(primary: str, legacy: str, default: str = "0") -> bool:
-    value = os.environ.get(primary, os.environ.get(legacy, default))
-    return value == "1"
+def _env_resolve(default: str, *names: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value
+    return default
 
 
-def _env_value(primary: str, legacy: str, default: str) -> str:
-    return os.environ.get(primary, os.environ.get(legacy, default))
+def _env_flag(default: str = "0", *names: str) -> bool:
+    return _env_resolve(default, *names) == "1"
+
+
+def _env_value(default: str, *names: str) -> str:
+    return _env_resolve(default, *names)
 
 
 def _set_checkpoint_recompute(value: bool) -> None:
@@ -77,18 +84,24 @@ def checkpoint_context_fn():
 def get_use_compile() -> bool:
     if not _COMPILE_WRAP_ENABLED:
         return False
-    return _env_flag("SEE_MORE_ALPHA_USE_COMPILE", "KAVEH_USE_COMPILE", "0")
+    return _env_flag("0", "KOOCHAK_USE_COMPILE", "SEE_MORE_ALPHA_USE_COMPILE", "KAVEH_USE_COMPILE")
 
 
 def get_compile_mode() -> str:
-    return _env_value("SEE_MORE_ALPHA_COMPILE_MODE", "KAVEH_COMPILE_MODE", "default")
+    return _env_value(
+        "default",
+        "KOOCHAK_COMPILE_MODE",
+        "SEE_MORE_ALPHA_COMPILE_MODE",
+        "KAVEH_COMPILE_MODE",
+    )
 
 
 def get_checkpointing() -> bool:
     return _env_flag(
+        "0",
+        "KOOCHAK_USE_GRADIENT_CHECKPOINTING",
         "SEE_MORE_ALPHA_USE_GRADIENT_CHECKPOINTING",
         "KAVEH_USE_GRADIENT_CHECKPOINTING",
-        "0",
     )
 
 
@@ -150,7 +163,12 @@ class compile_wrap:
         except Exception as exc:
             if self._should_fallback(exc):
                 self._compiled_function = self.function
-                if _env_flag("SEE_MORE_ALPHA_COMPILE_DEBUG", "KAVEH_COMPILE_DEBUG", "0"):
+                if _env_flag(
+                    "0",
+                    "KOOCHAK_COMPILE_DEBUG",
+                    "SEE_MORE_ALPHA_COMPILE_DEBUG",
+                    "KAVEH_COMPILE_DEBUG",
+                ):
                     warnings.warn(
                         f"Falling back to eager execution for {self.function.__qualname__}: {exc}",
                         RuntimeWarning,

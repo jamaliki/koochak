@@ -13,6 +13,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
 
+from ..utils.paths import canonical_dir
+
 
 WARMUP_STEPS = 20
 CHECK_EVERY_STEPS = 10
@@ -300,7 +302,7 @@ def evaluate_sample(sample: GpuHealthSample) -> List[str]:
 class GpuHealthWatchdog:
     def __init__(self, *, device: torch.device, out_dir: str, rank: int, world_size: int) -> None:
         self.device = device
-        self.out_dir = os.path.abspath(os.path.expanduser(out_dir))
+        self.out_dir = canonical_dir(out_dir)
         self.rank = int(rank)
         self.world_size = int(world_size)
         self.hostname = socket.gethostname()
@@ -437,7 +439,7 @@ class GpuHealthWatchdog:
                     text=True,
                     timeout=10.0,
                 )
-            except Exception as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 self._write_notice(f"nvidia-smi query failed: {exc}")
                 return None
             if proc.returncode != 0:
@@ -507,7 +509,7 @@ class GpuHealthWatchdog:
                 "stdout": proc.stdout.strip(),
                 "stderr": proc.stderr.strip(),
             }
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             return {"cmd": " ".join(cmd), "returncode": None, "stdout": "", "stderr": str(exc)}
 
     def _health_dir(self) -> Path:
@@ -520,8 +522,12 @@ class GpuHealthWatchdog:
             path = self._health_dir() / f"{stem}_rank{self.rank}.jsonl"
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, sort_keys=True) + "\n")
-        except Exception:
-            pass
+        except OSError as exc:
+            # Health logging must not crash training; record one notice and move on.
+            if stem != "gpu_health_notices" and not self._notice_written:
+                self._notice_written = True
+                # No filesystem available — just print so the operator can see why we stopped logging.
+                print(f"[gpu-health] failed to write {stem} log: {exc}", flush=True)
 
     def _write_notice(self, message: str) -> None:
         if self._notice_written:

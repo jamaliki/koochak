@@ -139,18 +139,19 @@ class EMA:
         }
 
     def load_state_dict(self, state: Dict[str, object]) -> None:
-        try: self.decay = float(state.get("decay", self.decay))  # type: ignore[arg-type]
-        except Exception: pass
+        decay = state.get("decay", self.decay)
+        if isinstance(decay, (int, float)):
+            self.decay = float(decay)
         prof = state.get("profile", self.profile)
-        if isinstance(prof, str): self.profile = prof.lower()
+        if isinstance(prof, str):
+            self.profile = prof.lower()
         g = state.get("gamma", None)
-        if g is not None:
-            try: self.gamma = float(g)
-            except Exception: pass
-        try: self.num_updates = int(state.get("num_updates", 0))  # type: ignore[arg-type]
-        except Exception: self.num_updates = 0
+        if isinstance(g, (int, float)):
+            self.gamma = float(g)
+        num_updates = state.get("num_updates", 0)
+        self.num_updates = int(num_updates) if isinstance(num_updates, (int, float)) else 0
 
-        shadow = state.get("shadow", {})  # type: ignore[assignment]
+        shadow = state.get("shadow", {})
         if isinstance(shadow, dict):
             for k, v in shadow.items():
                 if k in self.shadow and isinstance(v, torch.Tensor):
@@ -198,14 +199,20 @@ class EMA:
 
     @torch.no_grad()
     def flush(self) -> None:
-        # wait for any in-flight copies and apply them
-        if any(ev is not None for ev in self.pending_event.values()):
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            for name, ev in self.pending_event.items():
-                if ev is None:
-                    continue
-                dst = self.shadow[name]
-                d_used = self.pending_decay.get(name, self.decay)
-                dst.mul_(d_used).add_(self.staging[name], alpha=(1.0 - d_used))
-                self.pending_event[name] = None
+        # Wait for any in-flight copies and apply them. Events can only exist when CUDA
+        # is available — but if a state-dict was loaded from a CUDA host onto a CPU-only
+        # one, refuse to silently drop the pending copy.
+        if not any(ev is not None for ev in self.pending_event.values()):
+            return
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "EMA has pending CUDA copies but CUDA is not available on this process"
+            )
+        torch.cuda.synchronize()
+        for name, ev in self.pending_event.items():
+            if ev is None:
+                continue
+            dst = self.shadow[name]
+            d_used = self.pending_decay.get(name, self.decay)
+            dst.mul_(d_used).add_(self.staging[name], alpha=(1.0 - d_used))
+            self.pending_event[name] = None

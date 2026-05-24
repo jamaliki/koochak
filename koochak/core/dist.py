@@ -11,6 +11,7 @@ __all__ = [
     "rank",
     "world_size",
     "rank0",
+    "print0",
 ]
 
 
@@ -68,6 +69,6 @@ def world_size() -> int:
 def rank0() -> bool:
     return rank() == 0
 
-def print0(string: str):
+def print0(string: str) -> None:
     if rank0():
         print(string)

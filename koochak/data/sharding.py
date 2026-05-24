@@ -29,7 +29,9 @@ def is_sharded(obj: Any) -> bool:
 def mark_sharded(obj: Any) -> Any:
     try:
         setattr(obj, _KOOCHAK_SHARDED_ATTR, True)
-    except Exception:
+    except (AttributeError, TypeError):
+        # Built-in types (list, tuple, generator) can't carry attributes; that's fine —
+        # the consumer can fall back to is_sharded()'s wrapper-instance check.
         pass
     return obj
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Pattern
 
 __all__ = [
     "parse_step_from_name",
@@ -11,26 +11,35 @@ __all__ = [
 ]
 
 
-_STEP_RX = re.compile(r"step(\d+)\.pt$")
+DEFAULT_STEP_PATTERN: str = r"step(\d+)\.pt$"
+_STEP_RX: Pattern[str] = re.compile(DEFAULT_STEP_PATTERN)
 
 
-def parse_step_from_name(name: str, pattern: str = r"step(\d+)\.pt$") -> Optional[int]:
+def _step_from_match(match: re.Match[str]) -> Optional[int]:
+    """Return the numeric step from the last non-empty capture group, or None."""
+    for g in reversed(match.groups()):
+        if g is None:
+            continue
+        try:
+            return int(g)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_step_from_name(name: str, pattern: str = DEFAULT_STEP_PATTERN) -> Optional[int]:
     """Extract numeric step from a checkpoint filename.
 
     Returns None if the pattern doesn't match.
     """
-    rx = re.compile(pattern)
+    rx = _STEP_RX if pattern == DEFAULT_STEP_PATTERN else re.compile(pattern)
     m = rx.search(name)
     if not m:
         return None
-    try:
-        # Use the last captured group as the step if multiple are present
-        return int([g for g in m.groups() if g][-1])
-    except (IndexError, ValueError):
-        return None
+    return _step_from_match(m)
 
 
-def parse_step_from_path(path: str, pattern: str = r"step(\d+)\.pt$") -> Optional[int]:
+def parse_step_from_path(path: str, pattern: str = DEFAULT_STEP_PATTERN) -> Optional[int]:
     return parse_step_from_name(os.path.basename(path), pattern)
 
 

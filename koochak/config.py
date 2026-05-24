@@ -3,11 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Dict, Mapping, Optional, Set
 
-try:
-    from omegaconf import DictConfig, OmegaConf  # type: ignore
-except Exception:  # pragma: no cover - runtime guard
-    DictConfig = None  # type: ignore
-    OmegaConf = None  # type: ignore
+from omegaconf import DictConfig, OmegaConf
 
 from .core import dist as dist_lib
 
@@ -176,12 +172,8 @@ class RootConfig:
     entry: EntryConfig = field(default_factory=EntryConfig)
 
 
-if OmegaConf is not None:
-    STRUCTURED_DEFAULTS = OmegaConf.structured(RootConfig)  # type: ignore[misc]
-    SCHEMA = OmegaConf.to_container(STRUCTURED_DEFAULTS, resolve=False)  # type: ignore[arg-type]
-else:  # pragma: no cover - runtime guard
-    STRUCTURED_DEFAULTS = None
-    SCHEMA = {}
+STRUCTURED_DEFAULTS = OmegaConf.structured(RootConfig)
+SCHEMA: Dict[str, Any] = OmegaConf.to_container(STRUCTURED_DEFAULTS, resolve=False)  # type: ignore[assignment]
 
 
 def get(cfg: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
@@ -193,7 +185,7 @@ def get(cfg: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
 def as_dict(cfg: Mapping[str, Any] | Any) -> Dict[str, Any]:
     if is_dataclass(cfg):
         return asdict(cfg)  # type: ignore[arg-type]
-    if OmegaConf is not None and DictConfig is not None and isinstance(cfg, DictConfig):
+    if isinstance(cfg, DictConfig):
         return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[return-value]
     if isinstance(cfg, Mapping):
         return dict(cfg)
@@ -201,11 +193,7 @@ def as_dict(cfg: Mapping[str, Any] | Any) -> Dict[str, Any]:
 
 
 def load_config(path: str, overrides: Optional[Mapping[str, Any]] = None) -> "DictConfig":
-    if OmegaConf is None:
-        raise RuntimeError("omegaconf is required. Please `pip install omegaconf`.")
     cfg = OmegaConf.load(path)
-    if STRUCTURED_DEFAULTS is None:
-        raise RuntimeError("Structured defaults are unavailable (omegaconf not loaded).")
     cfg = OmegaConf.merge(STRUCTURED_DEFAULTS, cfg)
     if overrides:
         cfg = OmegaConf.merge(cfg, overrides)
@@ -235,9 +223,21 @@ def _schema_walk(cfg: Dict[str, Any], schema: Dict[str, Any], prefix: str = "") 
 
 
 def validate_unknown_keys(cfg: Mapping[str, Any] | Any, schema: Optional[Dict[str, Any]] = None) -> Set[str]:
+    """Pure check: return the set of dotted-path keys in `cfg` that aren't in `schema`."""
     schema = schema or SCHEMA
-    payload = as_dict(cfg)
-    return _schema_walk(payload, schema)
+    return _schema_walk(as_dict(cfg), schema)
+
+
+def _print_summary(payload: Dict[str, Any], unknown: Set[str], *, strict: bool) -> None:
+    if not dist_lib.rank0():
+        return
+    sections = sorted(payload.keys())
+    print("[koochak][config] sections:", ", ".join(sections) or "<none>")
+    if unknown:
+        print("[koochak][config] unknown keys: " + ", ".join(sorted(unknown)))
+    else:
+        print("[koochak][config] unknown keys: <none>")
+    print(f"[koochak][config] strict: {'on' if strict else 'off'}")
 
 
 def summarize(
@@ -247,22 +247,18 @@ def summarize(
     strict: bool = True,
     warn_unknown: bool = True,
 ) -> Set[str]:
+    """Print a section summary and unknown-key report; raise if strict.
+
+    Returns the set of unknown dotted-path keys.
+    """
     schema = schema or SCHEMA
     payload = as_dict(cfg)
-    sections = sorted(payload.keys())
     unknown = _schema_walk(payload, schema)
-    is_rank0 = dist_lib.rank0()
-    if is_rank0:
-        print("[koochak][config] sections:", ", ".join(sections) or "<none>")
-    if unknown:
-        msg = "[koochak][config] unknown keys: " + ", ".join(sorted(unknown))
-        if strict:
-            raise ValueError(msg)
-        if warn_unknown and is_rank0:
-            print(msg)
-    else:
-        if is_rank0:
-            print("[koochak][config] unknown keys: <none>")
-    if is_rank0:
-        print(f"[koochak][config] strict: {'on' if strict else 'off'}")
+    if strict and unknown:
+        # Print sections first so the operator sees what was inspected.
+        if dist_lib.rank0():
+            print("[koochak][config] sections:", ", ".join(sorted(payload.keys())) or "<none>")
+        raise ValueError("[koochak][config] unknown keys: " + ", ".join(sorted(unknown)))
+    if warn_unknown or not unknown:
+        _print_summary(payload, unknown, strict=strict)
     return unknown
