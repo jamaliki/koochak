@@ -114,6 +114,9 @@ def _format_rank_timing(entries: list[dict[str, Any]], step: int) -> str:
         _rank_timing_fragment(entries, "total_step_s"),
         _rank_timing_fragment(entries, "sample_total_time_s"),
         _rank_timing_fragment(entries, "prepared_lookup_time_s"),
+        _rank_timing_fragment(entries, "crop_total_time_s"),
+        _rank_timing_fragment(entries, "crop_prepare_time_s"),
+        _rank_timing_fragment(entries, "render_payload_time_s"),
         _rank_timing_fragment(entries, "make_sample_time_s"),
         _rank_timing_fragment(entries, "cache_get_time_s"),
         _rank_timing_fragment(entries, "crop_selection_time_s"),
@@ -475,6 +478,9 @@ def training_loop(
             cache_get_time_means: list[float] = []
             sample_total_time_means: list[float] = []
             prepared_lookup_time_means: list[float] = []
+            crop_total_time_means: list[float] = []
+            crop_prepare_time_means: list[float] = []
+            render_payload_time_means: list[float] = []
             make_sample_time_means: list[float] = []
             crop_selection_time_means: list[float] = []
             density_generation_time_means: list[float] = []
@@ -514,6 +520,15 @@ def training_loop(
                             )
                             prepared_lookup_time_means.append(
                                 _batch_mean_value(batch, "prepared_lookup_time_s")
+                            )
+                            crop_total_time_means.append(
+                                _batch_mean_value(batch, "crop_total_time_s")
+                            )
+                            crop_prepare_time_means.append(
+                                _batch_mean_value(batch, "crop_prepare_time_s")
+                            )
+                            render_payload_time_means.append(
+                                _batch_mean_value(batch, "render_payload_time_s")
                             )
                             make_sample_time_means.append(
                                 _batch_mean_value(batch, "make_sample_time_s")
@@ -643,6 +658,24 @@ def training_loop(
                             / len(prepared_lookup_time_means)
                         )
                         if prepared_lookup_time_means
+                        else 0.0
+                    ),
+                    "crop_total_time_s": (
+                        float(sum(crop_total_time_means) / len(crop_total_time_means))
+                        if crop_total_time_means
+                        else 0.0
+                    ),
+                    "crop_prepare_time_s": (
+                        float(sum(crop_prepare_time_means) / len(crop_prepare_time_means))
+                        if crop_prepare_time_means
+                        else 0.0
+                    ),
+                    "render_payload_time_s": (
+                        float(
+                            sum(render_payload_time_means)
+                            / len(render_payload_time_means)
+                        )
+                        if render_payload_time_means
                         else 0.0
                     ),
                     "make_sample_time_s": (
