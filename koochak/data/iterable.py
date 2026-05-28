@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections import deque
+import queue
+import threading
+import time
 from typing import Any, Iterable, Iterator
 
 import torch
@@ -35,40 +37,100 @@ def _record_stream(batch: Any, stream: torch.cuda.Stream) -> None:
 class CudaPrefetcher:
     def __init__(self, iterator: Iterator[Any], device: torch.device, prefetch: int = 2):
         self.iterator = iterator
-        self.device = device
+        self.device = torch.device(device)
+        if self.device.index is None:
+            self.device = torch.device(self.device.type, torch.cuda.current_device())
         self.prefetch = max(1, int(prefetch))
-        self.stream = torch.cuda.Stream()
-        self.queue = deque()
-        self._done = False
-        self._fill()
+        with torch.cuda.device(self.device):
+            self.stream = torch.cuda.Stream()
+        self.queue: queue.Queue[Any] = queue.Queue(maxsize=self.prefetch)
+        self._stop = threading.Event()
+        self._error: BaseException | None = None
+        self._sentinel = object()
+        self._thread = threading.Thread(
+            target=self._producer_loop,
+            name="koochak-cuda-prefetch",
+            daemon=True,
+        )
+        self._thread.start()
 
-    def _prefetch_one(self) -> None:
-        if self._done:
-            return
+    def _put(self, item: Any) -> bool:
+        while not self._stop.is_set():
+            try:
+                self.queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _producer_loop(self) -> None:
         try:
-            batch = next(self.iterator)
-        except StopIteration:
-            self._done = True
-            return
-        with torch.cuda.stream(self.stream):
-            batch = to_device(batch, self.device)
-        self.queue.append(batch)
+            while not self._stop.is_set():
+                next_start = time.perf_counter()
+                try:
+                    batch = next(self.iterator)
+                except StopIteration:
+                    break
+                producer_next_s = time.perf_counter() - next_start
 
-    def _fill(self) -> None:
-        while len(self.queue) < self.prefetch and not self._done:
-            self._prefetch_one()
+                transfer_start = time.perf_counter()
+                with torch.cuda.device(self.device):
+                    with torch.cuda.stream(self.stream):
+                        batch = to_device(batch, self.device)
+                        event = torch.cuda.Event()
+                        event.record(self.stream)
+                transfer_enqueue_s = time.perf_counter() - transfer_start
+
+                timings = {
+                    "prefetch_producer_next_s": float(producer_next_s),
+                    "prefetch_transfer_enqueue_s": float(transfer_enqueue_s),
+                }
+                put_start = time.perf_counter()
+                if not self._put((batch, event, timings)):
+                    return
+                timings["prefetch_queue_put_s"] = float(time.perf_counter() - put_start)
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            self._put(self._sentinel)
 
     def __iter__(self) -> "CudaPrefetcher":
         return self
 
     def __next__(self) -> Any:
-        if not self.queue and self._done:
+        queue_wait_start = time.perf_counter()
+        item = self.queue.get()
+        queue_wait_s = time.perf_counter() - queue_wait_start
+        if item is self._sentinel:
+            self.close()
+            if self._error is not None:
+                raise self._error
             raise StopIteration
-        torch.cuda.current_stream().wait_stream(self.stream)
-        batch = self.queue.popleft()
-        _record_stream(batch, torch.cuda.current_stream())
-        self._prefetch_one()
+        batch, event, timings = item
+        with torch.cuda.device(self.device):
+            current_stream = torch.cuda.current_stream()
+        wait_event_start = time.perf_counter()
+        current_stream.wait_event(event)
+        wait_event_enqueue_s = time.perf_counter() - wait_event_start
+        _record_stream(batch, current_stream)
+        if isinstance(batch, dict):
+            batch["prefetch_queue_wait_s"] = float(queue_wait_s)
+            batch["prefetch_wait_event_enqueue_s"] = float(wait_event_enqueue_s)
+            batch["prefetch_queue_depth"] = float(self.queue.qsize())
+            for key, value in timings.items():
+                batch[key] = float(value)
         return batch
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def prefetch(iterable: Iterator[Any], device: torch.device, prefetch: int = 2) -> Iterator[Any]:

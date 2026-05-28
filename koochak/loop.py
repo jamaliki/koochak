@@ -107,15 +107,33 @@ def _rank_timing_fragment(entries: list[dict[str, Any]], key: str) -> str:
     )
 
 
+_DATA_PIPELINE_TIMING_KEYS = (
+    "batch_collect_time_s",
+    "batch_collate_time_s",
+    "batch_pin_time_s",
+    "prefetch_queue_wait_s",
+    "prefetch_producer_next_s",
+    "prefetch_transfer_enqueue_s",
+    "prefetch_wait_event_enqueue_s",
+    "prefetch_queue_put_s",
+    "prefetch_queue_depth",
+)
+
+
 def _format_rank_timing(entries: list[dict[str, Any]], step: int) -> str:
     fragments = [
         _rank_timing_fragment(entries, "batch_wait_s"),
         _rank_timing_fragment(entries, "step_compute_s"),
         _rank_timing_fragment(entries, "total_step_s"),
+        *(
+            _rank_timing_fragment(entries, key)
+            for key in _DATA_PIPELINE_TIMING_KEYS
+        ),
         _rank_timing_fragment(entries, "sample_total_time_s"),
         _rank_timing_fragment(entries, "prepared_lookup_time_s"),
         _rank_timing_fragment(entries, "crop_total_time_s"),
         _rank_timing_fragment(entries, "crop_prepare_time_s"),
+        _rank_timing_fragment(entries, "render_sidecar_time_s"),
         _rank_timing_fragment(entries, "render_payload_time_s"),
         _rank_timing_fragment(entries, "make_sample_time_s"),
         _rank_timing_fragment(entries, "cache_get_time_s"),
@@ -397,6 +415,7 @@ def training_loop(
     final_ckpt: Dict[str, Any] | None = checkpoint_dict
     # Optional EMA of parameters
     ema: EMA | None = None
+    it: Any | None = None
 
     # If using DDP, wrap model here so state_dict key mapping can be adjusted accordingly
     # and then restore model/optimizer/scheduler/scaler from checkpoint if provided.
@@ -480,6 +499,7 @@ def training_loop(
             prepared_lookup_time_means: list[float] = []
             crop_total_time_means: list[float] = []
             crop_prepare_time_means: list[float] = []
+            render_sidecar_time_means: list[float] = []
             render_payload_time_means: list[float] = []
             make_sample_time_means: list[float] = []
             crop_selection_time_means: list[float] = []
@@ -490,6 +510,9 @@ def training_loop(
             expanded_atom_count_means: list[float] = []
             strict_atom_count_means: list[float] = []
             skip_count_totals: Dict[str, float] = {}
+            data_pipeline_timing_means: dict[str, list[float]] = {
+                key: [] for key in _DATA_PIPELINE_TIMING_KEYS
+            }
 
             for micro in range(grad_accum):
                 use_no_sync = (
@@ -512,6 +535,10 @@ def training_loop(
                         for key, value in _batch_skip_count_totals(batch).items():
                             skip_count_totals[key] = skip_count_totals.get(key, 0.0) + float(value)
                         if collect_rank_timing:
+                            for key in _DATA_PIPELINE_TIMING_KEYS:
+                                data_pipeline_timing_means[key].append(
+                                    _batch_mean_value(batch, key)
+                                )
                             cache_get_time_means.append(
                                 _batch_mean_value(batch, "cache_get_time_s")
                             )
@@ -526,6 +553,9 @@ def training_loop(
                             )
                             crop_prepare_time_means.append(
                                 _batch_mean_value(batch, "crop_prepare_time_s")
+                            )
+                            render_sidecar_time_means.append(
+                                _batch_mean_value(batch, "render_sidecar_time_s")
                             )
                             render_payload_time_means.append(
                                 _batch_mean_value(batch, "render_payload_time_s")
@@ -642,6 +672,14 @@ def training_loop(
                     "batch_wait_s": float(batch_wait_s),
                     "step_compute_s": float(step_compute_s),
                     "total_step_s": float(step_time_s),
+                    **{
+                        key: (
+                            float(sum(values) / len(values))
+                            if values
+                            else 0.0
+                        )
+                        for key, values in data_pipeline_timing_means.items()
+                    },
                     "cache_get_time_s": (
                         float(sum(cache_get_time_means) / len(cache_get_time_means))
                         if cache_get_time_means
@@ -668,6 +706,14 @@ def training_loop(
                     "crop_prepare_time_s": (
                         float(sum(crop_prepare_time_means) / len(crop_prepare_time_means))
                         if crop_prepare_time_means
+                        else 0.0
+                    ),
+                    "render_sidecar_time_s": (
+                        float(
+                            sum(render_sidecar_time_means)
+                            / len(render_sidecar_time_means)
+                        )
+                        if render_sidecar_time_means
                         else 0.0
                     ),
                     "render_payload_time_s": (
@@ -828,6 +874,10 @@ def training_loop(
     except Exception as exc:
         _emit(hooks, "on_exception", exc, ctx)
         raise
+    finally:
+        close_iter = getattr(it, "close", None)
+        if callable(close_iter):
+            close_iter()
 
     # If we never saved inside the loop, construct a final ckpt snapshot
     if final_ckpt is None:
