@@ -17,15 +17,60 @@ class CSVLogger:
         self._writer = None
         self._file = None
 
+    def _read_existing_rows(self) -> tuple[List[str], List[Dict[str, Any]]]:
+        if not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
+            return [], []
+        with open(self.path, newline="") as f:
+            reader = csv.DictReader(f)
+            return list(reader.fieldnames or []), list(reader)
+
+    @staticmethod
+    def _merge_fieldnames(existing: List[str], keys: List[str]) -> List[str]:
+        fieldnames = list(existing)
+        if "step" in keys and "step" not in fieldnames:
+            fieldnames.insert(0, "step")
+        for key in sorted(k for k in keys if k != "step"):
+            if key not in fieldnames:
+                fieldnames.append(key)
+        return fieldnames
+
+    def _open_writer(self, fieldnames: List[str], *, mode: str = "a"):
+        self._file = open(self.path, mode, newline="")
+        self._writer = csv.DictWriter(self._file, fieldnames=fieldnames)
+        return self._writer
+
     def _ensure_writer(self, keys: List[str]):
         if self._writer is None:
-            # Decide header
-            fieldnames = self.fieldnames or ["step"] + sorted(k for k in keys if k != "step")
-            exists = os.path.exists(self.path)
-            self._file = open(self.path, "a", newline="")
-            self._writer = csv.DictWriter(self._file, fieldnames=fieldnames)
+            if self.fieldnames is not None:
+                fieldnames = self.fieldnames
+                exists = os.path.exists(self.path)
+            else:
+                existing_fieldnames, rows = self._read_existing_rows()
+                fieldnames = self._merge_fieldnames(existing_fieldnames, keys)
+                exists = bool(existing_fieldnames)
+                if exists and fieldnames != existing_fieldnames:
+                    writer = self._open_writer(fieldnames, mode="w")
+                    writer.writeheader()
+                    for row in rows:
+                        writer.writerow({key: row.get(key, None) for key in fieldnames})
+                    if self._file is not None:
+                        self._file.close()
+                    self._writer = None
+                    self._file = None
+            self._open_writer(fieldnames)
             if not exists:
                 self._writer.writeheader()
+        elif self.fieldnames is None:
+            extras = [key for key in keys if key not in self._writer.fieldnames]
+            if extras:
+                existing_fieldnames, rows = self._read_existing_rows()
+                fieldnames = self._merge_fieldnames(existing_fieldnames, keys)
+                if self._file is not None:
+                    self._file.close()
+                writer = self._open_writer(fieldnames, mode="w")
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({key: row.get(key, None) for key in fieldnames})
 
     def write(self, payload: Dict[str, Any]):
         keys = list(payload.keys())
