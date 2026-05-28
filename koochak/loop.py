@@ -112,8 +112,12 @@ def _format_rank_timing(entries: list[dict[str, Any]], step: int) -> str:
         _rank_timing_fragment(entries, "batch_wait_s"),
         _rank_timing_fragment(entries, "step_compute_s"),
         _rank_timing_fragment(entries, "total_step_s"),
+        _rank_timing_fragment(entries, "sample_total_time_s"),
+        _rank_timing_fragment(entries, "prepared_lookup_time_s"),
+        _rank_timing_fragment(entries, "make_sample_time_s"),
         _rank_timing_fragment(entries, "cache_get_time_s"),
         _rank_timing_fragment(entries, "crop_selection_time_s"),
+        _rank_timing_fragment(entries, "density_generation_time_s"),
         _rank_timing_fragment(entries, "render_time_s"),
         _rank_timing_fragment(entries, "atom_index_build_time_s"),
         _rank_timing_fragment(entries, "atom_index_built_count"),
@@ -463,15 +467,17 @@ def training_loop(
             total_loss_scalar = 0.0
             out: Dict[str, Any] | None = None
             collect_rank_timing = (
-                ddp_enabled
-                and world_size > 1
-                and rank_timing_every > 0
+                rank_timing_every > 0
                 and (step % rank_timing_every == 0)
             )
             batch_wait_s = 0.0
             render_time_s_total = 0.0
             cache_get_time_means: list[float] = []
+            sample_total_time_means: list[float] = []
+            prepared_lookup_time_means: list[float] = []
+            make_sample_time_means: list[float] = []
             crop_selection_time_means: list[float] = []
+            density_generation_time_means: list[float] = []
             atom_index_build_time_means: list[float] = []
             atom_index_built_count = 0.0
             target_rasterization_means: list[float] = []
@@ -503,8 +509,20 @@ def training_loop(
                             cache_get_time_means.append(
                                 _batch_mean_value(batch, "cache_get_time_s")
                             )
+                            sample_total_time_means.append(
+                                _batch_mean_value(batch, "sample_total_time_s")
+                            )
+                            prepared_lookup_time_means.append(
+                                _batch_mean_value(batch, "prepared_lookup_time_s")
+                            )
+                            make_sample_time_means.append(
+                                _batch_mean_value(batch, "make_sample_time_s")
+                            )
                             crop_selection_time_means.append(
                                 _batch_mean_value(batch, "crop_selection_time_s")
+                            )
+                            density_generation_time_means.append(
+                                _batch_mean_value(batch, "density_generation_time_s")
                             )
                             atom_index_build_time_means.append(
                                 _batch_mean_value(batch, "atom_index_build_time_s")
@@ -614,9 +632,35 @@ def training_loop(
                         if cache_get_time_means
                         else 0.0
                     ),
+                    "sample_total_time_s": (
+                        float(sum(sample_total_time_means) / len(sample_total_time_means))
+                        if sample_total_time_means
+                        else 0.0
+                    ),
+                    "prepared_lookup_time_s": (
+                        float(
+                            sum(prepared_lookup_time_means)
+                            / len(prepared_lookup_time_means)
+                        )
+                        if prepared_lookup_time_means
+                        else 0.0
+                    ),
+                    "make_sample_time_s": (
+                        float(sum(make_sample_time_means) / len(make_sample_time_means))
+                        if make_sample_time_means
+                        else 0.0
+                    ),
                     "crop_selection_time_s": (
                         float(sum(crop_selection_time_means) / len(crop_selection_time_means))
                         if crop_selection_time_means
+                        else 0.0
+                    ),
+                    "density_generation_time_s": (
+                        float(
+                            sum(density_generation_time_means)
+                            / len(density_generation_time_means)
+                        )
+                        if density_generation_time_means
                         else 0.0
                     ),
                     "render_time_s": float(render_time_s_total),
@@ -642,8 +686,13 @@ def training_loop(
                         else 0.0
                     ),
                 }
-                gathered_timings: list[dict[str, Any] | None] = [None for _ in range(world_size)]
-                torch.distributed.all_gather_object(gathered_timings, timing_payload)
+                if ddp_enabled and world_size > 1:
+                    gathered_timings: list[dict[str, Any] | None] = [
+                        None for _ in range(world_size)
+                    ]
+                    torch.distributed.all_gather_object(gathered_timings, timing_payload)
+                else:
+                    gathered_timings = [timing_payload]
                 if is_rank0:
                     rank_timings = [
                         item for item in gathered_timings if isinstance(item, dict)
