@@ -73,6 +73,7 @@ class TrainConfig:
     strict_config: bool = True
     config_warn_unknown: bool = True
     autocast_in_step_fn: bool = False
+    sync_loss_every_step: bool = False
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)
     ema_enabled: Optional[bool] = None

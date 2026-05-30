@@ -4,6 +4,7 @@ import os
 import statistics
 import time
 from contextlib import nullcontext
+import json
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 import math
 import warnings
@@ -90,6 +91,448 @@ def _batch_skip_count_totals(batch: Any) -> Dict[str, float]:
             continue
         totals[key_str] = totals.get(key_str, 0.0) + _batch_total_value(batch, key_str)
     return totals
+
+
+def _parse_step_set(value: Any) -> set[int]:
+    if value is None or value == "":
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = str(value).replace(";", ",").split(",")
+    steps: set[int] = set()
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        if "-" in text:
+            start_s, end_s = text.split("-", 1)
+            start, end = int(start_s), int(end_s)
+            if end < start:
+                start, end = end, start
+            steps.update(range(start, end + 1))
+        else:
+            steps.add(int(text))
+    return steps
+
+
+def _cpu_snapshot_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, Mapping):
+        return {key: _cpu_snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_cpu_snapshot_value(item) for item in value)
+    if isinstance(value, list):
+        return [_cpu_snapshot_value(item) for item in value]
+    return value
+
+
+def _save_debug_snapshot(
+    *,
+    directory: str,
+    step: int,
+    micro: int,
+    model: nn.Module,
+    optimizer: Optimizer,
+    scheduler: Optional[_LRScheduler],
+    scaler: Any,
+    batch: Any,
+    config_json: Optional[Mapping[str, Any]],
+    include_batch: bool,
+    rng_state: Any = None,
+    extra_payload: Optional[Mapping[str, Any]] = None,
+) -> str:
+    os.makedirs(directory, exist_ok=True)
+    model_to_save = getattr(model, "module", model)
+    if rng_state is None:
+        try:
+            rng_record = get_rng_state()
+        except Exception:
+            rng_record = None
+    else:
+        rng_record = rng_state
+    payload: Dict[str, Any] = {
+        "step": int(step),
+        "micro": int(micro),
+        "model": _cpu_snapshot_value(model_to_save.state_dict()),
+        "optimizer": _cpu_snapshot_value(optimizer.state_dict()),
+        "scheduler": (
+            _cpu_snapshot_value(scheduler.state_dict()) if scheduler is not None else None
+        ),
+        "scaler": (
+            _cpu_snapshot_value(scaler.state_dict())
+            if isinstance(scaler, GradScaler)
+            else None
+        ),
+        "config": config_json,
+        "rng": rng_record,
+        "wall_time": time.time(),
+    }
+    if include_batch:
+        payload["batch"] = _cpu_snapshot_value(batch)
+    if extra_payload:
+        for key, value in extra_payload.items():
+            payload[str(key)] = _cpu_snapshot_value(value)
+    path = os.path.join(directory, f"debug_step{int(step):09d}_micro{int(micro):02d}.pt")
+    torch.save(payload, path)
+    return path
+
+
+def _debug_replay_payload(out: Any) -> dict[str, Any]:
+    if not isinstance(out, Mapping):
+        return {}
+    replay: dict[str, Any] = {}
+    if "run_iters" in out:
+        replay["run_iters"] = out["run_iters"]
+    for key, value in out.items():
+        key_s = str(key)
+        if key_s.startswith("_debug_replay_"):
+            replay[key_s[len("_debug_replay_") :]] = value
+    return {"replay": replay} if replay else {}
+
+
+def _debug_selected_terms(value: Any) -> set[str]:
+    if value is None or value == "":
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        return {str(item).strip() for item in value if str(item).strip()}
+    return {item.strip() for item in str(value).replace(";", ",").split(",") if item.strip()}
+
+
+def _flatten_debug_tensors(value: Any, prefix: str = "") -> list[tuple[str, torch.Tensor]]:
+    if isinstance(value, torch.Tensor):
+        return [(prefix, value)] if torch.is_floating_point(value) else []
+    if isinstance(value, Mapping):
+        rows: list[tuple[str, torch.Tensor]] = []
+        for key, item in value.items():
+            key_prefix = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_flatten_debug_tensors(item, key_prefix))
+        return rows
+    if isinstance(value, (list, tuple)):
+        rows = []
+        for idx, item in enumerate(value):
+            key_prefix = f"{prefix}.{idx}" if prefix else str(idx)
+            rows.extend(_flatten_debug_tensors(item, key_prefix))
+        return rows
+    return []
+
+
+def _tensor_debug_stats(tensor: torch.Tensor) -> dict[str, Any]:
+    detached = tensor.detach()
+    finite = torch.isfinite(detached)
+    finite_count = int(finite.sum().item())
+    total_count = int(detached.numel())
+    stats: dict[str, Any] = {
+        "shape": list(detached.shape),
+        "dtype": str(detached.dtype),
+        "numel": total_count,
+        "finite_fraction": float(finite_count / max(1, total_count)),
+    }
+    if finite_count == 0:
+        stats.update({"rms": math.nan, "max_abs": math.nan, "mean": math.nan})
+        return stats
+    values = detached.float()[finite]
+    stats.update(
+        {
+            "rms": float(values.square().mean().sqrt().item()),
+            "max_abs": float(values.abs().max().item()),
+            "min_abs": float(values.abs().min().item()),
+            "mean": float(values.mean().item()),
+        }
+    )
+    if detached.ndim >= 1 and 1 < int(detached.shape[-1]) <= 16:
+        vector_norm = torch.linalg.vector_norm(detached.float(), dim=-1)
+        vector_finite = torch.isfinite(vector_norm)
+        if bool(torch.any(vector_finite).item()):
+            vector_values = vector_norm[vector_finite]
+            quantile_values = vector_values
+            if int(quantile_values.numel()) > 1_000_000:
+                stride = int(math.ceil(int(quantile_values.numel()) / 1_000_000))
+                quantile_values = quantile_values.reshape(-1)[::stride]
+            stats.update(
+                {
+                    "last_dim_norm_min": float(vector_values.min().item()),
+                    "last_dim_norm_p01": float(
+                        torch.quantile(quantile_values, 0.01).item()
+                        if int(quantile_values.numel()) > 1
+                        else quantile_values.min().item()
+                    ),
+                    "last_dim_norm_mean": float(vector_values.mean().item()),
+                    "last_dim_norm_rms": float(vector_values.square().mean().sqrt().item()),
+                    "last_dim_norm_max": float(vector_values.max().item()),
+                }
+            )
+    return stats
+
+
+def _parameter_debug_group(name: str) -> str:
+    parts = name.split(".")
+    if not parts:
+        return "other"
+    prefix = parts[0]
+    if prefix.startswith("_orig_mod") and len(parts) > 1:
+        prefix = parts[1]
+    return prefix
+
+
+def _grad_norm_and_stats(grad: torch.Tensor | None) -> tuple[float, dict[str, Any]]:
+    if grad is None:
+        return 0.0, {"present": False}
+    stats = _tensor_debug_stats(grad)
+    finite = torch.isfinite(grad)
+    if not bool(torch.any(finite).item()):
+        return math.nan, {"present": True, **stats}
+    norm = float(torch.linalg.vector_norm(torch.nan_to_num(grad.detach().float())).item())
+    return norm, {"present": True, **stats, "norm": norm}
+
+
+def _current_total_gradient_norm(model: nn.Module) -> torch.Tensor | None:
+    norms: list[torch.Tensor] = []
+    for param in getattr(model, "parameters", lambda: [])():
+        if param.grad is None or not torch.is_floating_point(param.grad):
+            continue
+        norms.append(torch.linalg.vector_norm(param.grad.detach().float()))
+    if not norms:
+        return None
+    return torch.linalg.vector_norm(torch.stack(norms))
+
+
+def _write_debug_trace(
+    *,
+    directory: str,
+    step: int,
+    micro: int,
+    model: nn.Module,
+    out: Mapping[str, Any],
+    selected_terms: set[str],
+    include_params: bool,
+    top_k: int,
+) -> None:
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"debug_trace_rank{dist_lib.rank()}.jsonl")
+    loss_terms_value = out.get("_debug_loss_terms")
+    tensors_value = out.get("_debug_tensors")
+    if not isinstance(loss_terms_value, Mapping) or tensors_value is None:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "event": "missing_debug_payload",
+                        "step": int(step),
+                        "micro": int(micro),
+                        "has_loss_terms": isinstance(loss_terms_value, Mapping),
+                        "has_tensors": tensors_value is not None,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        return
+
+    tensor_items = [
+        (name, tensor)
+        for name, tensor in _flatten_debug_tensors(tensors_value)
+        if tensor.requires_grad
+    ]
+    tensor_values = {
+        name: _tensor_debug_stats(tensor)
+        for name, tensor in _flatten_debug_tensors(tensors_value)
+    }
+    param_items: list[tuple[str, torch.nn.Parameter]] = []
+    if include_params:
+        param_items = [
+            (name, param)
+            for name, param in getattr(model, "named_parameters", lambda: [])()
+            if param.requires_grad
+        ]
+    differentiable_items: list[tuple[str, torch.Tensor]] = [
+        (name, tensor) for name, tensor in tensor_items
+    ] + [(f"param:{name}", param) for name, param in param_items]
+    loss_items = []
+    for name, term in loss_terms_value.items():
+        if selected_terms and name not in selected_terms:
+            continue
+        if isinstance(term, torch.Tensor) and term.requires_grad:
+            loss_items.append((str(name), term))
+
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "event": "debug_tensor_values",
+                    "step": int(step),
+                    "micro": int(micro),
+                    "tensor_values": tensor_values,
+                    "loss_terms": {
+                        name: float(term.detach().float().item())
+                        for name, term in loss_items
+                        if int(term.numel()) == 1
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        if not loss_items or not differentiable_items:
+            return
+        diff_tensors = [tensor for _, tensor in differentiable_items]
+        for loss_name, term in loss_items:
+            try:
+                grads = torch.autograd.grad(
+                    term,
+                    diff_tensors,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+            except RuntimeError as exc:
+                handle.write(
+                    json.dumps(
+                        {
+                            "event": "loss_grad_trace_failed",
+                            "step": int(step),
+                            "micro": int(micro),
+                            "loss_name": loss_name,
+                            "loss_value": (
+                                float(term.detach().float().item())
+                                if int(term.numel()) == 1
+                                else math.nan
+                            ),
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                break
+            tensor_grad_stats: dict[str, Any] = {}
+            param_group_sq: dict[str, float] = {}
+            param_top: list[tuple[float, str, dict[str, Any]]] = []
+            for (target_name, _target), grad in zip(differentiable_items, grads, strict=True):
+                norm, stats = _grad_norm_and_stats(grad)
+                if target_name.startswith("param:"):
+                    if not include_params or grad is None:
+                        continue
+                    param_name = target_name.removeprefix("param:")
+                    group = _parameter_debug_group(param_name)
+                    if math.isfinite(norm):
+                        param_group_sq[group] = param_group_sq.get(group, 0.0) + norm * norm
+                        param_top.append((norm, param_name, stats))
+                    else:
+                        param_top.append((math.inf, param_name, stats))
+                else:
+                    tensor_grad_stats[target_name] = stats
+            param_top_sorted = sorted(param_top, key=lambda item: item[0], reverse=True)[
+                : max(0, int(top_k))
+            ]
+            handle.write(
+                json.dumps(
+                    {
+                        "event": "loss_grad_trace",
+                        "step": int(step),
+                        "micro": int(micro),
+                        "loss_name": loss_name,
+                        "loss_value": (
+                            float(term.detach().float().item())
+                            if int(term.numel()) == 1
+                            else math.nan
+                        ),
+                        "tensor_grads": tensor_grad_stats,
+                        "parameter_group_grad_norms": {
+                            group: math.sqrt(value)
+                            for group, value in sorted(param_group_sq.items())
+                        },
+                        "top_parameter_grad_norms": [
+                            {"name": name, "norm": norm, **stats}
+                            for norm, name, stats in param_top_sorted
+                        ],
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+
+def _write_current_gradient_trace(
+    *,
+    directory: str,
+    step: int,
+    micro: int,
+    model: nn.Module,
+    reason: str,
+    top_k: int,
+) -> None:
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"debug_trace_rank{dist_lib.rank()}.jsonl")
+    param_group_sq: dict[str, float] = {}
+    param_top: list[tuple[float, str, dict[str, Any]]] = []
+    nonfinite_parameters: list[str] = []
+    for name, param in getattr(model, "named_parameters", lambda: [])():
+        if not param.requires_grad or param.grad is None:
+            continue
+        grad = param.grad
+        if not bool(torch.isfinite(grad).all().item()):
+            nonfinite_parameters.append(name)
+        norm, stats = _grad_norm_and_stats(grad)
+        group = _parameter_debug_group(name)
+        if math.isfinite(norm):
+            param_group_sq[group] = param_group_sq.get(group, 0.0) + norm * norm
+            param_top.append((norm, name, stats))
+        else:
+            param_top.append((math.inf, name, stats))
+    param_top_sorted = sorted(param_top, key=lambda item: item[0], reverse=True)[
+        : max(0, int(top_k))
+    ]
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "event": "current_gradient_trace",
+                    "step": int(step),
+                    "micro": int(micro),
+                    "reason": str(reason),
+                    "nonfinite_parameter_count": len(nonfinite_parameters),
+                    "nonfinite_parameters": nonfinite_parameters[: max(0, int(top_k))],
+                    "parameter_group_grad_norms": {
+                        group: math.sqrt(value)
+                        for group, value in sorted(param_group_sq.items())
+                    },
+                    "top_parameter_grad_norms": [
+                        {"name": name, "norm": norm, **stats}
+                        for norm, name, stats in param_top_sorted
+                    ],
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+
+def _zero_nonfinite_gradients(model: nn.Module) -> list[str]:
+    nonfinite_grad: list[str] = []
+    for name, param in getattr(model, "named_parameters", lambda: [])():
+        if param.grad is None or not torch.is_floating_point(param.grad):
+            continue
+        if not torch.isfinite(param.grad).all():
+            torch.nan_to_num_(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            nonfinite_grad.append(name)
+    return nonfinite_grad
+
+
+def _warn_nonfinite_gradients(nonfinite_grad: list[str], finite_count: int = 0) -> None:
+    if not nonfinite_grad or not dist_lib.rank0():
+        return
+    preview_nans = ", ".join(nonfinite_grad[:8])
+    msg = f"Skipped optimizer step after non-finite gradients in {len(nonfinite_grad)} parameters"
+    if finite_count:
+        msg += f"; {finite_count} gradient tensors were finite"
+    if preview_nans:
+        msg += f" (e.g. {preview_nans}"
+        if len(nonfinite_grad) > 8:
+            msg += ", ..."
+        msg += ")"
+    warnings.warn(msg, RuntimeWarning)
 
 
 def _rank_timing_fragment(entries: list[dict[str, Any]], key: str) -> str:
@@ -202,6 +645,7 @@ def training_loop(
     grad_accum = int(config_lib.get(train_config, "grad_accum", 1))
     grad_clip_norm = config_lib.get(train_config, "grad_clip_norm", None)
     nonfinite_grad_check_every = int(config_lib.get(train_config, "nonfinite_grad_check_every", 0))
+    sync_loss_every_step = bool(config_lib.get(train_config, "sync_loss_every_step", False))
     scheduler_step_policy = config_lib.get(train_config, "scheduler_step", "step")
     max_steps = int(config_lib.get(train_config, "max_steps", 100_000))
     log_every = int(config_lib.get(train_config, "log_every", 100))
@@ -210,6 +654,36 @@ def training_loop(
     rank_timing_every = int(config_lib.get(train_config, "rank_timing_every", 0))
     out_dir = os.path.abspath(os.path.expanduser(str(config_lib.get(train_config, "out_dir", "./runs/exp0"))))
     keep_last_k = int(config_lib.get(train_config, "keep_last_k", 3))
+    debug_snapshot_steps = _parse_step_set(
+        config_lib.get(train_config, "debug_snapshot_steps", "")
+    )
+    debug_snapshot_dir_value = config_lib.get(train_config, "debug_snapshot_dir", "")
+    debug_snapshot_dir = (
+        os.path.abspath(os.path.expanduser(str(debug_snapshot_dir_value)))
+        if str(debug_snapshot_dir_value or "").strip()
+        else os.path.join(out_dir, "debug_snapshots")
+    )
+    debug_snapshot_include_batch = bool(
+        config_lib.get(train_config, "debug_snapshot_include_batch", True)
+    )
+    debug_snapshot_grad_norm_threshold = float(
+        config_lib.get(train_config, "debug_snapshot_grad_norm_threshold", 0.0)
+        or 0.0
+    )
+    debug_trace_steps = _parse_step_set(config_lib.get(train_config, "debug_trace_steps", ""))
+    debug_trace_dir_value = config_lib.get(train_config, "debug_trace_dir", "")
+    debug_trace_dir = (
+        os.path.abspath(os.path.expanduser(str(debug_trace_dir_value)))
+        if str(debug_trace_dir_value or "").strip()
+        else os.path.join(out_dir, "debug_trace")
+    )
+    debug_trace_terms = _debug_selected_terms(
+        config_lib.get(train_config, "debug_trace_loss_terms", "")
+    )
+    debug_trace_include_params = bool(
+        config_lib.get(train_config, "debug_trace_include_params", True)
+    )
+    debug_trace_top_k = int(config_lib.get(train_config, "debug_trace_top_k", 20))
 
     scaler = make_scaler(amp_mode)
 
@@ -486,6 +960,8 @@ def training_loop(
             model.train()
             optimizer.zero_grad(set_to_none=True)
 
+            should_log_step = is_rank0 and (step % log_every == 0)
+            should_materialize_loss = bool(sync_loss_every_step or should_log_step)
             total_loss_scalar = 0.0
             out: Dict[str, Any] | None = None
             collect_rank_timing = (
@@ -513,6 +989,11 @@ def training_loop(
             data_pipeline_timing_means: dict[str, list[float]] = {
                 key: [] for key in _DATA_PIPELINE_TIMING_KEYS
             }
+            nonfinite_grad_tensor_count = 0
+            grad_step_skipped = False
+            grad_clip_total_norm: torch.Tensor | None = None
+            debug_pre_forward_rng: Any = None
+            debug_pre_forward_batch: Any = None
 
             for micro in range(grad_accum):
                 use_no_sync = (
@@ -532,6 +1013,19 @@ def training_loop(
                         else:
                             batch = to_device(next(it), device)
                         batch_wait_s += time.perf_counter() - batch_wait_start
+                        if (
+                            is_rank0
+                            and micro == 0
+                            and (
+                                debug_snapshot_grad_norm_threshold > 0.0
+                                or (debug_snapshot_steps and step in debug_snapshot_steps)
+                            )
+                        ):
+                            try:
+                                debug_pre_forward_rng = get_rng_state()
+                            except Exception:
+                                debug_pre_forward_rng = None
+                            debug_pre_forward_batch = batch
                         for key, value in _batch_skip_count_totals(batch).items():
                             skip_count_totals[key] = skip_count_totals.get(key, 0.0) + float(value)
                         if collect_rank_timing:
@@ -593,54 +1087,159 @@ def training_loop(
                                 pass
                         if "loss" not in out:
                             raise RuntimeError("step_fn must return a dict containing a 'loss' Tensor")
+                        if (
+                            is_rank0
+                            and micro == 0
+                            and debug_trace_steps
+                            and step in debug_trace_steps
+                        ):
+                            _write_debug_trace(
+                                directory=debug_trace_dir,
+                                step=step,
+                                micro=micro,
+                                model=model,
+                                out=out,
+                                selected_terms=debug_trace_terms,
+                                include_params=debug_trace_include_params,
+                                top_k=debug_trace_top_k,
+                            )
+                        if (
+                            is_rank0
+                            and micro == 0
+                            and debug_snapshot_steps
+                            and step in debug_snapshot_steps
+                        ):
+                            saved_debug_snapshot = _save_debug_snapshot(
+                                directory=debug_snapshot_dir,
+                                step=step,
+                                micro=micro,
+                                model=model,
+                                optimizer=optimizer,
+                                scheduler=scheduler,
+                                scaler=scaler,
+                                batch=debug_pre_forward_batch
+                                if debug_pre_forward_batch is not None
+                                else batch,
+                                config_json=cfg_json,
+                                include_batch=debug_snapshot_include_batch,
+                                rng_state=debug_pre_forward_rng,
+                                extra_payload=_debug_replay_payload(out),
+                            )
+                            print(
+                                f"[debug-snapshot] step={step} micro={micro} "
+                                f"path={saved_debug_snapshot}",
+                                flush=True,
+                            )
                         loss = out["loss"] / grad_accum
                     scaler.scale(loss).backward()
-                    try:
-                        total_loss_scalar += float(loss.detach())
-                    except Exception:
-                        pass
+                    if should_materialize_loss:
+                        try:
+                            total_loss_scalar += float(loss.detach())
+                        except Exception:
+                            pass
 
             try:
                 scaler.unscale_(optimizer)  # no-op for NoOpScaler
             except Exception:
                 pass
 
+            if debug_snapshot_grad_norm_threshold > 0.0:
+                current_grad_norm = _current_total_gradient_norm(model)
+                if current_grad_norm is not None:
+                    current_norm_float = float(current_grad_norm.detach().float().item())
+                    threshold_triggered = (
+                        (not math.isfinite(current_norm_float))
+                        or current_norm_float >= debug_snapshot_grad_norm_threshold
+                    )
+                    if is_rank0 and threshold_triggered:
+                        _write_current_gradient_trace(
+                            directory=debug_trace_dir,
+                            step=step,
+                            micro=grad_accum - 1,
+                            model=model,
+                            reason=(
+                                "grad_norm_threshold_pre_clip:"
+                                f"{current_norm_float:.6g}>={debug_snapshot_grad_norm_threshold:.6g}"
+                            ),
+                            top_k=debug_trace_top_k,
+                        )
+                        if debug_pre_forward_batch is not None:
+                            saved_debug_snapshot = _save_debug_snapshot(
+                                directory=debug_snapshot_dir,
+                                step=step,
+                                micro=0,
+                                model=model,
+                                optimizer=optimizer,
+                                scheduler=scheduler,
+                                scaler=scaler,
+                                batch=debug_pre_forward_batch,
+                                config_json=cfg_json,
+                                include_batch=debug_snapshot_include_batch,
+                                rng_state=debug_pre_forward_rng,
+                                extra_payload=_debug_replay_payload(out),
+                            )
+                            print(
+                                "[debug-snapshot] "
+                                f"reason=grad_norm_threshold_pre_clip "
+                                f"grad_norm={current_norm_float:.6g} "
+                                f"threshold={debug_snapshot_grad_norm_threshold:.6g} "
+                                f"step={step} micro=0 path={saved_debug_snapshot}",
+                                flush=True,
+                            )
+
             do_nonfinite_check = nonfinite_grad_check_every > 0 and (step % nonfinite_grad_check_every == 0)
             if do_nonfinite_check:
-                nonfinite_grad: list[str] = []
-                finite_grad: list[str] = []
+                finite_grad_count = 0
                 for name, param in getattr(model, "named_parameters", lambda: [])():
                     if param.grad is None or not torch.is_floating_point(param.grad):
                         continue
-                    if not torch.isfinite(param.grad).all():
-                        torch.nan_to_num_(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
-                        nonfinite_grad.append(name)
-                    else:
-                        finite_grad.append(name)
-
+                    finite_grad_count += int(torch.isfinite(param.grad).all())
+                nonfinite_grad = _zero_nonfinite_gradients(model)
+                nonfinite_grad_tensor_count = len(nonfinite_grad)
                 if nonfinite_grad:
-                    if dist_lib.rank0():
-                        preview_nans = ", ".join(nonfinite_grad)
-                        preview_non_nans = ", ".join(finite_grad)
-                        msg = f"Zeroed gradients containing non-finite values in {len(nonfinite_grad)} parameters\n"
-                        msg += f"However, {len(finite_grad)} params are fine"
-                        if preview_nans:
-                            if len(nonfinite_grad) > 5:
-                                msg += f" (e.g. nans: {preview_nans}, ...)\n"
-                                msg += f" (non-nans: {preview_non_nans}, ...)"
-                            else:
-                                msg += f": {preview_nans}"
-                        warnings.warn(msg, RuntimeWarning)
+                    grad_step_skipped = True
+                    _warn_nonfinite_gradients(nonfinite_grad, finite_grad_count)
 
             if grad_clip_norm is not None:
-                clip_grad_norm_(model.parameters(), float(grad_clip_norm), foreach=True)
+                try:
+                    grad_clip_total_norm = clip_grad_norm_(
+                        model.parameters(),
+                        float(grad_clip_norm),
+                        foreach=True,
+                        error_if_nonfinite=True,
+                    )
+                except RuntimeError as exc:
+                    if is_rank0:
+                        _write_current_gradient_trace(
+                            directory=debug_trace_dir,
+                            step=step,
+                            micro=grad_accum - 1,
+                            model=model,
+                            reason=f"clip_grad_norm_failed:{type(exc).__name__}:{exc}",
+                            top_k=debug_trace_top_k,
+                        )
+                    nonfinite_grad = _zero_nonfinite_gradients(model)
+                    nonfinite_grad_tensor_count = max(
+                        nonfinite_grad_tensor_count,
+                        len(nonfinite_grad),
+                    )
+                    grad_step_skipped = True
+                    _warn_nonfinite_gradients(nonfinite_grad)
+                    grad_clip_total_norm = torch.as_tensor(float("nan"), device=device)
 
-            scaler.step(optimizer)
-            scaler.update()
+            if grad_step_skipped:
+                optimizer.zero_grad(set_to_none=True)
+                try:
+                    scaler.update()
+                except Exception:
+                    pass
+            else:
+                scaler.step(optimizer)
+                scaler.update()
             # EMA update after optimizer step
-            if ema is None and ema_enabled and is_rank0:
+            if (not grad_step_skipped) and ema is None and ema_enabled and is_rank0:
                 ema = EMA(getattr(model, "module", model), decay=float(ema_target_decay or 0.999), profile=ema_profile, gamma=ema_gamma, srel=ema_srel)
-            if ema is not None:
+            if (not grad_step_skipped) and ema is not None:
                 if ema_profile == "power":
                     ema.update(getattr(model, "module", model))
                 else:
@@ -656,7 +1255,7 @@ def training_loop(
                         d = float(min(max(d, 0.0), 0.999999))
                     ema.update(getattr(model, "module", model)) if d is None else ema.update(getattr(model, "module", model), decay=d)
 
-            if scheduler is not None and scheduler_step_policy == "step":
+            if (not grad_step_skipped) and scheduler is not None and scheduler_step_policy == "step":
                 try:
                     scheduler.step()
                 except TypeError:
@@ -781,18 +1380,21 @@ def training_loop(
             # Logs and hooks: convert tensors to floats and avoid overriding scalar loss
             # Only materialize logs if it's a logging step
             logs = None
-            if is_rank0 and (step % log_every == 0):
+            if should_log_step:
                 safe_out: Dict[str, Any] = {}
                 if out:
                     for k, v in out.items():
-                        if k == "loss": continue
+                        if k == "loss":
+                            continue
+                        if str(k).startswith("_debug_"):
+                            continue
                         try:
                             if isinstance(v, torch.Tensor):
-                                v = float(v.detach()) # Sync happens only here
+                                v = float(v.detach())  # Sync happens only here
                         except Exception:
                             pass
                         safe_out[k] = v
-                
+
                 # logs includes "loss" which is already a float from earlier in the loop
                 logs = {
                     "loss": total_loss_scalar,
@@ -800,10 +1402,17 @@ def training_loop(
                     "step_time_s": step_time_s,
                     **{key: float(value) for key, value in skip_count_totals.items()},
                     **safe_out,
+                    "grad_step_skipped": float(grad_step_skipped),
+                    "nonfinite_grad_tensor_count": float(nonfinite_grad_tensor_count),
+                    "grad_clip_total_norm": (
+                        0.0
+                        if grad_clip_total_norm is None
+                        else float(grad_clip_total_norm.detach().float().item())
+                    ),
                     "step": step,
                 }
                 _emit(hooks, "on_log", logs, {**ctx, "step": step})
-            
+
             # Pass logs to on_step_end if available, otherwise just basic loss/lr
             if logs is None:
                 # Minimal logs for step_end hooks if they need something every step (rare)
@@ -814,7 +1423,7 @@ def training_loop(
                     "step_time_s": step_time_s,
                     "step": step,
                 }
-            
+
             _emit(hooks, "on_step_end", logs, {**ctx, "step": step})
 
             # Periodic eval

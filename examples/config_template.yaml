@@ -33,6 +33,7 @@ train:
   strict_config: true
   config_warn_unknown: true
   autocast_in_step_fn: false
+  sync_loss_every_step: false
 
   ema:
     enabled: null
