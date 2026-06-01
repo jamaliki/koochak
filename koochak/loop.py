@@ -650,6 +650,7 @@ def training_loop(
     max_steps = int(config_lib.get(train_config, "max_steps", 100_000))
     log_every = int(config_lib.get(train_config, "log_every", 100))
     eval_every = int(config_lib.get(train_config, "eval_every", 5_000))
+    eval_at_step_zero = bool(config_lib.get(train_config, "eval_at_step_zero", True))
     ckpt_every = int(config_lib.get(train_config, "ckpt_every", 5_000))
     rank_timing_every = int(config_lib.get(train_config, "rank_timing_every", 0))
     out_dir = os.path.abspath(os.path.expanduser(str(config_lib.get(train_config, "out_dir", "./runs/exp0"))))
@@ -1400,6 +1401,8 @@ def training_loop(
                     "loss": total_loss_scalar,
                     "lr": get_lr(optimizer),
                     "step_time_s": step_time_s,
+                    "batch_wait_s": float(batch_wait_s),
+                    "step_compute_s": float(step_compute_s),
                     **{key: float(value) for key, value in skip_count_totals.items()},
                     **safe_out,
                     "grad_step_skipped": float(grad_step_skipped),
@@ -1427,7 +1430,13 @@ def training_loop(
             _emit(hooks, "on_step_end", logs, {**ctx, "step": step})
 
             # Periodic eval
-            if eval_fn is not None and eval_dataset is not None and (step % eval_every == 0):
+            should_run_eval = (
+                eval_fn is not None
+                and eval_dataset is not None
+                and (step % eval_every == 0)
+                and (eval_at_step_zero or step != 0)
+            )
+            if should_run_eval:
                 # Optionally evaluate with EMA weights
                 if ema is not None and ema_eval:
                     try:
