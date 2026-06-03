@@ -71,7 +71,28 @@ class CudaPrefetcher:
                     batch = next(self.iterator)
                 except StopIteration:
                     break
-                producer_next_s = time.perf_counter() - next_start
+                next_return_time = time.perf_counter()
+                producer_next_s = next_return_time - next_start
+                next_overhead_s = 0.0
+                next_gap_before_collect_s = 0.0
+                if isinstance(batch, dict):
+                    try:
+                        batch_ready_time = float(batch.get("batch_ready_time_s", 0.0))
+                        if batch_ready_time > 0.0:
+                            next_overhead_s = max(0.0, next_return_time - batch_ready_time)
+                    except Exception:
+                        next_overhead_s = 0.0
+                    try:
+                        collect_start_time = float(
+                            batch.get("batch_collect_start_time_s", 0.0)
+                        )
+                        if collect_start_time > 0.0:
+                            next_gap_before_collect_s = max(
+                                0.0,
+                                collect_start_time - next_start,
+                            )
+                    except Exception:
+                        next_gap_before_collect_s = 0.0
 
                 transfer_start = time.perf_counter()
                 with torch.cuda.device(self.device):
@@ -83,6 +104,8 @@ class CudaPrefetcher:
 
                 timings = {
                     "prefetch_producer_next_s": float(producer_next_s),
+                    "prefetch_next_overhead_s": float(next_overhead_s),
+                    "prefetch_next_gap_before_collect_s": float(next_gap_before_collect_s),
                     "prefetch_transfer_enqueue_s": float(transfer_enqueue_s),
                 }
                 put_start = time.perf_counter()
@@ -117,6 +140,15 @@ class CudaPrefetcher:
             batch["prefetch_queue_wait_s"] = float(queue_wait_s)
             batch["prefetch_wait_event_enqueue_s"] = float(wait_event_enqueue_s)
             batch["prefetch_queue_depth"] = float(self.queue.qsize())
+            try:
+                ready_time = float(batch.get("batch_ready_time_s", 0.0))
+                batch["prefetch_batch_ready_age_s"] = (
+                    max(0.0, time.perf_counter() - ready_time)
+                    if ready_time > 0.0
+                    else 0.0
+                )
+            except Exception:
+                batch["prefetch_batch_ready_age_s"] = 0.0
             for key, value in timings.items():
                 batch[key] = float(value)
         return batch

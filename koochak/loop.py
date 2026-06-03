@@ -556,10 +556,21 @@ _DATA_PIPELINE_TIMING_KEYS = (
     "batch_pin_time_s",
     "prefetch_queue_wait_s",
     "prefetch_producer_next_s",
+    "prefetch_next_overhead_s",
+    "prefetch_next_gap_before_collect_s",
     "prefetch_transfer_enqueue_s",
     "prefetch_wait_event_enqueue_s",
     "prefetch_queue_put_s",
     "prefetch_queue_depth",
+    "prefetch_batch_ready_age_s",
+    "sample_total_time_s_p90",
+    "sample_total_time_s_max",
+    "prepared_lookup_time_s_max",
+    "crop_total_time_s_max",
+    "render_payload_time_s_max",
+    "make_sample_time_s_max",
+    "expanded_atom_count_max",
+    "strict_atom_count_max",
 )
 
 
@@ -568,6 +579,12 @@ def _format_rank_timing(entries: list[dict[str, Any]], step: int) -> str:
         _rank_timing_fragment(entries, "batch_wait_s"),
         _rank_timing_fragment(entries, "step_compute_s"),
         _rank_timing_fragment(entries, "total_step_s"),
+        _rank_timing_fragment(entries, "step_fn_time_s"),
+        _rank_timing_fragment(entries, "backward_time_s"),
+        _rank_timing_fragment(entries, "unscale_time_s"),
+        _rank_timing_fragment(entries, "grad_check_time_s"),
+        _rank_timing_fragment(entries, "grad_clip_time_s"),
+        _rank_timing_fragment(entries, "optimizer_step_time_s"),
         *(
             _rank_timing_fragment(entries, key)
             for key in _DATA_PIPELINE_TIMING_KEYS
@@ -871,7 +888,15 @@ def training_loop(
         assert dist_lib.is_initialized()
         ddp_kwargs = {
             "find_unused_parameters": bool(config_lib.get(train_config, "find_unused_parameters", False)),
+            "static_graph": bool(config_lib.get(train_config, "ddp_static_graph", False)),
+            "gradient_as_bucket_view": bool(
+                config_lib.get(train_config, "ddp_gradient_as_bucket_view", False)
+            ),
+            "broadcast_buffers": bool(config_lib.get(train_config, "ddp_broadcast_buffers", True)),
         }
+        bucket_cap_mb = config_lib.get(train_config, "ddp_bucket_cap_mb", None)
+        if bucket_cap_mb is not None:
+            ddp_kwargs["bucket_cap_mb"] = int(bucket_cap_mb)
         if getattr(device, "type", "cpu") == "cuda":
             ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
         model = DistributedDataParallel(model, **ddp_kwargs)
@@ -969,7 +994,14 @@ def training_loop(
                 rank_timing_every > 0
                 and (step % rank_timing_every == 0)
             )
+            collect_data_timing = bool(collect_rank_timing or should_log_step)
             batch_wait_s = 0.0
+            step_fn_time_s_total = 0.0
+            backward_time_s_total = 0.0
+            unscale_time_s = 0.0
+            grad_check_time_s = 0.0
+            grad_clip_time_s = 0.0
+            optimizer_step_time_s = 0.0
             render_time_s_total = 0.0
             cache_get_time_means: list[float] = []
             sample_total_time_means: list[float] = []
@@ -1029,7 +1061,7 @@ def training_loop(
                             debug_pre_forward_batch = batch
                         for key, value in _batch_skip_count_totals(batch).items():
                             skip_count_totals[key] = skip_count_totals.get(key, 0.0) + float(value)
-                        if collect_rank_timing:
+                        if collect_data_timing:
                             for key in _DATA_PIPELINE_TIMING_KEYS:
                                 data_pipeline_timing_means[key].append(
                                     _batch_mean_value(batch, key)
@@ -1080,7 +1112,9 @@ def training_loop(
                             strict_atom_count_means.append(
                                 _batch_mean_value(batch, "strict_atom_count")
                             )
+                        step_fn_start = time.perf_counter()
                         out = step_fn(model, batch, {**ctx, "step": step})
+                        step_fn_time_s_total += time.perf_counter() - step_fn_start
                         if collect_rank_timing and out is not None:
                             try:
                                 render_time_s_total += float(out.get("render_time_s", 0.0))
@@ -1132,17 +1166,21 @@ def training_loop(
                                 flush=True,
                             )
                         loss = out["loss"] / grad_accum
+                    backward_start = time.perf_counter()
                     scaler.scale(loss).backward()
+                    backward_time_s_total += time.perf_counter() - backward_start
                     if should_materialize_loss:
                         try:
                             total_loss_scalar += float(loss.detach())
                         except Exception:
                             pass
 
+            unscale_start = time.perf_counter()
             try:
                 scaler.unscale_(optimizer)  # no-op for NoOpScaler
             except Exception:
                 pass
+            unscale_time_s += time.perf_counter() - unscale_start
 
             if debug_snapshot_grad_norm_threshold > 0.0:
                 current_grad_norm = _current_total_gradient_norm(model)
@@ -1190,6 +1228,7 @@ def training_loop(
 
             do_nonfinite_check = nonfinite_grad_check_every > 0 and (step % nonfinite_grad_check_every == 0)
             if do_nonfinite_check:
+                grad_check_start = time.perf_counter()
                 finite_grad_count = 0
                 for name, param in getattr(model, "named_parameters", lambda: [])():
                     if param.grad is None or not torch.is_floating_point(param.grad):
@@ -1200,8 +1239,10 @@ def training_loop(
                 if nonfinite_grad:
                     grad_step_skipped = True
                     _warn_nonfinite_gradients(nonfinite_grad, finite_grad_count)
+                grad_check_time_s += time.perf_counter() - grad_check_start
 
             if grad_clip_norm is not None:
+                grad_clip_start = time.perf_counter()
                 try:
                     grad_clip_total_norm = clip_grad_norm_(
                         model.parameters(),
@@ -1227,16 +1268,21 @@ def training_loop(
                     grad_step_skipped = True
                     _warn_nonfinite_gradients(nonfinite_grad)
                     grad_clip_total_norm = torch.as_tensor(float("nan"), device=device)
+                grad_clip_time_s += time.perf_counter() - grad_clip_start
 
             if grad_step_skipped:
+                optimizer_step_start = time.perf_counter()
                 optimizer.zero_grad(set_to_none=True)
                 try:
                     scaler.update()
                 except Exception:
                     pass
+                optimizer_step_time_s += time.perf_counter() - optimizer_step_start
             else:
+                optimizer_step_start = time.perf_counter()
                 scaler.step(optimizer)
                 scaler.update()
+                optimizer_step_time_s += time.perf_counter() - optimizer_step_start
             # EMA update after optimizer step
             if (not grad_step_skipped) and ema is None and ema_enabled and is_rank0:
                 ema = EMA(getattr(model, "module", model), decay=float(ema_target_decay or 0.999), profile=ema_profile, gamma=ema_gamma, srel=ema_srel)
@@ -1272,6 +1318,12 @@ def training_loop(
                     "batch_wait_s": float(batch_wait_s),
                     "step_compute_s": float(step_compute_s),
                     "total_step_s": float(step_time_s),
+                    "step_fn_time_s": float(step_fn_time_s_total),
+                    "backward_time_s": float(backward_time_s_total),
+                    "unscale_time_s": float(unscale_time_s),
+                    "grad_check_time_s": float(grad_check_time_s),
+                    "grad_clip_time_s": float(grad_clip_time_s),
+                    "optimizer_step_time_s": float(optimizer_step_time_s),
                     **{
                         key: (
                             float(sum(values) / len(values))
@@ -1403,6 +1455,85 @@ def training_loop(
                     "step_time_s": step_time_s,
                     "batch_wait_s": float(batch_wait_s),
                     "step_compute_s": float(step_compute_s),
+                    "step_fn_time_s": float(step_fn_time_s_total),
+                    "backward_time_s": float(backward_time_s_total),
+                    "unscale_time_s": float(unscale_time_s),
+                    "grad_check_time_s": float(grad_check_time_s),
+                    "grad_clip_time_s": float(grad_clip_time_s),
+                    "optimizer_step_time_s": float(optimizer_step_time_s),
+                    **{
+                        key: (
+                            float(sum(values) / len(values))
+                            if values
+                            else 0.0
+                        )
+                        for key, values in data_pipeline_timing_means.items()
+                    },
+                    "cache_get_time_s": (
+                        float(sum(cache_get_time_means) / len(cache_get_time_means))
+                        if cache_get_time_means
+                        else 0.0
+                    ),
+                    "sample_total_time_s": (
+                        float(sum(sample_total_time_means) / len(sample_total_time_means))
+                        if sample_total_time_means
+                        else 0.0
+                    ),
+                    "prepared_lookup_time_s": (
+                        float(
+                            sum(prepared_lookup_time_means)
+                            / len(prepared_lookup_time_means)
+                        )
+                        if prepared_lookup_time_means
+                        else 0.0
+                    ),
+                    "crop_total_time_s": (
+                        float(sum(crop_total_time_means) / len(crop_total_time_means))
+                        if crop_total_time_means
+                        else 0.0
+                    ),
+                    "crop_prepare_time_s": (
+                        float(sum(crop_prepare_time_means) / len(crop_prepare_time_means))
+                        if crop_prepare_time_means
+                        else 0.0
+                    ),
+                    "render_sidecar_time_s": (
+                        float(sum(render_sidecar_time_means) / len(render_sidecar_time_means))
+                        if render_sidecar_time_means
+                        else 0.0
+                    ),
+                    "render_payload_time_s": (
+                        float(
+                            sum(render_payload_time_means)
+                            / len(render_payload_time_means)
+                        )
+                        if render_payload_time_means
+                        else 0.0
+                    ),
+                    "make_sample_time_s": (
+                        float(sum(make_sample_time_means) / len(make_sample_time_means))
+                        if make_sample_time_means
+                        else 0.0
+                    ),
+                    "crop_selection_time_s": (
+                        float(sum(crop_selection_time_means) / len(crop_selection_time_means))
+                        if crop_selection_time_means
+                        else 0.0
+                    ),
+                    "density_generation_time_s": (
+                        float(
+                            sum(density_generation_time_means)
+                            / len(density_generation_time_means)
+                        )
+                        if density_generation_time_means
+                        else 0.0
+                    ),
+                    "atom_index_build_time_s": (
+                        float(sum(atom_index_build_time_means) / len(atom_index_build_time_means))
+                        if atom_index_build_time_means
+                        else 0.0
+                    ),
+                    "atom_index_built_count": float(atom_index_built_count),
                     **{key: float(value) for key, value in skip_count_totals.items()},
                     **safe_out,
                     "grad_step_skipped": float(grad_step_skipped),
