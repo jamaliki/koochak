@@ -149,6 +149,15 @@ def build_scheduler(optimizer: Optimizer, cfg: Optional[Mapping[str, Any]], trai
             # No warmup; just return cosine to avoid SequentialLR overhead
             return scheds[0]
         return SequentialLR(optimizer, scheds, milestones=milestones)
+    if name in ("warmup_constant", "linear_warmup", "constant_warmup"):
+        warmup_steps = int(cfg.get("warmup_steps", 0))
+        if warmup_steps <= 0:
+            return LambdaLR(optimizer, lr_lambda=lambda _step: 1.0)
+
+        def warmup_constant_lr(step: int) -> float:
+            return min(1.0, max(0.0, float(step) / float(warmup_steps)))
+
+        return LambdaLR(optimizer, lr_lambda=warmup_constant_lr)
     if name == "step":
         step_size = int(cfg.get("step_size", 1000))
         gamma = float(cfg.get("gamma", 0.1))
