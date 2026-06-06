@@ -49,10 +49,27 @@ class _FakeWandb:
         pass
 
 
-def test_wandb_artifact_aliases(monkeypatch, tmp_path):
+def test_wandb_does_not_log_checkpoint_artifacts_by_default(tmp_path):
+    fake = _FakeWandb()
+    sys.modules["wandb"] = fake  # type: ignore
+
+    hooks = make_wandb_hooks({"enabled": True, "project": "proj"})
+
+    for fn in hooks.get("on_train_start", []):
+        fn({"config_json": {}})
+
+    ckpt_path = str(tmp_path / "step000000010.pt")
+    tmp_path.joinpath("step000000010.pt").write_text("x")
+    for fn in hooks.get("on_checkpoint", []):
+        fn(ckpt_path, {"step": 10}, {"step": 10})
+
+    assert fake._artifacts == []
+
+
+def test_wandb_artifact_aliases_when_explicitly_enabled(tmp_path):
     # Install fake wandb module
     fake = _FakeWandb()
-    sys.modules['wandb'] = fake  # type: ignore
+    sys.modules["wandb"] = fake  # type: ignore
 
     cfg = {
         "enabled": True,
@@ -81,4 +98,3 @@ def test_wandb_artifact_aliases(monkeypatch, tmp_path):
     art, aliases = fake._artifacts[-1]
     assert art.name.startswith("model-")
     assert "latest" in aliases and "step-10" in aliases and "best" in aliases and "best-val_loss" in aliases
-
