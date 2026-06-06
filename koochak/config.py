@@ -142,7 +142,7 @@ class WandbConfig:
     dir: Optional[str] = None
     resume: Optional[str] = None
     id: Optional[str] = None
-    log_artifacts: Optional[bool] = None
+    log_artifacts: bool = False
     artifact_name_prefix: Optional[str] = None
     artifact_name: Optional[str] = None
     artifact_type: Optional[str] = None

@@ -101,7 +101,8 @@ wandb:
   dir: null
   resume: null
   id: null
-  log_artifacts: null
+  # Off by default: set true only when checkpoint files should be uploaded as W&B artifacts.
+  log_artifacts: false
   artifact_name_prefix: null
   artifact_name: null
   artifact_type: null
