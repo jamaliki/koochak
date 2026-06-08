@@ -34,7 +34,7 @@ class _FakeWandb:
         pass
 
 
-def test_wandb_hooks_forward_metric_keys_unchanged():
+def test_wandb_hooks_namespace_metric_keys():
     fake = _FakeWandb()
     sys.modules["wandb"] = fake  # type: ignore
 
@@ -65,9 +65,9 @@ def test_wandb_hooks_forward_metric_keys_unchanged():
     for fn in hooks.get("on_eval_end", []):
         fn(eval_metrics, {"step": 7})
 
-    assert fake.logged[0][0]["iou_semantic_non_empty"] == 0.8
-    assert fake.logged[0][0]["iou_semantic_protein_backbone"] == 0.5
+    assert fake.logged[0][0]["train/iou_semantic_non_empty"] == 0.8
+    assert fake.logged[0][0]["train/iou_semantic_protein_backbone"] == 0.5
     assert fake.logged[0][1]["step"] == 7
-    assert fake.logged[1][0]["val_iou_semantic_non_empty"] == 0.85
-    assert fake.logged[1][0]["val_iou_semantic_protein_backbone"] == 0.6
+    assert fake.logged[1][0]["val/iou_semantic_non_empty"] == 0.85
+    assert fake.logged[1][0]["val/iou_semantic_protein_backbone"] == 0.6
     assert fake.logged[1][1]["step"] == 7

@@ -24,6 +24,7 @@ class EMA:
         update_every: int = 1,          # do an EMA update every N steps
         offload_to_cpu: bool = True,    # keep EMA on CPU
         pin_memory: bool = True,        # use pinned buffers for async D2H
+        compensate_update_every: bool = False,
     ) -> None:
         if not (0.0 < float(decay) < 1.0):
             raise ValueError("EMA decay must be in (0, 1)")
@@ -31,7 +32,8 @@ class EMA:
         self.dtype = dtype
         self.offload = bool(offload_to_cpu)
         self.pin_memory = bool(pin_memory)
-        self.update_every = int(update_every)
+        self.update_every = max(1, int(update_every))
+        self.compensate_update_every = bool(compensate_update_every)
         self.shadow: Dict[str, torch.Tensor] = {}
         self.staging: Dict[str, torch.Tensor] = {}         # pinned CPU buffers
         self.pending_event: Dict[str, Optional[torch.cuda.Event]] = {}
@@ -73,8 +75,18 @@ class EMA:
         if self.profile == "constant":
             return float(self.decay)
         g = float(self.gamma if self.gamma is not None else 6.94)  # ~10% s_rel
+        if self.compensate_update_every and self.update_every > 1:
+            t = max(1.0, float(self._step_counter))
+            prev_t = max(0.0, t - float(self.update_every))
+            return float((prev_t / t) ** (g + 1.0))
         t = max(1.0, float(self.num_updates + 1))
         return float((1.0 - 1.0 / t) ** (g + 1.0))
+
+    def _effective_decay(self, decay: Optional[float]) -> float:
+        d = float(self._current_decay() if decay is None else decay)
+        if self.profile == "constant" and self.compensate_update_every and self.update_every > 1:
+            d = d ** float(self.update_every)
+        return d
 
     def _build_from_model(self, model: torch.nn.Module) -> None:
         # Track only trainable params
@@ -98,7 +110,7 @@ class EMA:
         if self.update_every > 1 and (self._step_counter % self.update_every) != 0:
             return  # thinning
 
-        d = float(self._current_decay() if decay is None else decay)
+        d = self._effective_decay(decay)
         self.num_updates += 1
 
         # 1) consume any finished copies from prior step and apply EMA math on CPU
@@ -133,6 +145,9 @@ class EMA:
             "profile": self.profile,
             "gamma": (float(self.gamma) if self.gamma is not None else None),
             "num_updates": self.num_updates,
+            "step_counter": self._step_counter,
+            "update_every": self.update_every,
+            "compensate_update_every": self.compensate_update_every,
             # avoid doubling memory; clone only if requested
             "shadow": {k: (v.clone() if clone else v) for k, v in self.shadow.items()},
             "dtype": str(self.dtype),
@@ -150,6 +165,14 @@ class EMA:
             self.gamma = float(g)
         num_updates = state.get("num_updates", 0)
         self.num_updates = int(num_updates) if isinstance(num_updates, (int, float)) else 0
+        step_counter = state.get("step_counter", self.num_updates)
+        self._step_counter = int(step_counter) if isinstance(step_counter, (int, float)) else self.num_updates
+        update_every = state.get("update_every", self.update_every)
+        if isinstance(update_every, (int, float)):
+            self.update_every = max(1, int(update_every))
+        compensate = state.get("compensate_update_every", self.compensate_update_every)
+        if isinstance(compensate, bool):
+            self.compensate_update_every = bool(compensate)
 
         shadow = state.get("shadow", {})
         if isinstance(shadow, dict):

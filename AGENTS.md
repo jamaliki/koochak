@@ -90,6 +90,7 @@ Note: Keep this TODO section synchronized with the codebase state and design dec
 Updates:
 - DDP checkpoint compatibility implemented: loop saves `model.module.state_dict()` when present; added helpers `match_state_dict_to_model`, `strip_module_prefix`, `add_module_prefix` and README instructions for resuming across DDP/non-DDP.
 - RNG restore on resume implemented: loop restores RNG from checkpoint (`utils.seed.set_rng_state`), tests added.
+- Dual power-EMA tracking restored: `train.ema.dual.enabled` now builds two power-profile EMA trackers, updates/restores them with the loop, and saves them under `checkpoint["ema_dual"]`. `ema_posthoc.reconstruct_power_ema_state_dict(...)` combines dual EMA states from multiple saved checkpoints for EDM2-style post-hoc tuning.
 
 New design TODOs
 

@@ -8,6 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from .core import dist as dist_lib
 
 __all__ = [
+    "TrainEMADualConfig",
     "TrainEMAConfig",
     "TrainConfig",
     "DataConfig",
@@ -30,6 +31,15 @@ __all__ = [
 
 
 @dataclass
+class TrainEMADualConfig:
+    enabled: bool = False
+    gamma1: Optional[float] = None
+    gamma2: Optional[float] = None
+    srel1: Optional[float] = None
+    srel2: Optional[float] = None
+
+
+@dataclass
 class TrainEMAConfig:
     enabled: Optional[bool] = None
     decay: Optional[float] = None
@@ -39,7 +49,12 @@ class TrainEMAConfig:
     profile: Optional[str] = None
     gamma: Optional[float] = None
     srel: Optional[float] = None
+    offload_to_cpu: bool = True
+    pin_memory: bool = True
+    update_every: int = 1
+    compensate_update_every: bool = False
     eval_with_ema: bool = False
+    dual: TrainEMADualConfig = field(default_factory=TrainEMADualConfig)
 
 
 @dataclass
@@ -79,6 +94,10 @@ class TrainConfig:
     ema_profile: Optional[str] = None
     ema_gamma: Optional[float] = None
     ema_srel: Optional[float] = None
+    ema_offload_to_cpu: Optional[bool] = None
+    ema_pin_memory: Optional[bool] = None
+    ema_update_every: Optional[int] = None
+    ema_compensate_update_every: Optional[bool] = None
     ema_eval: Optional[bool] = None
 
 

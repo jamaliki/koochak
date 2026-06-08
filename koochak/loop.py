@@ -47,6 +47,10 @@ _EMA_FLAT_KEYS: Mapping[str, str] = {
     "profile": "ema_profile",
     "gamma": "ema_gamma",
     "srel": "ema_srel",
+    "offload_to_cpu": "ema_offload_to_cpu",
+    "pin_memory": "ema_pin_memory",
+    "update_every": "ema_update_every",
+    "compensate_update_every": "ema_compensate_update_every",
     "eval_with_ema": "ema_eval",
 }
 _EMA_RAMP_SCHEDULES: frozenset[str] = frozenset({"linear", "ramp", "warmup", "cosine"})
@@ -214,6 +218,26 @@ class _TrainSettings:
 
 
 @dataclass
+class _DualEmaSettings:
+    enabled: bool
+    gamma1: Optional[float]
+    gamma2: Optional[float]
+    srel1: Optional[float]
+    srel2: Optional[float]
+
+    @classmethod
+    def from_cfg(cls, ema_cfg: Any) -> "_DualEmaSettings":
+        dual_cfg = config_lib.get(ema_cfg, "dual", {}) if ema_cfg is not None else {}
+        return cls(
+            enabled=bool(config_lib.get(dual_cfg, "enabled", False)),
+            gamma1=config_lib.get(dual_cfg, "gamma1", None),
+            gamma2=config_lib.get(dual_cfg, "gamma2", None),
+            srel1=config_lib.get(dual_cfg, "srel1", None),
+            srel2=config_lib.get(dual_cfg, "srel2", None),
+        )
+
+
+@dataclass
 class _EmaSettings:
     enabled: bool
     profile: str
@@ -223,11 +247,17 @@ class _EmaSettings:
     schedule: str
     gamma: Optional[float]
     srel: Optional[float]
+    offload_to_cpu: bool
+    pin_memory: bool
+    update_every: int
+    compensate_update_every: bool
     eval_with_ema: bool
+    dual: _DualEmaSettings
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_EmaSettings":
         get = _ema_get_factory(train_cfg)
+        ema_cfg = config_lib.get(train_cfg, "ema", {}) if train_cfg is not None else {}
         flag = get("enabled", None)
         if flag is None:
             profile_val = get("profile", None)
@@ -251,7 +281,12 @@ class _EmaSettings:
             schedule=str(get("schedule", "constant")).lower() if enabled else "constant",
             gamma=get("gamma", None),
             srel=get("srel", None),
+            offload_to_cpu=bool(get("offload_to_cpu", True)),
+            pin_memory=bool(get("pin_memory", True)),
+            update_every=max(1, int(get("update_every", 1))),
+            compensate_update_every=bool(get("compensate_update_every", False)),
             eval_with_ema=bool(get("eval_with_ema", False)) if enabled else False,
+            dual=_DualEmaSettings.from_cfg(ema_cfg),
         )
 
     def warmed_decay(self, step: int) -> float:
@@ -274,7 +309,39 @@ class _EmaSettings:
             profile=self.profile,
             gamma=self.gamma,
             srel=self.srel,
+            update_every=self.update_every,
+            offload_to_cpu=self.offload_to_cpu,
+            pin_memory=self.pin_memory,
+            compensate_update_every=self.compensate_update_every,
         )
+
+    def build_dual(self, module: nn.Module) -> list[EMA]:
+        if not self.dual.enabled:
+            return []
+        return [
+            EMA(
+                module,
+                decay=float(self.target_decay or 0.999),
+                profile="power",
+                gamma=self.dual.gamma1,
+                srel=self.dual.srel1,
+                update_every=self.update_every,
+                offload_to_cpu=self.offload_to_cpu,
+                pin_memory=self.pin_memory,
+                compensate_update_every=self.compensate_update_every,
+            ),
+            EMA(
+                module,
+                decay=float(self.target_decay or 0.999),
+                profile="power",
+                gamma=self.dual.gamma2,
+                srel=self.dual.srel2,
+                update_every=self.update_every,
+                offload_to_cpu=self.offload_to_cpu,
+                pin_memory=self.pin_memory,
+                compensate_update_every=self.compensate_update_every,
+            ),
+        ]
 
 
 def _ema_get_factory(train_cfg: Any) -> Callable[[str, Any], Any]:
@@ -396,6 +463,7 @@ class _TrainLoop:
             "model": self.model,
         }
         self.ema: Optional[EMA] = None
+        self.ema_dual: list[EMA] = []
         self.final_ckpt: Optional[Dict[str, Any]] = checkpoint_dict
         self.gpu_health = GpuHealthWatchdog(
             device=self.device,
@@ -576,39 +644,100 @@ class _TrainLoop:
                     RuntimeWarning,
                 )
 
-        self._restore_ema(ckpt.get("ema"))
+        self._restore_ema(ckpt.get("ema"), ckpt.get("ema_dual"))
 
         try:
             return int(ckpt.get("step", 0)) + 1
         except (TypeError, ValueError):
             return 0
 
-    def _restore_ema(self, ema_ckpt: Optional[Mapping[str, Any]]) -> None:
+    def _restore_one_ema(
+        self,
+        ema_ckpt: Mapping[str, Any],
+        *,
+        fallback_profile: str,
+        fallback_gamma: Optional[float],
+    ) -> EMA:
+        model_ref = self._module_for_state()
+        settings = self.ema_settings
+        decay = float(ema_ckpt.get("decay", (settings.target_decay or 0.999)))
+        prof = str(ema_ckpt.get("profile", fallback_profile)).lower()
+        gamma = ema_ckpt.get("gamma", fallback_gamma)
+        ema = EMA(
+            model_ref,
+            decay=decay,
+            profile=prof,
+            gamma=gamma,
+            update_every=settings.update_every,
+            offload_to_cpu=settings.offload_to_cpu,
+            pin_memory=settings.pin_memory,
+            compensate_update_every=settings.compensate_update_every,
+        )
+        shadow = ema_ckpt.get("shadow", {})
+        try:
+            mapped = checkpoint_lib.match_state_dict_to_model(model_ref, shadow)
+        except (TypeError, AttributeError):
+            mapped = shadow
+        ema.load_state_dict(
+            {
+                "decay": decay,
+                "profile": prof,
+                "gamma": gamma,
+                "shadow": mapped,
+                "num_updates": ema_ckpt.get("num_updates", 0),
+                "step_counter": ema_ckpt.get("step_counter", ema_ckpt.get("num_updates", 0)),
+                "update_every": ema_ckpt.get("update_every", settings.update_every),
+                "compensate_update_every": ema_ckpt.get(
+                    "compensate_update_every",
+                    settings.compensate_update_every,
+                ),
+            }
+        )
+        return ema
+
+    def _restore_ema(
+        self,
+        ema_ckpt: Optional[Mapping[str, Any]],
+        ema_dual_ckpt: Any = None,
+    ) -> None:
         model_ref = self._module_for_state()
         settings = self.ema_settings
         if ema_ckpt is not None:
             try:
-                decay = float(ema_ckpt.get("decay", (settings.target_decay or 0.999)))
-                prof = str(ema_ckpt.get("profile", settings.profile)).lower()
-                gamma = ema_ckpt.get("gamma", settings.gamma)
-                self.ema = EMA(model_ref, decay=decay, profile=prof, gamma=gamma)
-                shadow = ema_ckpt.get("shadow", {})
-                try:
-                    mapped = checkpoint_lib.match_state_dict_to_model(model_ref, shadow)
-                except (TypeError, AttributeError):
-                    mapped = shadow
-                self.ema.load_state_dict(
-                    {
-                        "decay": decay,
-                        "shadow": mapped,
-                        "num_updates": ema_ckpt.get("num_updates", 0),
-                    }
+                self.ema = self._restore_one_ema(
+                    ema_ckpt,
+                    fallback_profile=settings.profile,
+                    fallback_gamma=settings.gamma,
                 )
             except (TypeError, ValueError, RuntimeError) as exc:
                 warnings.warn(f"Failed to restore EMA from checkpoint: {exc}", RuntimeWarning)
                 self.ema = None
         elif settings.enabled:
             self.ema = settings.build(model_ref)
+
+        self.ema_dual = []
+        if isinstance(ema_dual_ckpt, Sequence) and not isinstance(ema_dual_ckpt, (str, bytes)):
+            restored: list[EMA] = []
+            for idx, state in enumerate(ema_dual_ckpt):
+                if not isinstance(state, Mapping):
+                    continue
+                fallback_gamma = settings.dual.gamma1 if idx == 0 else settings.dual.gamma2
+                try:
+                    restored.append(
+                        self._restore_one_ema(
+                            state,
+                            fallback_profile="power",
+                            fallback_gamma=fallback_gamma,
+                        )
+                    )
+                except (TypeError, ValueError, RuntimeError) as exc:
+                    warnings.warn(
+                        f"Failed to restore dual EMA #{idx} from checkpoint: {exc}",
+                        RuntimeWarning,
+                    )
+            self.ema_dual = restored
+        elif settings.dual.enabled:
+            self.ema_dual = settings.build_dual(model_ref)
 
     # ------------------------------------------------------------------ checkpoint
 
@@ -631,6 +760,8 @@ class _TrainLoop:
         }
         if self.ema is not None:
             ckpt["ema"] = self.ema.state_dict()
+        if self.ema_dual:
+            ckpt["ema_dual"] = [ema.state_dict() for ema in self.ema_dual]
         return ckpt
 
     def _save_checkpoint(
@@ -735,14 +866,19 @@ class _TrainLoop:
         settings = self.ema_settings
         if self.ema is None and settings.enabled and self.is_rank0:
             self.ema = settings.build(self._module_for_state())
+        if not self.ema_dual and settings.dual.enabled and self.is_rank0:
+            self.ema_dual = settings.build_dual(self._module_for_state())
         if self.ema is None:
-            return
+            if not self.ema_dual:
+                return
         module = self._module_for_state()
-        if settings.profile == "power":
+        if self.ema is not None and settings.profile == "power":
             self.ema.update(module)
-        else:
+        elif self.ema is not None:
             decay = settings.warmed_decay(step)
             self.ema.update(module, decay=decay)
+        for ema in self.ema_dual:
+            ema.update(module)
 
     def _step_scheduler(self) -> None:
         if self.scheduler is None or self.settings.scheduler_step_policy != "step":
