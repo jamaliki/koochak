@@ -31,6 +31,65 @@ def _compile_enabled_from_ctx(ctx: Mapping[str, Any]) -> bool:
     return bool(compile_cfg)
 
 
+def _is_stats_key(key: str) -> bool:
+    return (
+        key in {"step", "step_time_s", "run_iters", "node_count", "node_slot_count"}
+        or key.startswith("profile_")
+        or key.startswith("sample_")
+        or key.startswith("sequence_context_")
+        or key.endswith("_skip_count")
+        or key.endswith("_time_s")
+        or key.endswith("_count")
+        or key.endswith("_fraction")
+    )
+
+
+def _wandb_train_key(key: str) -> str:
+    if "/" in key:
+        return key
+    if _is_stats_key(key):
+        return f"stats/{key}"
+    return f"train/{key}"
+
+
+def _wandb_val_key(key: str) -> str:
+    if "/" in key:
+        return key
+    if key == "val_loss":
+        return "val/loss"
+    if key.startswith("val_seqctx_"):
+        rest = key[len("val_seqctx_") :]
+        for context in (
+            "replacement_failed_native",
+            "sink_only",
+            "no_sequence",
+            "mismatched",
+            "replacement",
+            "replaced",
+            "mismatch",
+            "native",
+            "full",
+        ):
+            prefix = f"{context}_"
+            if rest.startswith(prefix):
+                return f"val/seqctx/{context}/{rest[len(prefix):]}"
+        context, sep, metric = rest.partition("_")
+        return f"val/seqctx/{context}/{metric}" if sep else f"val/seqctx/{context}"
+    if key.startswith("val_"):
+        metric = key[len("val_") :]
+        if _is_stats_key(metric):
+            return f"stats/val/{metric}"
+        return f"val/{metric}"
+    if _is_stats_key(key):
+        return f"stats/val/{key}"
+    return f"val/{key}"
+
+
+def _namespace_wandb_payload(payload: Dict[str, Any], *, phase: str) -> Dict[str, Any]:
+    mapper = _wandb_val_key if phase == "val" else _wandb_train_key
+    return {mapper(str(key)): value for key, value in payload.items()}
+
+
 def make_wandb_hooks(cfg) -> Dict[str, List]:
     """Factory returning W&B hook callbacks per design_doc.
 
@@ -118,11 +177,15 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         except (TypeError, ValueError):
             eval_every = 0
         will_eval = eval_every > 0 and (step % eval_every == 0)
-        wandb.log(logs, step=step, commit=not will_eval)
+        wandb.log(_namespace_wandb_payload(logs, phase="train"), step=step, commit=not will_eval)
 
     def on_eval_end(metrics: Dict[str, Any], ctx: Dict[str, Any]):
         # Commit at eval time so training+eval logs share the same step without warnings
-        wandb.log(metrics, step=ctx.get("step"), commit=True)
+        wandb.log(
+            _namespace_wandb_payload(metrics, phase="val"),
+            step=ctx.get("step"),
+            commit=True,
+        )
         run = wandb.run
         if run is None:
             return
