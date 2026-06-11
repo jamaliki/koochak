@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import os
 from typing import Any, Callable, Dict, Iterable, List, Sequence
 
 import torch
@@ -86,6 +88,25 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
 _ParamUpdate = Callable[[torch.nn.Parameter, Dict[str, Any], Dict[str, Any]], torch.Tensor]
 
 
+def _optimizer_profile_ranges_enabled() -> bool:
+    return os.environ.get("KAVEH_PROFILE_RANGES", "").lower() in {"1", "true", "yes", "on"}
+
+
+@contextlib.contextmanager
+def _optimizer_profile_range(name: str):
+    if not _optimizer_profile_ranges_enabled():
+        yield
+        return
+    with torch.autograd.profiler.record_function(name):
+        yield
+
+
+def _foreach_adam_enabled(group: Dict[str, Any]) -> bool:
+    if "foreach_adam_update" in group:
+        return bool(group["foreach_adam_update"])
+    return os.environ.get("KAVEH_ADAM_FOREACH_UPDATE", "").lower() in {"1", "true", "yes", "on"}
+
+
 def _ensure_grad(p: torch.nn.Parameter) -> None:
     """Make sure `p.grad` is materialized so collective ops don't desync ranks."""
     if p.grad is None:
@@ -161,10 +182,59 @@ def _distributed_muon_group(
 
 
 def _single_device_adam_group(optimizer: torch.optim.Optimizer, group: Dict[str, Any]) -> None:
+    if _foreach_adam_enabled(group) and _foreach_adam_group(optimizer, group):
+        return
     for p in group["params"]:
         _ensure_grad(p)
         update = _adam_step_for_param(p, group, optimizer.state[p])
         _apply_weight_decay_and_step(p, update, group)
+
+
+def _foreach_adam_group(optimizer: torch.optim.Optimizer, group: Dict[str, Any]) -> bool:
+    params = list(group["params"])
+    if not params:
+        return True
+    devices = {p.device for p in params}
+    dtypes = {p.dtype for p in params}
+    if len(devices) != 1 or len(dtypes) != 1:
+        return False
+    grads: list[torch.Tensor] = []
+    exp_avgs: list[torch.Tensor] = []
+    exp_avg_sqs: list[torch.Tensor] = []
+    states: list[Dict[str, Any]] = []
+    old_steps: list[int] = []
+    for p in params:
+        _ensure_grad(p)
+        state = optimizer.state[p]
+        if "exp_avg" not in state:
+            state["exp_avg"] = torch.zeros_like(p)
+            state["exp_avg_sq"] = torch.zeros_like(p)
+            state["step"] = 0
+        states.append(state)
+        old_steps.append(int(state["step"]))
+    if len(set(old_steps)) != 1:
+        return False
+    step = old_steps[0] + 1
+    for p, state in zip(params, states):
+        state["step"] = step
+        grads.append(p.grad)  # type: ignore[arg-type]
+        exp_avgs.append(state["exp_avg"])
+        exp_avg_sqs.append(state["exp_avg_sq"])
+
+    beta1, beta2 = group["betas"]
+    sqrt_bias_correction2 = (1 - beta2 ** step) ** 0.5
+    step_size = group["lr"] * sqrt_bias_correction2 / (1 - beta1 ** step)
+
+    torch._foreach_lerp_(exp_avgs, grads, 1 - beta1)
+    grad_squares = torch._foreach_mul(grads, grads)
+    torch._foreach_lerp_(exp_avg_sqs, grad_squares, 1 - beta2)
+    denoms = torch._foreach_sqrt(exp_avg_sqs)
+    torch._foreach_add_(denoms, group["eps"] * sqrt_bias_correction2)
+    weight_decay = float(group["weight_decay"])
+    if weight_decay != 0.0:
+        torch._foreach_mul_(params, 1 - group["lr"] * weight_decay)
+    torch._foreach_addcdiv_(params, exp_avgs, denoms, value=-step_size)
+    return True
 
 
 def _sorted_by_size_desc(params: Iterable[torch.nn.Parameter]) -> List[torch.nn.Parameter]:
@@ -343,9 +413,11 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
         loss = _maybe_apply_closure(closure)
         for group in self.param_groups:
             if group["use_muon"]:
-                _distributed_muon_group(self, group, _muon_update_for_param)
+                with _optimizer_profile_range("optimizer.muon.update"):
+                    _distributed_muon_group(self, group, _muon_update_for_param)
             else:
-                _single_device_adam_group(self, group)
+                with _optimizer_profile_range("optimizer.adam.update"):
+                    _single_device_adam_group(self, group)
         return loss
 
 
@@ -361,9 +433,11 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
         loss = _maybe_apply_closure(closure)
         for group in self.param_groups:
             if group["use_muon"]:
-                _single_device_muon_group(self, group, _muon_update_for_param)
+                with _optimizer_profile_range("optimizer.muon.update"):
+                    _single_device_muon_group(self, group, _muon_update_for_param)
             else:
-                _single_device_adam_group(self, group)
+                with _optimizer_profile_range("optimizer.adam.update"):
+                    _single_device_adam_group(self, group)
         return loss
 
 
@@ -377,9 +451,11 @@ class NorMuonWithAuxAdam(torch.optim.Optimizer):
         loss = _maybe_apply_closure(closure)
         for group in self.param_groups:
             if group["use_muon"]:
-                _distributed_muon_group(self, group, _normuon_update_for_param)
+                with _optimizer_profile_range("optimizer.muon.update"):
+                    _distributed_muon_group(self, group, _normuon_update_for_param)
             else:
-                _single_device_adam_group(self, group)
+                with _optimizer_profile_range("optimizer.adam.update"):
+                    _single_device_adam_group(self, group)
         return loss
 
 
@@ -393,7 +469,9 @@ class SingleDeviceNorMuonWithAuxAdam(torch.optim.Optimizer):
         loss = _maybe_apply_closure(closure)
         for group in self.param_groups:
             if group["use_muon"]:
-                _single_device_muon_group(self, group, _normuon_update_for_param)
+                with _optimizer_profile_range("optimizer.muon.update"):
+                    _single_device_muon_group(self, group, _normuon_update_for_param)
             else:
-                _single_device_adam_group(self, group)
+                with _optimizer_profile_range("optimizer.adam.update"):
+                    _single_device_adam_group(self, group)
         return loss
