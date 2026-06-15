@@ -1074,6 +1074,10 @@ class _TrainLoop:
         self._check_nonfinite_grads(step)
         if self.settings.grad_clip_norm is not None:
             clip_grad_norm_(self.model.parameters(), float(self.settings.grad_clip_norm), foreach=True)
+        if self.ema is not None:
+            self.ema.wait_before_param_mutation()
+        for ema in self.ema_dual:
+            ema.wait_before_param_mutation()
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self._update_ema(step)

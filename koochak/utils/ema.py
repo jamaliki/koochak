@@ -1,4 +1,5 @@
 from __future__ import annotations
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Dict, Optional
 import torch
 
@@ -8,7 +9,8 @@ class EMA:
 
     - shadow weights live on CPU (fp32)
     - per-param pinned CPU staging buffers receive nonblocking GPU->CPU copies
-    - EMA update uses previous step's staged values (one-step lag)
+    - CUDA snapshots use a side stream so the next forward/backward can overlap
+    - CPU shadow math runs in a single background worker when offloaded from CUDA
     - `update_every` lets you thin updates to reduce overhead
     """
 
@@ -37,7 +39,12 @@ class EMA:
         self.shadow: Dict[str, torch.Tensor] = {}
         self.staging: Dict[str, torch.Tensor] = {}         # pinned CPU buffers
         self.pending_event: Dict[str, Optional[torch.cuda.Event]] = {}
-        self.pending_decay: Dict[str, float] = {}          # decay used when launching copy
+        self.pending_decay: Dict[str, float] = {}          # kept for checkpoint/backcompat introspection
+        self._copy_device: Optional[torch.device] = None
+        self._copy_stream: Optional[torch.cuda.Stream] = None
+        self._copy_done: Optional[torch.cuda.Event] = None
+        self._shadow_executor: Optional[ThreadPoolExecutor] = None
+        self._shadow_future: Optional[Future[None]] = None
         self.num_updates: int = 0
         self._step_counter: int = 0
         self._backup: Optional[Dict[str, torch.Tensor]] = None  # for store/restore
@@ -102,6 +109,15 @@ class EMA:
                 self.staging[name] = torch.empty_like(self.shadow[name], device="cpu")
             self.pending_event[name] = None
             self.pending_decay[name] = self.decay
+            if self.offload and p.is_cuda and self._copy_device is None:
+                self._copy_device = p.device
+        if self._copy_device is not None:
+            with torch.cuda.device(self._copy_device):
+                self._copy_stream = torch.cuda.Stream(device=self._copy_device)
+            self._shadow_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="koochak-ema",
+            )
 
     # ---- public API ----
     @torch.no_grad()
@@ -113,29 +129,33 @@ class EMA:
         d = self._effective_decay(decay)
         self.num_updates += 1
 
-        # 1) consume any finished copies from prior step and apply EMA math on CPU
-        self._apply_ready_staged()
+        # Ensure the single staging buffer is no longer owned by the previous
+        # background shadow update before reusing it for this snapshot.
+        self._wait_for_shadow_update()
 
-        # 2) launch new nonblocking copies of current params into pinned CPU buffers
+        if self._copy_stream is not None and self._copy_device is not None:
+            self._launch_async_cuda_snapshot(model, d)
+            return
+
         for name, p in model.named_parameters():
             if not p.requires_grad or name not in self.shadow:
                 continue
-            if p.is_cuda and self.offload:
-                src_gpu = p.detach()
-                if src_gpu.dtype is not self.dtype:
-                    src_gpu = src_gpu.to(dtype=self.dtype)  # cast on GPU
-                # enqueue D2H into pinned buffer
-                self.staging[name].copy_(src_gpu, non_blocking=True)
-                # record event so we can test readiness next call
-                ev = self.pending_event[name] or torch.cuda.Event(blocking=False)
-                ev.record(torch.cuda.current_stream())
-                self.pending_event[name] = ev
-                self.pending_decay[name] = d
-            else:
-                # model on CPU or offload disabled: do EMA immediately on CPU
-                dst = self.shadow[name]
-                src_cpu = p.detach().to("cpu", dtype=self.dtype)
-                dst.mul_(d).add_(src_cpu, alpha=(1.0 - d))
+            # model on CPU or offload disabled: do EMA immediately on CPU
+            dst = self.shadow[name]
+            src_cpu = p.detach().to("cpu", dtype=self.dtype)
+            dst.mul_(d).add_(src_cpu, alpha=(1.0 - d))
+
+    def wait_before_param_mutation(self) -> None:
+        """Wait until any async CUDA snapshot no longer reads live parameters."""
+        event = self._copy_done
+        if event is None:
+            return
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "EMA has a pending CUDA snapshot but CUDA is not available on this process"
+            )
+        event.synchronize()
+        self._copy_done = None
 
     def state_dict(self, clone: bool = False) -> Dict[str, object]:
         # ensure latest staged copies are applied so we save fresh EMA
@@ -208,12 +228,18 @@ class EMA:
     # ---- internals ----
     @torch.no_grad()
     def _apply_ready_staged(self) -> None:
-        # apply any staged values whose copies have finished
+        # apply any staged values whose copies have finished. This remains for
+        # callers/tests that inspect the old per-parameter pending_event fields;
+        # the CUDA fast path uses one all-parameter event plus a background worker.
+        if self._copy_done is not None:
+            if not self._copy_done.query():
+                return
+            self._copy_done = None
         for name, ev in self.pending_event.items():
             if ev is None:
                 continue
             if not ev.query():
-                continue  # copy still in flight; leave it for next call
+                continue
             dst = self.shadow[name]
             d_used = self.pending_decay.get(name, self.decay)
             src_cpu = self.staging[name]  # already CPU fp32
@@ -221,21 +247,56 @@ class EMA:
             self.pending_event[name] = None
 
     @torch.no_grad()
-    def flush(self) -> None:
-        # Wait for any in-flight copies and apply them. Events can only exist when CUDA
-        # is available — but if a state-dict was loaded from a CUDA host onto a CPU-only
-        # one, refuse to silently drop the pending copy.
-        if not any(ev is not None for ev in self.pending_event.values()):
+    def _apply_staged(self, decay: float) -> None:
+        for name, dst in self.shadow.items():
+            dst.mul_(decay).add_(self.staging[name], alpha=(1.0 - decay))
+
+    @torch.no_grad()
+    def _apply_staged_after_event(self, event: torch.cuda.Event, decay: float) -> None:
+        event.synchronize()
+        self._apply_staged(decay)
+
+    def _wait_for_shadow_update(self) -> None:
+        future = self._shadow_future
+        if future is None:
             return
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "EMA has pending CUDA copies but CUDA is not available on this process"
-            )
-        torch.cuda.synchronize()
-        for name, ev in self.pending_event.items():
-            if ev is None:
-                continue
-            dst = self.shadow[name]
-            d_used = self.pending_decay.get(name, self.decay)
-            dst.mul_(d_used).add_(self.staging[name], alpha=(1.0 - d_used))
+        future.result()
+        self._shadow_future = None
+
+    @torch.no_grad()
+    def _launch_async_cuda_snapshot(self, model: torch.nn.Module, decay: float) -> None:
+        assert self._copy_device is not None
+        assert self._copy_stream is not None
+        assert self._shadow_executor is not None
+
+        with torch.cuda.device(self._copy_device):
+            ready = torch.cuda.Event(blocking=False)
+            done = torch.cuda.Event(blocking=False)
+            ready.record(torch.cuda.current_stream(device=self._copy_device))
+            with torch.cuda.stream(self._copy_stream):
+                self._copy_stream.wait_event(ready)
+                for name, p in model.named_parameters():
+                    if not p.requires_grad or name not in self.shadow:
+                        continue
+                    src = p.detach()
+                    if src.dtype is not self.dtype:
+                        src = src.to(dtype=self.dtype)
+                    self.staging[name].copy_(src, non_blocking=True)
+                    self.pending_decay[name] = decay
+                done.record(self._copy_stream)
+        self._copy_done = done
+        self._shadow_future = self._shadow_executor.submit(
+            self._apply_staged_after_event,
+            done,
+            decay,
+        )
+
+    @torch.no_grad()
+    def flush(self) -> None:
+        # Wait for in-flight snapshots and background shadow math so callers see
+        # a current EMA. Avoid a global CUDA synchronize; the snapshot event is
+        # sufficient and preserves unrelated stream work.
+        self.wait_before_param_mutation()
+        self._wait_for_shadow_update()
+        for name in self.pending_event:
             self.pending_event[name] = None
