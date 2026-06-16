@@ -176,7 +176,12 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
             eval_every = int(eval_every_raw) if eval_every_raw is not None else 0
         except (TypeError, ValueError):
             eval_every = 0
-        will_eval = eval_every > 0 and (step % eval_every == 0)
+        eval_at_step_zero = bool(config_lib.get(train_cfg, "eval_at_step_zero", True))
+        will_eval = (
+            eval_every > 0
+            and (step % eval_every == 0)
+            and (step != 0 or eval_at_step_zero)
+        )
         wandb.log(_namespace_wandb_payload(logs, phase="train"), step=step, commit=not will_eval)
 
     def on_eval_end(metrics: Dict[str, Any], ctx: Dict[str, Any]):

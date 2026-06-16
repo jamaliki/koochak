@@ -177,6 +177,7 @@ class _TrainSettings:
     max_steps: int
     log_every: int
     eval_every: int
+    eval_at_step_zero: bool
     ckpt_every: int
     rank_timing_every: int
     rank_timing_extra_keys: tuple[str, ...]
@@ -204,6 +205,7 @@ class _TrainSettings:
             max_steps=int(get(train_cfg, "max_steps", 100_000)),
             log_every=int(get(train_cfg, "log_every", 100)),
             eval_every=int(get(train_cfg, "eval_every", 5_000)),
+            eval_at_step_zero=bool(get(train_cfg, "eval_at_step_zero", True)),
             ckpt_every=int(get(train_cfg, "ckpt_every", 5_000)),
             rank_timing_every=int(get(train_cfg, "rank_timing_every", 0)),
             rank_timing_extra_keys=tuple(
@@ -995,6 +997,10 @@ class _TrainLoop:
 
     def _maybe_run_eval(self, step: int) -> None:
         if self.eval_fn is None or self.eval_dataset is None:
+            return
+        if self.settings.eval_every <= 0:
+            return
+        if step == 0 and not self.settings.eval_at_step_zero:
             return
         if (step % self.settings.eval_every) != 0:
             return
