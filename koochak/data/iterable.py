@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from queue import Queue
-from threading import Thread
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterable, Iterator
 
 import torch
@@ -55,21 +55,34 @@ class CudaPrefetcher:
         *,
         prepare_fn: BatchPrepareFn | None = None,
         threaded: bool = False,
+        pipeline: str = "single",
     ):
         self.iterator = iterator
         self.device = device
         self.prefetch = max(1, int(prefetch))
         self.prepare_fn = prepare_fn
         self.threaded = bool(threaded)
+        self.pipeline = str(pipeline or "single").strip().lower().replace("-", "_")
         self.stream = torch.cuda.Stream()
+        self._exception_lock = Lock()
+        self._stop_event = Event()
         self.queue: deque[_PrefetchedBatch] | Queue[Any] = (
             Queue(maxsize=self.prefetch) if self.threaded else deque()
         )
+        self.cpu_queue: Queue[Any] | None = None
         self._done = False
+        self._closed = False
         self._thread_exception: BaseException | None = None
         if self.threaded:
-            self._worker = Thread(target=self._worker_loop, daemon=True)
-            self._worker.start()
+            if self.pipeline in {"two_stage", "staged"}:
+                self.cpu_queue = Queue(maxsize=self.prefetch)
+                self._cpu_worker = Thread(target=self._cpu_worker_loop, daemon=True)
+                self._cuda_worker = Thread(target=self._cuda_worker_loop, daemon=True)
+                self._cpu_worker.start()
+                self._cuda_worker.start()
+            else:
+                self._worker = Thread(target=self._worker_loop, daemon=True)
+                self._worker.start()
         else:
             self._fill()
 
@@ -98,16 +111,69 @@ class CudaPrefetcher:
     def _worker_loop(self) -> None:
         assert isinstance(self.queue, Queue)
         try:
-            while True:
+            while not self._stop_event.is_set():
                 try:
                     batch = next(self.iterator)
                 except StopIteration:
-                    self.queue.put(_STOP)
+                    self._queue_put(self.queue, _STOP)
                     return
-                self.queue.put(self._prepare_on_stream(batch))
+                if not self._queue_put(self.queue, self._prepare_on_stream(batch)):
+                    return
         except BaseException as exc:
-            self._thread_exception = exc
-            self.queue.put(_STOP)
+            self._set_thread_exception(exc)
+            self._queue_put(self.queue, _STOP)
+
+    def _cpu_worker_loop(self) -> None:
+        assert self.cpu_queue is not None
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    batch = next(self.iterator)
+                except StopIteration:
+                    self._queue_put(self.cpu_queue, _STOP)
+                    return
+                if not self._queue_put(self.cpu_queue, batch):
+                    return
+        except BaseException as exc:
+            self._set_thread_exception(exc)
+            self._queue_put(self.cpu_queue, _STOP)
+
+    def _cuda_worker_loop(self) -> None:
+        assert self.cpu_queue is not None
+        assert isinstance(self.queue, Queue)
+        try:
+            while not self._stop_event.is_set():
+                batch = self._queue_get(self.cpu_queue)
+                if batch is _STOP:
+                    self._queue_put(self.queue, _STOP)
+                    return
+                if not self._queue_put(self.queue, self._prepare_on_stream(batch)):
+                    return
+        except BaseException as exc:
+            self._set_thread_exception(exc)
+            self._queue_put(self.queue, _STOP)
+
+    def _set_thread_exception(self, exc: BaseException) -> None:
+        with self._exception_lock:
+            if self._thread_exception is None:
+                self._thread_exception = exc
+
+    def _queue_put(self, queue: Queue[Any], item: Any) -> bool:
+        while not self._stop_event.is_set():
+            try:
+                queue.put(item, timeout=0.1)
+                return True
+            except Full:
+                continue
+        return False
+
+    def _queue_get(self, queue: Queue[Any]) -> Any:
+        while not self._stop_event.is_set():
+            try:
+                return queue.get(timeout=0.1)
+            except Empty:
+                continue
+        return _STOP
 
     def _fill(self) -> None:
         assert isinstance(self.queue, deque)
@@ -120,7 +186,7 @@ class CudaPrefetcher:
     def __next__(self) -> Any:
         if self.threaded:
             assert isinstance(self.queue, Queue)
-            item = self.queue.get()
+            item = self._queue_get(self.queue)
             if item is _STOP:
                 if self._thread_exception is not None:
                     raise self._thread_exception
@@ -141,6 +207,16 @@ class CudaPrefetcher:
         _record_stream(item.batch, current_stream)
         return item.batch
 
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_event.set()
+        for name in ("_cuda_worker", "_cpu_worker", "_worker"):
+            worker = getattr(self, name, None)
+            if worker is not None:
+                worker.join(timeout=5.0)
+
 
 def prefetch(
     iterable: Iterator[Any],
@@ -149,6 +225,7 @@ def prefetch(
     *,
     prepare_fn: BatchPrepareFn | None = None,
     threaded: bool = False,
+    pipeline: str = "single",
 ) -> Iterator[Any]:
     if getattr(device, "type", "cpu") != "cuda" or prefetch <= 0:
         return iterable
@@ -158,6 +235,7 @@ def prefetch(
         prefetch=prefetch,
         prepare_fn=prepare_fn,
         threaded=threaded,
+        pipeline=pipeline,
     )
 
 

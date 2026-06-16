@@ -185,6 +185,7 @@ class _TrainSettings:
     out_dir: str
     keep_last_k: int
     prefetch_batches: int
+    prefetch_pipeline: str
     prefetch_threaded: bool
     autocast_in_step_fn: bool
     find_unused_parameters: bool
@@ -216,6 +217,7 @@ class _TrainSettings:
             out_dir=canonical_dir(get(train_cfg, "out_dir", "./runs/exp0")),
             keep_last_k=int(get(train_cfg, "keep_last_k", 3)),
             prefetch_batches=int(get(train_cfg, "prefetch_batches", 0)),
+            prefetch_pipeline=str(get(train_cfg, "prefetch_pipeline", "single")),
             prefetch_threaded=bool(get(train_cfg, "prefetch_threaded", False)),
             autocast_in_step_fn=bool(get(train_cfg, "autocast_in_step_fn", False)),
             find_unused_parameters=bool(get(train_cfg, "find_unused_parameters", False)),
@@ -797,6 +799,7 @@ class _TrainLoop:
                 prefetch=self.settings.prefetch_batches,
                 prepare_fn=self.prepare_batch_fn,
                 threaded=self.settings.prefetch_threaded,
+                pipeline=self.settings.prefetch_pipeline,
             )
         return iter(self.dataset)
 
@@ -1051,6 +1054,7 @@ class _TrainLoop:
                 f"trainable: {counts['trainable']:,} | frozen: {counts['frozen']:,}"
             )
 
+        it: Iterator[Any] | None = None
         try:
             start_step = self._resume_from_checkpoint()
             it = self._make_iterator()
@@ -1065,6 +1069,10 @@ class _TrainLoop:
         except Exception as exc:
             _emit(self.hooks, "on_exception", exc, self.ctx)
             raise
+        finally:
+            close_iterator = getattr(it, "close", None) if it is not None else None
+            if callable(close_iterator):
+                close_iterator()
 
         if self.final_ckpt is None:
             self.final_ckpt = self._build_checkpoint(self.settings.max_steps)
