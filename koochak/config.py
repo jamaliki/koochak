@@ -74,6 +74,7 @@ class TrainConfig:
     seed: int = 42
     compile: Optional[Any] = None
     prefetch_batches: int = 0
+    prefetch_pipeline: str = "single"
     device: Optional[str] = None
     out_dir: str = "./runs/exp0"
     keep_last_k: int = 3
