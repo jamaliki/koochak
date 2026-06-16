@@ -71,3 +71,25 @@ def test_wandb_hooks_namespace_metric_keys():
     assert fake.logged[1][0]["val/iou_semantic_non_empty"] == 0.85
     assert fake.logged[1][0]["val/iou_semantic_protein_backbone"] == 0.6
     assert fake.logged[1][1]["step"] == 7
+
+
+def test_wandb_step_zero_log_commits_when_initial_eval_is_suppressed():
+    fake = _FakeWandb()
+    sys.modules["wandb"] = fake  # type: ignore
+
+    hooks = make_wandb_hooks(
+        {
+            "enabled": True,
+            "project": "proj",
+            "name": "step-zero-commit-test",
+        }
+    )
+
+    for fn in hooks.get("on_train_start", []):
+        fn({"config_json": {}})
+
+    for fn in hooks.get("on_log", []):
+        fn({"loss": 1.0}, {"step": 0, "train_cfg": {"eval_every": 5000, "eval_at_step_zero": False}})
+
+    assert fake.logged[0][1]["step"] == 0
+    assert fake.logged[0][1]["commit"] is True

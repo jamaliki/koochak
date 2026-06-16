@@ -62,6 +62,7 @@ class TrainConfig:
     max_steps: int = 100_000
     log_every: int = 100
     eval_every: int = 5_000
+    eval_at_step_zero: bool = True
     ckpt_every: int = 5_000
     grad_accum: int = 1
     grad_clip_norm: Optional[float] = None
