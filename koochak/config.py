@@ -84,6 +84,7 @@ class TrainConfig:
     warn_unsharded: bool = True
     strict_config: bool = True
     config_warn_unknown: bool = True
+    prefetch_threaded: bool = False
     autocast_in_step_fn: bool = False
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)

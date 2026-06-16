@@ -34,6 +34,7 @@ from .utils.seed import get_rng_state
 # Type aliases per design
 StepFn = Callable[[nn.Module, Any, Mapping[str, Any]], Dict[str, Any]]
 EvalFn = Callable[[nn.Module, Iterable, Mapping[str, Any]], Dict[str, float]]
+BatchPrepareFn = Callable[[Any], Any]
 
 
 _INTRINSIC_TIMING_KEYS: tuple[str, ...] = ("batch_wait_s", "step_compute_s", "total_step_s")
@@ -184,6 +185,7 @@ class _TrainSettings:
     out_dir: str
     keep_last_k: int
     prefetch_batches: int
+    prefetch_threaded: bool
     autocast_in_step_fn: bool
     find_unused_parameters: bool
 
@@ -214,6 +216,7 @@ class _TrainSettings:
             out_dir=canonical_dir(get(train_cfg, "out_dir", "./runs/exp0")),
             keep_last_k=int(get(train_cfg, "keep_last_k", 3)),
             prefetch_batches=int(get(train_cfg, "prefetch_batches", 0)),
+            prefetch_threaded=bool(get(train_cfg, "prefetch_threaded", False)),
             autocast_in_step_fn=bool(get(train_cfg, "autocast_in_step_fn", False)),
             find_unused_parameters=bool(get(train_cfg, "find_unused_parameters", False)),
         )
@@ -390,6 +393,7 @@ def training_loop(
     checkpoint_dict: Optional[Dict[str, Any]] = None,
     eval_dataset: Optional[Iterable] = None,
     eval_fn: Optional[EvalFn] = None,
+    prepare_batch_fn: Optional[BatchPrepareFn] = None,
     hooks: Optional[Dict[str, list[Callable]]] = None,
 ) -> Dict[str, Any]:
     """Runs training until `train.max_steps` or dataset exhaustion.
@@ -407,6 +411,7 @@ def training_loop(
         checkpoint_dict=checkpoint_dict,
         eval_dataset=eval_dataset,
         eval_fn=eval_fn,
+        prepare_batch_fn=prepare_batch_fn,
         hooks=hooks,
     )
     return loop.run()
@@ -428,6 +433,7 @@ class _TrainLoop:
         checkpoint_dict: Optional[Dict[str, Any]],
         eval_dataset: Optional[Iterable],
         eval_fn: Optional[EvalFn],
+        prepare_batch_fn: Optional[BatchPrepareFn],
         hooks: Optional[Dict[str, list[Callable]]],
     ) -> None:
         train_config, config_json = _resolve_train_config(train_cfg, config_json)
@@ -440,6 +446,7 @@ class _TrainLoop:
         self.dataset = dataset
         self.eval_dataset = eval_dataset
         self.eval_fn = eval_fn
+        self.prepare_batch_fn = prepare_batch_fn
         self.hooks = hooks
         self.checkpoint_dict = checkpoint_dict
 
@@ -784,7 +791,13 @@ class _TrainLoop:
             and self.settings.prefetch_batches > 0
         )
         if use_prefetch:
-            return prefetch(iter(self.dataset), self.device, prefetch=self.settings.prefetch_batches)
+            return prefetch(
+                iter(self.dataset),
+                self.device,
+                prefetch=self.settings.prefetch_batches,
+                prepare_fn=self.prepare_batch_fn,
+                threaded=self.settings.prefetch_threaded,
+            )
         return iter(self.dataset)
 
     def _run_micro_steps(
