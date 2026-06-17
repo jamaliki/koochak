@@ -188,6 +188,8 @@ class _TrainSettings:
     prefetch_pipeline: str
     prefetch_threaded: bool
     autocast_in_step_fn: bool
+    profile_step_timing: bool
+    profile_step_cuda_sync: bool
     find_unused_parameters: bool
 
     @classmethod
@@ -220,6 +222,8 @@ class _TrainSettings:
             prefetch_pipeline=str(get(train_cfg, "prefetch_pipeline", "single")),
             prefetch_threaded=bool(get(train_cfg, "prefetch_threaded", False)),
             autocast_in_step_fn=bool(get(train_cfg, "autocast_in_step_fn", False)),
+            profile_step_timing=bool(get(train_cfg, "profile_step_fn_timing", False)),
+            profile_step_cuda_sync=bool(get(train_cfg, "profile_step_fn_cuda_sync", True)),
             find_unused_parameters=bool(get(train_cfg, "find_unused_parameters", False)),
         )
 
@@ -380,6 +384,7 @@ class _MicroStepStats:
     total_loss_scalar: float = 0.0
     batch_wait_s: float = 0.0
     extra_timing_totals: Dict[str, float] = field(default_factory=dict)
+    profile_timing_totals: Dict[str, float] = field(default_factory=dict)
     skip_count_totals: Dict[str, float] = field(default_factory=dict)
 
 
@@ -803,6 +808,25 @@ class _TrainLoop:
             )
         return iter(self.dataset)
 
+    def _profile_sync(self) -> None:
+        if (
+            self.settings.profile_step_timing
+            and self.settings.profile_step_cuda_sync
+            and getattr(self.device, "type", "cpu") == "cuda"
+        ):
+            torch.cuda.synchronize(self.device)
+
+    def _profile_start(self) -> float:
+        self._profile_sync()
+        return time.perf_counter()
+
+    def _profile_add(self, totals: Dict[str, float], key: str, start: float) -> float:
+        self._profile_sync()
+        elapsed = time.perf_counter() - start
+        if self.settings.profile_step_timing:
+            totals[key] = totals.get(key, 0.0) + elapsed
+        return elapsed
+
     def _run_micro_steps(
         self,
         step: int,
@@ -828,12 +852,23 @@ class _TrainLoop:
                 else nullcontext()
             )
             with cm, ac:
-                batch_wait_start = time.perf_counter()
+                batch_wait_start = self._profile_start()
                 batch = next(it) if use_prefetch else to_device(next(it), self.device)
-                stats.batch_wait_s += time.perf_counter() - batch_wait_start
+                batch_wait_elapsed = self._profile_add(
+                    stats.profile_timing_totals,
+                    "profile_loop_batch_wait_time_s",
+                    batch_wait_start,
+                )
+                stats.batch_wait_s += batch_wait_elapsed
                 for key, value in _batch_skip_count_totals(batch).items():
                     stats.skip_count_totals[key] = stats.skip_count_totals.get(key, 0.0) + float(value)
+                step_fn_start = self._profile_start()
                 out = self.step_fn(self.model, batch, self._step_ctx(step))
+                self._profile_add(
+                    stats.profile_timing_totals,
+                    "profile_loop_step_fn_time_s",
+                    step_fn_start,
+                )
                 if collect_rank_timing and isinstance(out, Mapping):
                     for key in self.settings.rank_timing_extra_keys:
                         value = out.get(key)
@@ -848,7 +883,13 @@ class _TrainLoop:
                 if not isinstance(loss_tensor, torch.Tensor):
                     raise RuntimeError("step_fn returned a 'loss' that is not a torch.Tensor")
                 loss = loss_tensor / self.settings.grad_accum
+            backward_start = self._profile_start()
             self.scaler.scale(loss).backward()
+            self._profile_add(
+                stats.profile_timing_totals,
+                "profile_loop_backward_time_s",
+                backward_start,
+            )
             stats.total_loss_scalar += float(loss.detach())
             stats.out = out
         return stats
@@ -915,7 +956,12 @@ class _TrainLoop:
             "total_step_s": float(step_time_s),
         }
         for key in self.settings.rank_timing_extra_keys:
-            timing_payload[key] = float(stats.extra_timing_totals.get(key, 0.0))
+            timing_payload[key] = float(
+                stats.extra_timing_totals.get(
+                    key,
+                    stats.profile_timing_totals.get(key, 0.0),
+                )
+            )
         gathered: list[dict[str, Any] | None] = [None for _ in range(self.world_size)]
         torch.distributed.all_gather_object(gathered, timing_payload)
         if self.is_rank0:
@@ -940,12 +986,18 @@ class _TrainLoop:
                 if isinstance(v, torch.Tensor):
                     v = float(v.detach())  # sync happens only here
                 safe_out[k] = v
+        profile_timing = {
+            key: float(value)
+            for key, value in stats.profile_timing_totals.items()
+            if key.startswith("profile_loop_")
+        }
         full = {
             "loss": stats.total_loss_scalar,
             "lr": get_lr(self.optimizer),
             "step_time_s": step_time_s,
             **{key: float(value) for key, value in stats.skip_count_totals.items()},
             **safe_out,
+            **profile_timing,
             "step": step,
         }
         return full, full
@@ -1080,9 +1132,16 @@ class _TrainLoop:
 
     def _run_step(self, step: int, it: Iterator[Any]) -> bool:
         """Execute a single training step. Returns False if dataset is exhausted."""
-        step_start = time.perf_counter()
+        step_start = self._profile_start()
+        profile_timing_totals: Dict[str, float] = {}
+        setup_start = self._profile_start()
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
+        self._profile_add(
+            profile_timing_totals,
+            "profile_loop_setup_zero_grad_time_s",
+            setup_start,
+        )
 
         collect_rank_timing = (
             self.settings.ddp_enabled
@@ -1095,38 +1154,96 @@ class _TrainLoop:
         except StopIteration:
             _emit(self.hooks, "on_train_end", self.ctx)
             return False
+        for key, value in profile_timing_totals.items():
+            stats.profile_timing_totals[key] = stats.profile_timing_totals.get(key, 0.0) + value
 
+        unscale_start = self._profile_start()
         if isinstance(self.scaler, GradScaler):
             self.scaler.unscale_(self.optimizer)
+        self._profile_add(stats.profile_timing_totals, "profile_loop_unscale_time_s", unscale_start)
+
+        nonfinite_start = self._profile_start()
         self._check_nonfinite_grads(step)
+        self._profile_add(
+            stats.profile_timing_totals,
+            "profile_loop_nonfinite_grad_check_time_s",
+            nonfinite_start,
+        )
+
+        grad_clip_start = self._profile_start()
         if self.settings.grad_clip_norm is not None:
             clip_grad_norm_(self.model.parameters(), float(self.settings.grad_clip_norm), foreach=True)
+        self._profile_add(stats.profile_timing_totals, "profile_loop_grad_clip_time_s", grad_clip_start)
+
+        ema_wait_start = self._profile_start()
         if self.ema is not None:
             self.ema.wait_before_param_mutation()
         for ema in self.ema_dual:
             ema.wait_before_param_mutation()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self._update_ema(step)
-        self._step_scheduler()
+        self._profile_add(stats.profile_timing_totals, "profile_loop_ema_wait_time_s", ema_wait_start)
 
+        optimizer_start = self._profile_start()
+        self.scaler.step(self.optimizer)
+        self._profile_add(stats.profile_timing_totals, "profile_loop_optimizer_step_time_s", optimizer_start)
+
+        scaler_update_start = self._profile_start()
+        self.scaler.update()
+        self._profile_add(
+            stats.profile_timing_totals,
+            "profile_loop_scaler_update_time_s",
+            scaler_update_start,
+        )
+
+        ema_update_start = self._profile_start()
+        self._update_ema(step)
+        self._profile_add(stats.profile_timing_totals, "profile_loop_ema_update_time_s", ema_update_start)
+
+        scheduler_start = self._profile_start()
+        self._step_scheduler()
+        self._profile_add(stats.profile_timing_totals, "profile_loop_scheduler_time_s", scheduler_start)
+
+        self._profile_sync()
         step_time_s = time.perf_counter() - step_start
 
         if collect_rank_timing:
             self._emit_rank_timing(step, stats, step_time_s)
 
+        log_build_start = self._profile_start()
         full_log, step_end_log = self._build_logs(step, stats, step_time_s)
+        log_build_elapsed = self._profile_add(
+            stats.profile_timing_totals,
+            "profile_loop_log_build_time_s",
+            log_build_start,
+        )
+        if self.settings.profile_step_timing:
+            if full_log is not None:
+                full_log["profile_loop_log_build_time_s"] = log_build_elapsed
+            step_end_log["profile_loop_log_build_time_s"] = log_build_elapsed
+
+        log_emit_start = self._profile_start()
         if full_log is not None:
             _emit(self.hooks, "on_log", full_log, self._step_ctx(step))
         _emit(self.hooks, "on_step_end", step_end_log, self._step_ctx(step))
+        self._profile_add(stats.profile_timing_totals, "profile_loop_log_emit_time_s", log_emit_start)
 
         # Always-on CUDA health watchdog. This is deliberately not a hook:
         # hooks may suppress exceptions, while a confirmed GPU fault must
         # save and stop/requeue the job deterministically.
+        health_start = self._profile_start()
         self._maybe_run_health_check(step)
-        self._maybe_run_eval(step)
+        self._profile_add(stats.profile_timing_totals, "profile_loop_health_check_time_s", health_start)
 
+        eval_start = self._profile_start()
+        self._maybe_run_eval(step)
+        self._profile_add(stats.profile_timing_totals, "profile_loop_eval_time_s", eval_start)
+
+        checkpoint_start = self._profile_start()
         if step > 0 and (step % self.settings.ckpt_every == 0) and self.is_rank0:
             _, ckpt = self._save_checkpoint(step)
             self.final_ckpt = ckpt
+        self._profile_add(
+            stats.profile_timing_totals,
+            "profile_loop_checkpoint_time_s",
+            checkpoint_start,
+        )
         return True

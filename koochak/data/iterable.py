@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
+import time
 from typing import Any, Callable, Iterable, Iterator
 
 import torch
@@ -41,6 +42,9 @@ def _record_stream(batch: Any, stream: torch.cuda.Stream) -> None:
 class _PrefetchedBatch:
     batch: Any
     event: torch.cuda.Event
+    submit_time_s: float
+    prepare_submit_s: float
+    cpu_queue_depth: int = -1
 
 
 _STOP = object()
@@ -87,6 +91,7 @@ class CudaPrefetcher:
             self._fill()
 
     def _prepare_on_stream(self, batch: Any) -> _PrefetchedBatch:
+        start = time.perf_counter()
         with torch.cuda.device(self.device), torch.cuda.stream(self.stream):
             batch = to_device(batch, self.device)
             if self.prepare_fn is not None:
@@ -95,7 +100,13 @@ class CudaPrefetcher:
                     batch = prepared
             event = torch.cuda.Event()
             event.record(self.stream)
-        return _PrefetchedBatch(batch=batch, event=event)
+        submit_time_s = time.perf_counter()
+        return _PrefetchedBatch(
+            batch=batch,
+            event=event,
+            submit_time_s=submit_time_s,
+            prepare_submit_s=submit_time_s - start,
+        )
 
     def _prefetch_one(self) -> None:
         if self._done:
@@ -128,10 +139,14 @@ class CudaPrefetcher:
         try:
             while not self._stop_event.is_set():
                 try:
+                    fetch_start = time.perf_counter()
                     batch = next(self.iterator)
+                    fetch_time_s = time.perf_counter() - fetch_start
                 except StopIteration:
                     self._queue_put(self.cpu_queue, _STOP)
                     return
+                if isinstance(batch, dict):
+                    batch["koochak_prefetch_cpu_fetch_time_s"] = float(fetch_time_s)
                 if not self._queue_put(self.cpu_queue, batch):
                     return
         except BaseException as exc:
@@ -147,7 +162,9 @@ class CudaPrefetcher:
                 if batch is _STOP:
                     self._queue_put(self.queue, _STOP)
                     return
-                if not self._queue_put(self.queue, self._prepare_on_stream(batch)):
+                prefetched = self._prepare_on_stream(batch)
+                prefetched.cpu_queue_depth = self.cpu_queue.qsize()
+                if not self._queue_put(self.queue, prefetched):
                     return
         except BaseException as exc:
             self._set_thread_exception(exc)
@@ -186,23 +203,35 @@ class CudaPrefetcher:
     def __next__(self) -> Any:
         if self.threaded:
             assert isinstance(self.queue, Queue)
+            get_start = time.perf_counter()
             item = self._queue_get(self.queue)
+            get_wait_s = time.perf_counter() - get_start
             if item is _STOP:
                 if self._thread_exception is not None:
                     raise self._thread_exception
                 raise StopIteration
             assert isinstance(item, _PrefetchedBatch)
-            return self._consume(item)
+            return self._consume(item, get_wait_s=get_wait_s, queue_depth=self.queue.qsize())
         assert isinstance(self.queue, deque)
         if not self.queue and self._done:
             raise StopIteration
         item = self.queue.popleft()
-        batch = self._consume(item)
+        batch = self._consume(item, get_wait_s=0.0, queue_depth=len(self.queue))
         self._prefetch_one()
         return batch
 
-    def _consume(self, item: _PrefetchedBatch) -> Any:
+    def _consume(self, item: _PrefetchedBatch, *, get_wait_s: float, queue_depth: int) -> Any:
         current_stream = torch.cuda.current_stream()
+        event_ready = bool(item.event.query())
+        if isinstance(item.batch, dict):
+            item.batch["koochak_prefetch_get_wait_s"] = float(get_wait_s)
+            item.batch["koochak_prefetch_event_ready"] = float(event_ready)
+            item.batch["koochak_prefetch_queue_depth"] = float(queue_depth)
+            item.batch["koochak_prefetch_cpu_queue_depth"] = float(item.cpu_queue_depth)
+            item.batch["koochak_prefetch_age_s"] = float(
+                max(0.0, time.perf_counter() - item.submit_time_s)
+            )
+            item.batch["koochak_prefetch_prepare_submit_s"] = float(item.prepare_submit_s)
         current_stream.wait_event(item.event)
         _record_stream(item.batch, current_stream)
         return item.batch
