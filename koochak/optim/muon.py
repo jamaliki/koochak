@@ -46,9 +46,10 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim > 2:  # for the case of conv filters
         update = update.view(len(update), -1)
+    rows, cols = update.size(-2), update.size(-1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps)
     # Use Moonlight update
-    update *= (0.2 * max(grad.size(-2), grad.size(-1)) ** 0.5)
+    update *= (0.2 * max(rows, cols) ** 0.5)
     return update
 
 
@@ -56,8 +57,9 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
 def normuon_update(grad, momentum, second_momentum, beta=0.95, beta2=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
-    if update.ndim == 4:  # for the case of conv filters
+    if update.ndim > 2:  # for the case of conv filters
         update = update.view(len(update), -1)
+    rows, cols = update.size(-2), update.size(-1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps).float()
     ################ NorMuon added ###################
     vnorm = update.norm(dim=(-2, -1), keepdim=True)
@@ -68,7 +70,7 @@ def normuon_update(grad, momentum, second_momentum, beta=0.95, beta2=0.95, ns_st
     vnorm_new = update.norm(dim=(-2, -1), keepdim=True)
     update.mul_(vnorm / (vnorm_new.add_(1e-10)))  # Keeps the update norm the same as pre-normalization
     ##################################################
-    update *= max(1, grad.size(-2) / grad.size(-1)) ** 0.5
+    update *= max(1, rows / cols) ** 0.5
     return update
 
 
@@ -101,6 +103,95 @@ def _optimizer_profile_range(name: str):
         yield
 
 
+class HyperballOptimizer:
+    """Optimizer wrapper that projects selected matrices to fixed Frobenius radii.
+
+    This matches the practical Kaveh Hyperball/HyperP setup: after the wrapped
+    optimizer takes its directional step, selected nonzero matrix parameters are
+    projected back to their initialization Frobenius norm. For small steps this
+    removes the radial component of the update to first order, so decoupled
+    weight decay is intentionally redundant for projected groups.
+    """
+
+    def __init__(
+        self,
+        inner: torch.optim.Optimizer,
+        params: Iterable[torch.nn.Parameter],
+        *,
+        eps: float = 1.0e-8,
+        radius_scale: float = 1.0,
+        projection: str = "sphere",
+    ) -> None:
+        self.inner = inner
+        self.eps = float(eps)
+        self.radius_scale = float(radius_scale)
+        if self.radius_scale <= 0.0:
+            raise ValueError("radius_scale must be positive")
+        self.projection = str(projection).lower()
+        if self.projection not in {"sphere", "ball"}:
+            raise ValueError("projection must be 'sphere' or 'ball'")
+        self.params: list[torch.nn.Parameter] = []
+        self.radii: list[torch.Tensor] = []
+        seen: set[int] = set()
+        for param in params:
+            ident = id(param)
+            if ident in seen or not param.requires_grad or param.ndim < 2:
+                continue
+            seen.add(ident)
+            radius = param.detach().float().norm()
+            if float(radius) <= self.eps:
+                continue
+            self.params.append(param)
+            self.radii.append((radius * self.radius_scale).detach())
+
+    @property
+    def param_groups(self):
+        return self.inner.param_groups
+
+    @property
+    def state(self):
+        return self.inner.state
+
+    def zero_grad(self, *args, **kwargs):
+        return self.inner.zero_grad(*args, **kwargs)
+
+    @torch.no_grad()
+    def _project(self) -> None:
+        for idx, (param, radius) in enumerate(zip(self.params, self.radii)):
+            norm = param.detach().float().norm()
+            if radius.device != param.device or radius.dtype != torch.float32:
+                radius = radius.to(device=param.device, dtype=torch.float32)
+                self.radii[idx] = radius.detach()
+            scale = radius / norm.clamp_min(self.eps)
+            if self.projection == "ball":
+                scale = torch.minimum(scale, torch.ones_like(scale))
+            param.mul_(scale.to(dtype=param.dtype))
+
+    def step(self, closure=None):
+        with _optimizer_profile_range("optimizer.hyperball.inner_step"):
+            loss = self.inner.step(closure)
+        with _optimizer_profile_range("optimizer.hyperball.project"):
+            self._project()
+        return loss
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "inner": self.inner.state_dict(),
+            "hyperball_radii": [radius.detach().cpu().clone() for radius in self.radii],
+            "hyperball_radius_scale": self.radius_scale,
+            "hyperball_projection": self.projection,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if "inner" not in state_dict:
+            self.inner.load_state_dict(state_dict)
+            return
+        self.inner.load_state_dict(state_dict["inner"])
+        radii = state_dict.get("hyperball_radii")
+        if radii is not None and len(radii) == len(self.radii):
+            self.radii = [torch.as_tensor(radius).detach().clone() for radius in radii]
+
+
 def _foreach_adam_enabled(group: Dict[str, Any]) -> bool:
     if "foreach_adam_update" in group:
         return bool(group["foreach_adam_update"])
@@ -127,7 +218,12 @@ def _muon_update_for_param(p: torch.nn.Parameter, group: Dict[str, Any], state: 
 def _normuon_update_for_param(p: torch.nn.Parameter, group: Dict[str, Any], state: Dict[str, Any]) -> torch.Tensor:
     if "momentum_buffer" not in state:
         state["momentum_buffer"] = torch.zeros_like(p)
-        state["second_momentum_buffer"] = torch.zeros_like(p[..., 0:1])
+        second_momentum_shape = (p.shape[0], 1) if p.ndim > 2 else (*p.shape[:-1], 1)
+        state["second_momentum_buffer"] = torch.zeros(
+            second_momentum_shape,
+            dtype=p.dtype,
+            device=p.device,
+        )
     return normuon_update(
         p.grad,
         state["momentum_buffer"],
