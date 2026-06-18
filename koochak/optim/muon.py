@@ -45,7 +45,7 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim > 2:  # for the case of conv filters
-        update = update.view(len(update), -1)
+        update = update.reshape(len(update), -1)
     rows, cols = update.size(-2), update.size(-1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps)
     # Use Moonlight update
@@ -58,7 +58,7 @@ def normuon_update(grad, momentum, second_momentum, beta=0.95, beta2=0.95, ns_st
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim > 2:  # for the case of conv filters
-        update = update.view(len(update), -1)
+        update = update.reshape(len(update), -1)
     rows, cols = update.size(-2), update.size(-1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps).float()
     ################ NorMuon added ###################
