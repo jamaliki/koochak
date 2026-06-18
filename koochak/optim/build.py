@@ -15,6 +15,7 @@ from torch.optim.lr_scheduler import (
 )
 
 from .muon import (
+    HyperballOptimizer,
     MuonWithAuxAdam,
     NorMuonWithAuxAdam,
     SingleDeviceMuonWithAuxAdam,
@@ -34,8 +35,30 @@ def _as_params(params):
     return params.parameters() if isinstance(params, nn.Module) else params
 
 
+_MUON_NAMES = {"muon", "normuon"}
+_HYPERBALL_MUON_NAMES = {
+    "muonh": "muon",
+    "hyperball-muon": "muon",
+    "hyperball_muon": "muon",
+    "hyperballmuon": "muon",
+    "normuonh": "normuon",
+    "hyperball-normuon": "normuon",
+    "hyperball_normuon": "normuon",
+    "hyperballnormuon": "normuon",
+}
+_MUON_FAMILY_NAMES = _MUON_NAMES | set(_HYPERBALL_MUON_NAMES)
+
+
 def _distributed_initialized() -> bool:
     return dist.is_available() and dist.is_initialized()
+
+
+def _canonical_muon_name(name: str) -> str:
+    return _HYPERBALL_MUON_NAMES.get(name, name)
+
+
+def _is_hyperball_muon_name(name: str) -> bool:
+    return name in _HYPERBALL_MUON_NAMES
 
 
 def _apply_muon_group_lrs(
@@ -55,7 +78,8 @@ def _apply_muon_group_lrs(
 
 
 def _muon_classes(name: str):
-    if name == "muon":
+    name = _canonical_muon_name(name)
+    if name in {"muon", "muonh"}:
         return SingleDeviceMuonWithAuxAdam, MuonWithAuxAdam
     return SingleDeviceNorMuonWithAuxAdam, NorMuonWithAuxAdam
 
@@ -68,24 +92,46 @@ def _build_muon_optimizer(
     weight_decay: float,
     muon_lr: Optional[float],
     adam_lr: Optional[float],
+    hyperball_eps: float,
+    hyperball_radius_scale: float,
+    hyperball_projection: str,
 ) -> Optimizer:
+    hyperball = _is_hyperball_muon_name(name)
     single_device_class, distributed_class = _muon_classes(name)
 
     if isinstance(params, nn.Module):
         groups = prepare_param_groups_for_muon(params, lr=lr, weight_decay=weight_decay)
-        _apply_muon_group_lrs(groups, muon_lr=muon_lr, adam_lr=adam_lr)
-        cls = distributed_class if _distributed_initialized() else single_device_class
-        return cls(groups)
-
-    if isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
+    elif isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
         groups = list(params)
-        _apply_muon_group_lrs(groups, muon_lr=muon_lr, adam_lr=adam_lr)
-        cls = distributed_class if _distributed_initialized() else single_device_class
-        return cls(groups)
+    else:
+        raise ValueError(
+            "For optimizer=name: 'Muon', 'MuonH', 'NorMuon', 'NorMuonH', "
+            "'hyperball-muon', or 'hyperball-normuon', pass the model module "
+            "or a list of param_groups with 'use_muon' flags."
+        )
 
-    raise ValueError(
-        "For optimizer=name: 'Muon' or 'NorMuon', pass the model module or a list "
-        "of param_groups with 'use_muon' flags."
+    _apply_muon_group_lrs(groups, muon_lr=muon_lr, adam_lr=adam_lr)
+    hyperball_params = [
+        param
+        for group in groups
+        if bool(group.get("use_muon", False))
+        for param in group.get("params", [])
+    ]
+    if hyperball:
+        # Match Kaveh's Hyperball-Muon implementation: once hidden matrices are
+        # projected back to their initialization radii, ordinary decoupled
+        # weight decay is redundant and is disabled for the wrapped optimizer.
+        groups = [dict(group, weight_decay=0.0) for group in groups]
+    cls = distributed_class if _distributed_initialized() else single_device_class
+    inner = cls(groups)
+    if not hyperball:
+        return inner
+    return HyperballOptimizer(
+        inner,
+        hyperball_params,
+        eps=float(hyperball_eps),
+        radius_scale=float(hyperball_radius_scale),
+        projection=str(hyperball_projection),
     )
 
 
@@ -98,6 +144,9 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
     muon_lr = float(muon_lr_raw) if muon_lr_raw is not None else None
     adam_lr = float(adam_lr_raw) if adam_lr_raw is not None else None
     weight_decay = float(cfg.get("weight_decay", 0.0))
+    hyperball_eps = float(cfg.get("hyperball_eps", 1.0e-8))
+    hyperball_radius_scale = float(cfg.get("hyperball_radius_scale", 1.0))
+    hyperball_projection = str(cfg.get("hyperball_projection", "sphere"))
 
     if name == "adamw":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
@@ -111,7 +160,7 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
         momentum = float(cfg.get("momentum", 0.9))
         nesterov = bool(cfg.get("nesterov", False))
         return SGD(_as_params(params), lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
-    if name in {"muon", "normuon"}:
+    if name in _MUON_FAMILY_NAMES:
         return _build_muon_optimizer(
             params,
             name=name,
@@ -119,6 +168,9 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
             weight_decay=weight_decay,
             muon_lr=muon_lr,
             adam_lr=adam_lr,
+            hyperball_eps=hyperball_eps,
+            hyperball_radius_scale=hyperball_radius_scale,
+            hyperball_projection=hyperball_projection,
         )
     raise ValueError(f"Unsupported optimizer name: {name}")
 
