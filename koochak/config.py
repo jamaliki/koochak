@@ -52,7 +52,7 @@ class TrainEMAConfig:
     offload_to_cpu: bool = True
     pin_memory: bool = True
     update_every: int = 1
-    compensate_update_every: bool = False
+    compensate_update_every: bool = True
     eval_with_ema: bool = False
     dual: TrainEMADualConfig = field(default_factory=TrainEMADualConfig)
 

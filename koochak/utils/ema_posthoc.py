@@ -28,10 +28,19 @@ def _snapshot_kernel_inner(g1: float, t1: float, g2: float, t2: float) -> float:
 
 
 def _profile_step(state: Mapping[str, object]) -> float:
-    # With compensated thinned updates, the power profile is parameterized by
-    # training step count; otherwise by the number of EMA updates actually taken.
-    if bool(state.get("compensate_update_every", False)):
-        value = state.get("step_counter", state.get("num_updates", 0))
+    # With thinned updates, the power profile is parameterized by model step
+    # count, not by number of EMA updates. If a checkpoint is saved on a skipped
+    # step, the EMA shadow is current through the last actual EMA update.
+    update_every = state.get("update_every", 1)
+    try:
+        every = max(1, int(update_every))
+    except (TypeError, ValueError):
+        every = 1
+    if every > 1 or bool(state.get("compensate_update_every", False)):
+        value = state.get(
+            "last_update_step_counter",
+            state.get("step_counter", state.get("num_updates", 0)),
+        )
     else:
         value = state.get("num_updates", state.get("step_counter", 0))
     try:

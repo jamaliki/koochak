@@ -281,6 +281,7 @@ W&B artifacts:
 
 - Enable EMA by setting `train.ema.enabled: true` (or by providing `decay`/`profile` keys while `enabled` is unset). Nested config lives under `train.ema.*`; legacy flat keys (`ema_decay`, `ema_eval`, etc.) are still honored.
 - Supported options: `decay`, `decay_init`, `warmup_steps`, `schedule` (`constant`, `linear`, `cosine`), `profile` (`constant`, `power`), `gamma`/`srel` for power-law schedules, `offload_to_cpu`, `pin_memory`, `update_every`, `compensate_update_every`, and `eval_with_ema` to run eval with shadow weights.
+- Thinned EMA updates are decay-compensated by elapsed model steps. For example, `update_every: 1` uses `decay`, while `update_every: 2` uses `decay ** 2` on each EMA update. The `compensate_update_every` key is retained for config/checkpoint compatibility; compensated behavior is the implementation.
 - Dual EMA tracking is available via `train.ema.dual.enabled` plus `gamma1/gamma2` or `srel1/srel2`; both shadows are saved and restored from checkpoints.
 - For EDM2-style post-hoc EMA tuning, collect the two dual EMA states from multiple saved checkpoints and pass the flattened list to `koochak.utils.ema_posthoc.reconstruct_power_ema_state_dict(...)`. `reconstruct_dual_power_ema_state_dict(...)` remains the lightweight same-checkpoint two-shadow helper.
 - EMA state is serialized alongside the model (and matches state-dict prefixes automatically) so resumes and manual loads stay seamless.

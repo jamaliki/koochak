@@ -102,6 +102,61 @@ def _assert_state_close(
         assert torch.allclose(actual[key].to(torch.float32), expected_value, atol=atol, rtol=rtol), key
 
 
+def _single_weight_model(value: float = 0.0) -> torch.nn.Module:
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(float(value))
+    return model
+
+
+def _set_single_weight(model: torch.nn.Module, value: float) -> None:
+    with torch.no_grad():
+        next(model.parameters()).fill_(float(value))
+
+
+def _single_shadow_value(ema: EMA) -> float:
+    shadow = ema.state_dict()["shadow"]
+    assert isinstance(shadow, Mapping)
+    return float(next(iter(shadow.values())).item())
+
+
+def test_constant_ema_update_every_uses_elapsed_decay() -> None:
+    model = _single_weight_model(0.0)
+    ema = EMA(model, decay=0.9, update_every=2, offload_to_cpu=False)
+
+    _set_single_weight(model, 1.0)
+    ema.update(model)
+    assert _single_shadow_value(ema) == 0.0
+
+    _set_single_weight(model, 2.0)
+    ema.update(model)
+    expected = 0.0 * (0.9 ** 2) + 2.0 * (1.0 - 0.9 ** 2)
+    assert math.isclose(_single_shadow_value(ema), expected, rel_tol=1e-6, abs_tol=1e-6)
+
+    _set_single_weight(model, 3.0)
+    ema.update(model)
+    assert math.isclose(_single_shadow_value(ema), expected, rel_tol=1e-6, abs_tol=1e-6)
+
+    _set_single_weight(model, 4.0)
+    ema.update(model)
+    expected = expected * (0.9 ** 2) + 4.0 * (1.0 - 0.9 ** 2)
+    assert math.isclose(_single_shadow_value(ema), expected, rel_tol=1e-6, abs_tol=1e-6)
+
+
+def test_constant_ema_explicit_decay_is_compensated_when_updates_are_thinned() -> None:
+    model = _single_weight_model(0.0)
+    ema = EMA(model, decay=0.999, update_every=2, offload_to_cpu=False)
+
+    _set_single_weight(model, 1.0)
+    ema.update(model, decay=0.5)
+    assert _single_shadow_value(ema) == 0.0
+
+    _set_single_weight(model, 2.0)
+    ema.update(model, decay=0.5)
+    expected = 0.0 * (0.5 ** 2) + 2.0 * (1.0 - 0.5 ** 2)
+    assert math.isclose(_single_shadow_value(ema), expected, rel_tol=1e-6, abs_tol=1e-6)
+
+
 def test_power_ema_matches_edm2_closed_form_on_mlp_params() -> None:
     model = _mlp()
     gamma = gamma_from_srel(0.10)
