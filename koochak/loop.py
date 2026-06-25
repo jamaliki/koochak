@@ -295,7 +295,7 @@ class _EmaSettings:
             offload_to_cpu=bool(get("offload_to_cpu", True)),
             pin_memory=bool(get("pin_memory", True)),
             update_every=max(1, int(get("update_every", 1))),
-            compensate_update_every=bool(get("compensate_update_every", False)),
+            compensate_update_every=bool(get("compensate_update_every", True)),
             eval_with_ema=bool(get("eval_with_ema", False)) if enabled else False,
             dual=_DualEmaSettings.from_cfg(ema_cfg),
         )

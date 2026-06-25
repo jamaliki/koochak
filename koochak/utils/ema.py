@@ -26,7 +26,7 @@ class EMA:
         update_every: int = 1,          # do an EMA update every N steps
         offload_to_cpu: bool = True,    # keep EMA on CPU
         pin_memory: bool = True,        # use pinned buffers for async D2H
-        compensate_update_every: bool = False,
+        compensate_update_every: bool = True,
     ) -> None:
         if not (0.0 < float(decay) < 1.0):
             raise ValueError("EMA decay must be in (0, 1)")
@@ -35,7 +35,10 @@ class EMA:
         self.offload = bool(offload_to_cpu)
         self.pin_memory = bool(pin_memory)
         self.update_every = max(1, int(update_every))
-        self.compensate_update_every = bool(compensate_update_every)
+        # Kept as a public/checkpoint field for compatibility. Thinned EMA
+        # updates are always decay-compensated by the actual elapsed step count:
+        # an update every N model steps uses base_decay ** N.
+        self.compensate_update_every = True
         self.shadow: Dict[str, torch.Tensor] = {}
         self.staging: Dict[str, torch.Tensor] = {}         # pinned CPU buffers
         self.pending_event: Dict[str, Optional[torch.cuda.Event]] = {}
@@ -47,6 +50,7 @@ class EMA:
         self._shadow_future: Optional[Future[None]] = None
         self.num_updates: int = 0
         self._step_counter: int = 0
+        self._last_update_step_counter: int = 0
         self._backup: Optional[Dict[str, torch.Tensor]] = None  # for store/restore
 
         # schedule
@@ -78,21 +82,18 @@ class EMA:
                 hi = mid
         return 0.5 * (lo + hi)
 
-    def _current_decay(self) -> float:
+    def _current_decay(self, elapsed_steps: int = 1) -> float:
         if self.profile == "constant":
             return float(self.decay)
         g = float(self.gamma if self.gamma is not None else 6.94)  # ~10% s_rel
-        if self.compensate_update_every and self.update_every > 1:
-            t = max(1.0, float(self._step_counter))
-            prev_t = max(0.0, t - float(self.update_every))
-            return float((prev_t / t) ** (g + 1.0))
-        t = max(1.0, float(self.num_updates + 1))
-        return float((1.0 - 1.0 / t) ** (g + 1.0))
+        t = max(1.0, float(self._step_counter))
+        prev_t = max(0.0, t - float(max(1, int(elapsed_steps))))
+        return float((prev_t / t) ** (g + 1.0))
 
-    def _effective_decay(self, decay: Optional[float]) -> float:
-        d = float(self._current_decay() if decay is None else decay)
-        if self.profile == "constant" and self.compensate_update_every and self.update_every > 1:
-            d = d ** float(self.update_every)
+    def _effective_decay(self, decay: Optional[float], elapsed_steps: int) -> float:
+        d = float(self._current_decay(elapsed_steps) if decay is None else decay)
+        if self.profile == "constant":
+            d = d ** float(max(1, int(elapsed_steps)))
         return d
 
     def _build_from_model(self, model: torch.nn.Module) -> None:
@@ -126,7 +127,8 @@ class EMA:
         if self.update_every > 1 and (self._step_counter % self.update_every) != 0:
             return  # thinning
 
-        d = self._effective_decay(decay)
+        elapsed_steps = max(1, int(self._step_counter - self._last_update_step_counter))
+        d = self._effective_decay(decay, elapsed_steps)
         self.num_updates += 1
 
         # Ensure the single staging buffer is no longer owned by the previous
@@ -135,6 +137,7 @@ class EMA:
 
         if self._copy_stream is not None and self._copy_device is not None:
             self._launch_async_cuda_snapshot(model, d)
+            self._last_update_step_counter = self._step_counter
             return
 
         for name, p in model.named_parameters():
@@ -144,6 +147,7 @@ class EMA:
             dst = self.shadow[name]
             src_cpu = p.detach().to("cpu", dtype=self.dtype)
             dst.mul_(d).add_(src_cpu, alpha=(1.0 - d))
+        self._last_update_step_counter = self._step_counter
 
     def wait_before_param_mutation(self) -> None:
         """Wait until any async CUDA snapshot no longer reads live parameters."""
@@ -166,6 +170,7 @@ class EMA:
             "gamma": (float(self.gamma) if self.gamma is not None else None),
             "num_updates": self.num_updates,
             "step_counter": self._step_counter,
+            "last_update_step_counter": self._last_update_step_counter,
             "update_every": self.update_every,
             "compensate_update_every": self.compensate_update_every,
             # avoid doubling memory; clone only if requested
@@ -190,9 +195,12 @@ class EMA:
         update_every = state.get("update_every", self.update_every)
         if isinstance(update_every, (int, float)):
             self.update_every = max(1, int(update_every))
-        compensate = state.get("compensate_update_every", self.compensate_update_every)
-        if isinstance(compensate, bool):
-            self.compensate_update_every = bool(compensate)
+        last_update = state.get("last_update_step_counter", None)
+        if isinstance(last_update, (int, float)):
+            self._last_update_step_counter = max(0, int(last_update))
+        else:
+            self._last_update_step_counter = self._derive_last_update_step_counter()
+        self.compensate_update_every = True
 
         shadow = state.get("shadow", {})
         if isinstance(shadow, dict):
@@ -300,3 +308,10 @@ class EMA:
         self._wait_for_shadow_update()
         for name in self.pending_event:
             self.pending_event[name] = None
+
+    def _derive_last_update_step_counter(self) -> int:
+        step = max(0, int(self._step_counter))
+        every = max(1, int(self.update_every))
+        if every == 1:
+            return step
+        return step - (step % every)
