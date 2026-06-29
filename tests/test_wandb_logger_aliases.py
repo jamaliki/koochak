@@ -82,3 +82,19 @@ def test_wandb_artifact_aliases(monkeypatch, tmp_path):
     assert art.name.startswith("model-")
     assert "latest" in aliases and "step-10" in aliases and "best" in aliases and "best-val_loss" in aliases
 
+
+def test_wandb_artifacts_are_opt_in(monkeypatch, tmp_path):
+    fake = _FakeWandb()
+    sys.modules["wandb"] = fake  # type: ignore
+
+    hooks = make_wandb_hooks({"enabled": True, "project": "proj"})
+
+    for fn in hooks.get("on_train_start", []):
+        fn({"config_json": {}})
+
+    ckpt_path = str(tmp_path / "step000000010.pt")
+    tmp_path.joinpath("step000000010.pt").write_text("x")
+    for fn in hooks.get("on_checkpoint", []):
+        fn(ckpt_path, {"step": 10}, {"step": 10})
+
+    assert fake._artifacts == []
