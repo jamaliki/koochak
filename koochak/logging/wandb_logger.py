@@ -214,7 +214,7 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         return f"{prefix}-{rid}"
 
     def on_checkpoint(path: str, ckpt: Dict[str, Any], ctx: Dict[str, Any]):
-        if not get("log_artifacts", True):
+        if not get("log_artifacts", False):
             return
         run = wandb.run
         if run is None:
