@@ -35,6 +35,17 @@ def _as_params(params):
     return params.parameters() if isinstance(params, nn.Module) else params
 
 
+def _adam_kwargs(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    fused = cfg.get("fused")
+    foreach = cfg.get("foreach")
+    if fused is not None:
+        kwargs["fused"] = bool(fused)
+    if foreach is not None:
+        kwargs["foreach"] = bool(foreach)
+    return kwargs
+
+
 _MUON_NAMES = {"muon", "normuon"}
 _HYPERBALL_MUON_NAMES = {
     "muonh": "muon",
@@ -151,11 +162,11 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
     if name == "adamw":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
         eps = float(cfg.get("eps", 1e-8))
-        return AdamW(_as_params(params), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        return AdamW(_as_params(params), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, **_adam_kwargs(cfg))
     if name == "adam":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
         eps = float(cfg.get("eps", 1e-8))
-        return Adam(_as_params(params), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        return Adam(_as_params(params), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, **_adam_kwargs(cfg))
     if name == "sgd":
         momentum = float(cfg.get("momentum", 0.9))
         nesterov = bool(cfg.get("nesterov", False))

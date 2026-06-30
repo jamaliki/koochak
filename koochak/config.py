@@ -119,6 +119,8 @@ class OptimizerConfig:
     weight_decay: float = 0.0
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
+    fused: Optional[bool] = None
+    foreach: Optional[bool] = None
     momentum: float = 0.9
     nesterov: bool = False
     muon_lr: Optional[float] = None
