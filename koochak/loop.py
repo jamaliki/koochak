@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional, Sequence
 
 import torch
+import torch.distributed as torch_dist
 import torch.nn as nn
 from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
@@ -192,10 +193,16 @@ class _TrainSettings:
     profile_step_timing: bool
     profile_step_cuda_sync: bool
     find_unused_parameters: bool
+    ddp_static_graph: bool
+    ddp_gradient_as_bucket_view: bool
+    ddp_bucket_cap_mb: Optional[int]
+    ddp_broadcast_buffers: bool
+    profile_ddp_comm_timing: bool
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_TrainSettings":
         get = config_lib.get
+        raw_bucket_cap_mb = get(train_cfg, "ddp_bucket_cap_mb", None)
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -227,6 +234,13 @@ class _TrainSettings:
             profile_step_timing=bool(get(train_cfg, "profile_step_fn_timing", False)),
             profile_step_cuda_sync=bool(get(train_cfg, "profile_step_fn_cuda_sync", True)),
             find_unused_parameters=bool(get(train_cfg, "find_unused_parameters", False)),
+            ddp_static_graph=bool(get(train_cfg, "ddp_static_graph", False)),
+            ddp_gradient_as_bucket_view=bool(get(train_cfg, "ddp_gradient_as_bucket_view", False)),
+            ddp_bucket_cap_mb=(
+                None if raw_bucket_cap_mb is None else int(raw_bucket_cap_mb)
+            ),
+            ddp_broadcast_buffers=bool(get(train_cfg, "ddp_broadcast_buffers", True)),
+            profile_ddp_comm_timing=bool(get(train_cfg, "profile_ddp_comm_timing", False)),
         )
 
 
@@ -391,6 +405,71 @@ class _MicroStepStats:
     skip_count_totals: Dict[str, float] = field(default_factory=dict)
 
 
+@dataclass
+class _DdpCommTimingState:
+    """Diagnostic DDP communication hook state.
+
+    When enabled, the hook performs the standard async all-reduce/divide for
+    each gradient bucket and records bucket count, reduced bytes, and observed
+    future latency. It is intentionally opt-in because a comm hook can perturb
+    the reducer and should not be part of normal training unless profiling.
+    """
+
+    world_size: int
+    count: int = 0
+    num_bytes: int = 0
+    total_s: float = 0.0
+    max_s: float = 0.0
+
+    def reset(self) -> None:
+        self.count = 0
+        self.num_bytes = 0
+        self.total_s = 0.0
+        self.max_s = 0.0
+
+    def as_profile_fields(self) -> Dict[str, float]:
+        return {
+            "profile_loop_ddp_comm_hook_count": float(self.count),
+            "profile_loop_ddp_comm_bytes": float(self.num_bytes),
+            "profile_loop_ddp_comm_total_time_s": float(self.total_s),
+            "profile_loop_ddp_comm_max_bucket_time_s": float(self.max_s),
+        }
+
+    def reduce_bucket(self, bucket: torch_dist.GradBucket) -> torch.futures.Future[torch.Tensor]:
+        buffer = bucket.buffer()
+        start = time.perf_counter()
+        num_bytes = int(buffer.numel() * buffer.element_size())
+        work = torch_dist.all_reduce(buffer, async_op=True)
+        future = work.get_future()
+
+        def _done(_future: torch.futures.Future) -> torch.Tensor:
+            elapsed = time.perf_counter() - start
+            self.count += 1
+            self.num_bytes += num_bytes
+            self.total_s += elapsed
+            self.max_s = max(self.max_s, elapsed)
+            buffer.div_(self.world_size)
+            return buffer
+
+        return future.then(_done)
+
+
+def _ddp_comm_timing_hook(state, bucket):
+    if not isinstance(state, _DdpCommTimingState):
+        raise TypeError("DDP comm timing hook requires _DdpCommTimingState")
+    return state.reduce_bucket(bucket)
+
+
+# DDP validates hook annotations at registration time. With
+# `from __future__ import annotations`, written annotations become strings, so
+# set the runtime objects explicitly.
+_ddp_comm_timing_hook.__annotations__ = {
+    "state": object,
+    "bucket": torch_dist.GradBucket,
+    "return": torch.futures.Future[torch.Tensor],
+}
+
+
 def training_loop(
     *,
     model: nn.Module,
@@ -484,6 +563,7 @@ class _TrainLoop:
         self.ema: Optional[EMA] = None
         self.ema_dual: list[EMA] = []
         self.final_ckpt: Optional[Dict[str, Any]] = checkpoint_dict
+        self.ddp_comm_timing: Optional[_DdpCommTimingState] = None
         self.gpu_health = GpuHealthWatchdog(
             device=self.device,
             out_dir=self.settings.out_dir,
@@ -613,10 +693,28 @@ class _TrainLoop:
         from torch.nn.parallel import DistributedDataParallel
 
         assert dist_lib.is_initialized()
-        ddp_kwargs: Dict[str, Any] = {"find_unused_parameters": self.settings.find_unused_parameters}
+        ddp_kwargs: Dict[str, Any] = {
+            "find_unused_parameters": self.settings.find_unused_parameters,
+            "broadcast_buffers": self.settings.ddp_broadcast_buffers,
+            "gradient_as_bucket_view": self.settings.ddp_gradient_as_bucket_view,
+        }
+        if self.settings.ddp_bucket_cap_mb is not None:
+            ddp_kwargs["bucket_cap_mb"] = self.settings.ddp_bucket_cap_mb
+        if self.settings.ddp_static_graph:
+            ddp_kwargs["static_graph"] = True
         if getattr(self.device, "type", "cpu") == "cuda":
             ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
         self.model = DistributedDataParallel(self.model, **ddp_kwargs)
+        if self.settings.profile_ddp_comm_timing:
+            register_hook = getattr(self.model, "register_comm_hook", None)
+            if callable(register_hook):
+                self.ddp_comm_timing = _DdpCommTimingState(world_size=self.world_size)
+                register_hook(state=self.ddp_comm_timing, hook=_ddp_comm_timing_hook)
+            elif self.is_rank0:
+                warnings.warn(
+                    "profile_ddp_comm_timing=True but DDP wrapper does not expose register_comm_hook",
+                    RuntimeWarning,
+                )
         self.ctx["model"] = self.model
 
     def _resume_from_checkpoint(self) -> int:
@@ -1157,6 +1255,8 @@ class _TrainLoop:
         setup_start = self._profile_start()
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
+        if self.ddp_comm_timing is not None:
+            self.ddp_comm_timing.reset()
         self._profile_add(
             profile_timing_totals,
             "profile_loop_setup_zero_grad_time_s",
@@ -1176,6 +1276,9 @@ class _TrainLoop:
             return False
         for key, value in profile_timing_totals.items():
             stats.profile_timing_totals[key] = stats.profile_timing_totals.get(key, 0.0) + value
+        if self.ddp_comm_timing is not None:
+            for key, value in self.ddp_comm_timing.as_profile_fields().items():
+                stats.profile_timing_totals[key] = value
 
         unscale_start = self._profile_start()
         if isinstance(self.scaler, GradScaler):
