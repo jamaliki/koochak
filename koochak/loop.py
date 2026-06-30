@@ -188,6 +188,7 @@ class _TrainSettings:
     prefetch_pipeline: str
     prefetch_threaded: bool
     autocast_in_step_fn: bool
+    scalarize_loss_every_step: bool
     profile_step_timing: bool
     profile_step_cuda_sync: bool
     find_unused_parameters: bool
@@ -222,6 +223,7 @@ class _TrainSettings:
             prefetch_pipeline=str(get(train_cfg, "prefetch_pipeline", "single")),
             prefetch_threaded=bool(get(train_cfg, "prefetch_threaded", False)),
             autocast_in_step_fn=bool(get(train_cfg, "autocast_in_step_fn", False)),
+            scalarize_loss_every_step=bool(get(train_cfg, "scalarize_loss_every_step", True)),
             profile_step_timing=bool(get(train_cfg, "profile_step_fn_timing", False)),
             profile_step_cuda_sync=bool(get(train_cfg, "profile_step_fn_cuda_sync", True)),
             find_unused_parameters=bool(get(train_cfg, "find_unused_parameters", False)),
@@ -381,7 +383,8 @@ def _ema_get_factory(train_cfg: Any) -> Callable[[str, Any], Any]:
 @dataclass
 class _MicroStepStats:
     out: Optional[Dict[str, Any]] = None
-    total_loss_scalar: float = 0.0
+    total_loss: Optional[torch.Tensor] = None
+    total_loss_scalar: Optional[float] = None
     batch_wait_s: float = 0.0
     extra_timing_totals: Dict[str, float] = field(default_factory=dict)
     profile_timing_totals: Dict[str, float] = field(default_factory=dict)
@@ -890,7 +893,15 @@ class _TrainLoop:
                 "profile_loop_backward_time_s",
                 backward_start,
             )
-            stats.total_loss_scalar += float(loss.detach())
+            loss_detached = loss.detach()
+            stats.total_loss = (
+                loss_detached if stats.total_loss is None else stats.total_loss + loss_detached
+            )
+            if self.settings.scalarize_loss_every_step:
+                # Backward-compatible mode: keep on_step_end["loss"] as a Python
+                # float every step. CUDA workloads that do not consume per-step
+                # scalar loss can disable this to avoid a host/device sync.
+                stats.total_loss_scalar = float(stats.total_loss)
             stats.out = out
         return stats
 
@@ -970,14 +981,23 @@ class _TrainLoop:
 
     def _build_logs(self, step: int, stats: _MicroStepStats, step_time_s: float) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """Build (full_log_or_None, minimal_log). The minimal log is always usable for on_step_end."""
+        loss_value: Any = stats.total_loss_scalar
+        if loss_value is None:
+            loss_value = stats.total_loss if stats.total_loss is not None else 0.0
         minimal: Dict[str, Any] = {
-            "loss": stats.total_loss_scalar,
+            "loss": loss_value,
             "lr": get_lr(self.optimizer),
             "step_time_s": step_time_s,
             "step": step,
         }
         if not (self.is_rank0 and (step % self.settings.log_every == 0)):
             return None, minimal
+        loss_scalar = (
+            float(stats.total_loss)
+            if stats.total_loss_scalar is None and stats.total_loss is not None
+            else float(stats.total_loss_scalar or 0.0)
+        )
+        stats.total_loss_scalar = loss_scalar
         safe_out: Dict[str, Any] = {}
         if stats.out:
             for k, v in stats.out.items():
@@ -992,7 +1012,7 @@ class _TrainLoop:
             if key.startswith("profile_loop_")
         }
         full = {
-            "loss": stats.total_loss_scalar,
+            "loss": loss_scalar,
             "lr": get_lr(self.optimizer),
             "step_time_s": step_time_s,
             **{key: float(value) for key, value in stats.skip_count_totals.items()},

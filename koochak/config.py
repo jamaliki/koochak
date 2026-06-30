@@ -87,6 +87,7 @@ class TrainConfig:
     config_warn_unknown: bool = True
     prefetch_threaded: bool = False
     autocast_in_step_fn: bool = False
+    scalarize_loss_every_step: bool = True
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)
     ema_enabled: Optional[bool] = None
