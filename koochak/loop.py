@@ -1065,12 +1065,16 @@ class _TrainLoop:
             "total_step_s": float(step_time_s),
         }
         for key in self.settings.rank_timing_extra_keys:
-            timing_payload[key] = float(
-                stats.extra_timing_totals.get(
-                    key,
-                    stats.profile_timing_totals.get(key, 0.0),
-                )
-            )
+            if key in stats.profile_timing_totals:
+                # `profile_loop_*` timings are collected by the loop itself.
+                # They share the rank-timing key path with optional values
+                # emitted by the user step function, so prefer the loop-owned
+                # value whenever it exists instead of the zero-filled extra
+                # accumulator created for step-function metrics.
+                value = stats.profile_timing_totals[key]
+            else:
+                value = stats.extra_timing_totals.get(key, 0.0)
+            timing_payload[key] = float(value)
         gathered: list[dict[str, Any] | None] = [None for _ in range(self.world_size)]
         torch.distributed.all_gather_object(gathered, timing_payload)
         if self.is_rank0:
