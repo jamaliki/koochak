@@ -35,6 +35,20 @@ def _as_params(params):
     return params.parameters() if isinstance(params, nn.Module) else params
 
 
+def _optional_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 _MUON_NAMES = {"muon", "normuon"}
 _HYPERBALL_MUON_NAMES = {
     "muonh": "muon",
@@ -92,6 +106,7 @@ def _build_muon_optimizer(
     weight_decay: float,
     muon_lr: Optional[float],
     adam_lr: Optional[float],
+    foreach_adam_update: Optional[bool],
     hyperball_eps: float,
     hyperball_radius_scale: float,
     hyperball_projection: str,
@@ -111,6 +126,13 @@ def _build_muon_optimizer(
         )
 
     _apply_muon_group_lrs(groups, muon_lr=muon_lr, adam_lr=adam_lr)
+    if foreach_adam_update is not None:
+        groups = [
+            group
+            if bool(group.get("use_muon", False))
+            else dict(group, foreach_adam_update=foreach_adam_update)
+            for group in groups
+        ]
     hyperball_params = [
         param
         for group in groups
@@ -147,6 +169,7 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
     hyperball_eps = float(cfg.get("hyperball_eps", 1.0e-8))
     hyperball_radius_scale = float(cfg.get("hyperball_radius_scale", 1.0))
     hyperball_projection = str(cfg.get("hyperball_projection", "sphere"))
+    foreach_adam_update = _optional_bool(cfg.get("foreach_adam_update"))
 
     if name == "adamw":
         betas = tuple(cfg.get("betas", (0.9, 0.999)))  # type: ignore[assignment]
@@ -168,6 +191,7 @@ def build_optimizer(params, cfg: Optional[Mapping[str, Any]]) -> Optimizer:
             weight_decay=weight_decay,
             muon_lr=muon_lr,
             adam_lr=adam_lr,
+            foreach_adam_update=foreach_adam_update,
             hyperball_eps=hyperball_eps,
             hyperball_radius_scale=hyperball_radius_scale,
             hyperball_projection=hyperball_projection,
