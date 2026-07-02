@@ -192,10 +192,15 @@ class _TrainSettings:
     profile_step_timing: bool
     profile_step_cuda_sync: bool
     find_unused_parameters: bool
+    ddp_static_graph: bool
+    ddp_gradient_as_bucket_view: bool
+    ddp_bucket_cap_mb: Optional[int]
+    ddp_broadcast_buffers: bool
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_TrainSettings":
         get = config_lib.get
+        ddp_bucket_cap_raw = get(train_cfg, "ddp_bucket_cap_mb", None)
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -227,6 +232,12 @@ class _TrainSettings:
             profile_step_timing=bool(get(train_cfg, "profile_step_fn_timing", False)),
             profile_step_cuda_sync=bool(get(train_cfg, "profile_step_fn_cuda_sync", True)),
             find_unused_parameters=bool(get(train_cfg, "find_unused_parameters", False)),
+            ddp_static_graph=bool(get(train_cfg, "ddp_static_graph", False)),
+            ddp_gradient_as_bucket_view=bool(get(train_cfg, "ddp_gradient_as_bucket_view", False)),
+            ddp_bucket_cap_mb=(
+                int(ddp_bucket_cap_raw) if ddp_bucket_cap_raw is not None else None
+            ),
+            ddp_broadcast_buffers=bool(get(train_cfg, "ddp_broadcast_buffers", True)),
         )
 
 
@@ -613,7 +624,14 @@ class _TrainLoop:
         from torch.nn.parallel import DistributedDataParallel
 
         assert dist_lib.is_initialized()
-        ddp_kwargs: Dict[str, Any] = {"find_unused_parameters": self.settings.find_unused_parameters}
+        ddp_kwargs: Dict[str, Any] = {
+            "find_unused_parameters": self.settings.find_unused_parameters,
+            "static_graph": self.settings.ddp_static_graph,
+            "gradient_as_bucket_view": self.settings.ddp_gradient_as_bucket_view,
+            "broadcast_buffers": self.settings.ddp_broadcast_buffers,
+        }
+        if self.settings.ddp_bucket_cap_mb is not None:
+            ddp_kwargs["bucket_cap_mb"] = self.settings.ddp_bucket_cap_mb
         if getattr(self.device, "type", "cpu") == "cuda":
             ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
         self.model = DistributedDataParallel(self.model, **ddp_kwargs)
