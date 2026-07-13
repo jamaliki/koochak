@@ -855,9 +855,9 @@ class _TrainLoop:
         *,
         collect_rank_timing: bool,
     ) -> _MicroStepStats:
-        stats = _MicroStepStats(
-            extra_timing_totals={k: 0.0 for k in self.settings.rank_timing_extra_keys}
-        )
+        # Keep this sparse so _emit_rank_timing can distinguish metrics emitted
+        # by step_fn from loop-level profile metrics with the same requested key.
+        stats = _MicroStepStats()
         autocast_factory = self.ctx.get("autocast")
         autocast_in_step_fn = self.settings.autocast_in_step_fn
         use_prefetch = (
