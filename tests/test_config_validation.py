@@ -48,7 +48,7 @@ def test_ddp_runtime_options_are_known_and_resolved():
                 "ddp": True,
                 "ddp_static_graph": True,
                 "ddp_gradient_as_bucket_view": True,
-                "ddp_bucket_cap_mb": 64,
+                "ddp_bucket_cap_mb_list": [1, 16],
                 "ddp_broadcast_buffers": False,
             }
         }
@@ -61,5 +61,18 @@ def test_ddp_runtime_options_are_known_and_resolved():
     assert settings.ddp_enabled is True
     assert settings.ddp_static_graph is True
     assert settings.ddp_gradient_as_bucket_view is True
-    assert settings.ddp_bucket_cap_mb == 64
+    assert settings.ddp_bucket_cap_mb is None
+    assert settings.ddp_bucket_cap_mb_list == (1, 16)
     assert settings.ddp_broadcast_buffers is False
+
+
+def test_ddp_bucket_cap_options_are_mutually_exclusive():
+    cfg = OmegaConf.create(
+        {
+            "ddp_bucket_cap_mb": 16,
+            "ddp_bucket_cap_mb_list": [1, 16],
+        }
+    )
+
+    with pytest.raises(ValueError, match="only one"):
+        _TrainSettings.from_cfg(cfg)
