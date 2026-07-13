@@ -897,7 +897,9 @@ class _TrainLoop:
                             continue
                         if isinstance(value, torch.Tensor):
                             value = float(value.detach())
-                        stats.extra_timing_totals[key] += float(value)
+                        stats.extra_timing_totals[key] = (
+                            stats.extra_timing_totals.get(key, 0.0) + float(value)
+                        )
                 if not isinstance(out, Mapping) or "loss" not in out:
                     raise RuntimeError("step_fn must return a dict containing a 'loss' Tensor")
                 loss_tensor = out["loss"]
