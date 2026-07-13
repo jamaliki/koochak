@@ -74,6 +74,7 @@ class TrainConfig:
     ddp_static_graph: bool = False
     ddp_gradient_as_bucket_view: bool = False
     ddp_bucket_cap_mb: Optional[int] = None
+    ddp_bucket_cap_mb_list: Optional[list[int]] = None
     ddp_broadcast_buffers: bool = True
     seed: int = 42
     compile: Optional[Any] = None

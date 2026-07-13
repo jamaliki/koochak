@@ -195,12 +195,27 @@ class _TrainSettings:
     ddp_static_graph: bool
     ddp_gradient_as_bucket_view: bool
     ddp_bucket_cap_mb: Optional[int]
+    ddp_bucket_cap_mb_list: Optional[tuple[int, ...]]
     ddp_broadcast_buffers: bool
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_TrainSettings":
         get = config_lib.get
         ddp_bucket_cap_raw = get(train_cfg, "ddp_bucket_cap_mb", None)
+        ddp_bucket_cap_list_raw = get(train_cfg, "ddp_bucket_cap_mb_list", None)
+        if ddp_bucket_cap_raw is not None and ddp_bucket_cap_list_raw is not None:
+            raise ValueError(
+                "Set only one of train.ddp_bucket_cap_mb and train.ddp_bucket_cap_mb_list"
+            )
+        ddp_bucket_cap_list = (
+            tuple(int(value) for value in ddp_bucket_cap_list_raw)
+            if ddp_bucket_cap_list_raw is not None
+            else None
+        )
+        if ddp_bucket_cap_list is not None and (
+            not ddp_bucket_cap_list or any(value <= 0 for value in ddp_bucket_cap_list)
+        ):
+            raise ValueError("train.ddp_bucket_cap_mb_list must contain positive values")
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -237,6 +252,7 @@ class _TrainSettings:
             ddp_bucket_cap_mb=(
                 int(ddp_bucket_cap_raw) if ddp_bucket_cap_raw is not None else None
             ),
+            ddp_bucket_cap_mb_list=ddp_bucket_cap_list,
             ddp_broadcast_buffers=bool(get(train_cfg, "ddp_broadcast_buffers", True)),
         )
 
@@ -632,6 +648,8 @@ class _TrainLoop:
         }
         if self.settings.ddp_bucket_cap_mb is not None:
             ddp_kwargs["bucket_cap_mb"] = self.settings.ddp_bucket_cap_mb
+        if self.settings.ddp_bucket_cap_mb_list is not None:
+            ddp_kwargs["bucket_cap_mb_list"] = list(self.settings.ddp_bucket_cap_mb_list)
         if getattr(self.device, "type", "cpu") == "cuda":
             ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
         self.model = DistributedDataParallel(self.model, **ddp_kwargs)
