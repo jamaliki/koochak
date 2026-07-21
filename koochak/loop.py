@@ -412,6 +412,7 @@ class _MicroStepStats:
     out: Optional[Dict[str, Any]] = None
     total_loss: Optional[torch.Tensor] = None
     total_loss_scalar: Optional[float] = None
+    grad_norm: Optional[torch.Tensor] = None
     batch_wait_s: float = 0.0
     extra_timing_totals: Dict[str, float] = field(default_factory=dict)
     profile_timing_totals: Dict[str, float] = field(default_factory=dict)
@@ -1049,12 +1050,22 @@ class _TrainLoop:
             for key, value in stats.profile_timing_totals.items()
             if key.startswith("profile_loop_")
         }
+        grad_metrics: Dict[str, float] = {}
+        if stats.grad_norm is not None:
+            grad_norm = float(stats.grad_norm)
+            clip_threshold = float(self.settings.grad_clip_norm or 0.0)
+            grad_metrics = {
+                "grad_norm": grad_norm,
+                "grad_clip_threshold": clip_threshold,
+                "grad_clipped": float(grad_norm > clip_threshold),
+            }
         full = {
             "loss": loss_scalar,
             "lr": get_lr(self.optimizer),
             "step_time_s": step_time_s,
             **{key: float(value) for key, value in stats.skip_count_totals.items()},
             **safe_out,
+            **grad_metrics,
             **profile_timing,
             "step": step,
         }
@@ -1230,7 +1241,11 @@ class _TrainLoop:
 
         grad_clip_start = self._profile_start()
         if self.settings.grad_clip_norm is not None:
-            clip_grad_norm_(self.model.parameters(), float(self.settings.grad_clip_norm), foreach=True)
+            stats.grad_norm = clip_grad_norm_(
+                self.model.parameters(),
+                float(self.settings.grad_clip_norm),
+                foreach=True,
+            ).detach()
         self._profile_add(stats.profile_timing_totals, "profile_loop_grad_clip_time_s", grad_clip_start)
 
         ema_wait_start = self._profile_start()

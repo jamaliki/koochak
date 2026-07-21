@@ -74,3 +74,37 @@ def test_training_loop_can_defer_non_log_loss_scalarization(tmp_path):
     assert non_log_losses
     assert log_losses
     assert all(isinstance(loss, float) for _step, loss in log_losses)
+
+
+def test_training_loop_logs_preclip_gradient_norm(tmp_path):
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    logs = []
+
+    def step_fn(module, batch, _ctx):
+        pred = module(batch["x"])
+        return {"loss": torch.nn.functional.mse_loss(pred, batch["y"])}
+
+    training_loop(
+        model=model,
+        dataset=[{"x": torch.ones(1, 1), "y": torch.zeros(1, 1)}],
+        step_fn=step_fn,
+        optimizer=optimizer,
+        train_cfg={
+            "max_steps": 1,
+            "log_every": 1,
+            "eval_every": 1000,
+            "ckpt_every": 1000,
+            "grad_clip_norm": 1.0,
+            "device": "cpu",
+            "out_dir": str(tmp_path / "grad_norm_run"),
+        },
+        hooks={"on_log": [lambda row, _ctx: logs.append(dict(row))]},
+    )
+
+    assert len(logs) == 1
+    assert logs[0]["grad_norm"] == 2.0
+    assert logs[0]["grad_clip_threshold"] == 1.0
+    assert logs[0]["grad_clipped"] == 1.0
