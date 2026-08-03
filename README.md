@@ -259,15 +259,14 @@ def step_fn(model, batch, ctx):
     `workload.phase`, `workload.progress`, `workload.milestone`, and
     `workload.artifact` events for an external coordinator. Training progress
     defaults to approximately one event every 30 seconds at completed-step
-    boundaries; evaluations and checkpoint references are always published.
-    Payloads contain at most 32 finite scalar metrics and never include resolved
-    config or checkpoint contents.
-  - `koochak.logging.events.make_scruffy_hooks()` – adapts those events to the
-    current `SCRUFFY_ROOT` / `SCRUFFY_JOB_ID`; Scruffy is imported lazily and is
-    not a Koochak dependency.
+    boundaries and includes completed/total steps; evaluations and checkpoint
+    references are always attempted. Payloads contain at most 32 finite scalar
+    metrics and never include full resolved configs or checkpoint contents.
+  - `koochak.logging.events.make_scruffy_hooks()` – requires `SCRUFFY_ROOT` and
+    `SCRUFFY_JOB_ID`; Scruffy is imported lazily and is not a Koochak dependency.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.
-- The detailed stdout, CSV/JSONL, and W&B loggers record the resolved config
-  once at `on_train_start`; coordination events deliberately do not.
+- Stdout and W&B record the resolved config at `on_train_start`; CSV/JSONL
+  remain metric logs.
 - Compose hooks with `koochak.core.hooks.merge(a, b)`. Gate any custom hook via `koochak.core.hooks.rank0_only(fn)` to ensure single-emission under DDP.
 - The generic `python -m koochak.cli.train` entrypoint automatically merges the
   Scruffy hooks when both worker variables are present. Publisher errors warn once

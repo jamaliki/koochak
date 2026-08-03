@@ -31,8 +31,8 @@ This doc tracks incremental design decisions and changes from the initial design
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
   - `koochak/logging/wandb_logger.py` – lazy-import W&B hooks, logs metrics and artifacts, tracks `best/*` summaries.
-  - `koochak/logging/events.py` – bounded, rank-0 lifecycle/progress events plus a lazy optional Scruffy adapter. It deliberately excludes config and checkpoint contents so coordination events cannot become a telemetry stream.
-  - CSV/JSONL/W&B/Stdout loggers all record the resolved config via `on_train_start` so runs capture their inputs alongside metrics.
+  - `koochak/logging/events.py` – bounded, rank-0 lifecycle/progress events plus a lazy optional Scruffy adapter. It excludes full config objects and checkpoint contents so coordination events cannot become a telemetry stream.
+  - Stdout and W&B record resolved config at `on_train_start`; CSV/JSONL remain metric logs.
 
 - Jobs
   - `koochak/jobs` provides a generic SSH/Slurm launch layer: typed resources, config patches, runtime env flags, render/stage/submit, status, tail, and JSONL metrics helpers.

@@ -1,8 +1,8 @@
 """Compact lifecycle events for external job coordinators.
 
 The hook payloads are intentionally much smaller than Koochak's normal logs:
-configuration, checkpoint contents, tensors, and per-step metric streams belong
-in their existing stores rather than in a coordination event journal.
+full configuration, checkpoint contents, tensors, and per-step metric streams
+belong in their existing stores rather than in a coordination event journal.
 """
 
 from __future__ import annotations
@@ -176,13 +176,9 @@ def make_event_hooks(
             data["step"] = current_step
         total_steps = _total_steps(ctx)
         if type(current_step) is int and total_steps is not None:
-            data.update(
-                {
-                    "completed": current_step + 1,
-                    "total": total_steps,
-                    "unit": "steps",
-                }
-            )
+            data["completed"] = current_step + 1
+            data["total"] = total_steps
+            data["unit"] = "steps"
         send("workload.progress", data)
 
     def on_eval_end(metrics: Mapping[str, Any], ctx: Mapping[str, Any]) -> None:
@@ -247,9 +243,8 @@ def make_scruffy_hooks(
 ) -> Dict[str, List[Callable]]:
     """Publish events for the Scruffy job identified by its worker environment.
 
-    Scruffy is imported only when a hook actually publishes. Koochak therefore
-    has no package dependency on Scruffy, and a missing/broken integration is a
-    non-fatal publisher failure rather than a training failure.
+    ``SCRUFFY_ROOT`` and ``SCRUFFY_JOB_ID`` must be set. Scruffy is imported only
+    when a hook publishes, so import or publication failures remain non-fatal.
     """
 
     root = Path(os.environ["SCRUFFY_ROOT"])

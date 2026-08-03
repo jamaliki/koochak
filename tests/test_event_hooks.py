@@ -168,8 +168,11 @@ def test_scruffy_adapter_imports_lazily_and_supplies_worker_identity(monkeypatch
 
 
 def test_generic_cli_adds_scruffy_hooks_only_with_complete_identity(monkeypatch) -> None:
-    base = {"on_log": [lambda *_args: None]}
-    extra = {"on_log": [lambda *_args: None], "on_train_end": [lambda *_args: None]}
+    base = {"on_step_end": [lambda *_args: None]}
+    extra = {
+        "on_step_end": [lambda *_args: None],
+        "on_train_end": [lambda *_args: None],
+    }
 
     with mock.patch("koochak.cli.train.make_scruffy_hooks", return_value=extra) as factory:
         monkeypatch.delenv("SCRUFFY_ROOT", raising=False)
@@ -181,7 +184,7 @@ def test_generic_cli_adds_scruffy_hooks_only_with_complete_identity(monkeypatch)
         merged = _maybe_add_scruffy_hooks(base)
 
     factory.assert_called_once_with()
-    assert len(merged["on_log"]) == 2
+    assert len(merged["on_step_end"]) == 2
     assert len(merged["on_train_end"]) == 1
 
 
