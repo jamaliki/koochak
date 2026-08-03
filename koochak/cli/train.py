@@ -10,6 +10,7 @@ from ..core import hooks as hooks_lib
 from ..logging.stdout import make_stdout_hooks
 from ..logging.csv import make_csv_hooks
 from ..logging.jsonl import make_jsonl_hooks
+from ..logging.events import make_scruffy_hooks
 from ..logging.wandb_logger import make_wandb_hooks
 from ..optim.build import build_optimizer, build_scheduler
 from ..utils.seed import set_all_seeds
@@ -26,6 +27,14 @@ def _import_obj(path: str):
         raise ValueError(f"Invalid import path: {path}")
     m = importlib.import_module(mod)
     return getattr(m, name)
+
+
+def _maybe_add_scruffy_hooks(hooks):
+    """Attach the optional coordinator adapter only inside a Scruffy worker."""
+
+    if os.environ.get("SCRUFFY_ROOT") and os.environ.get("SCRUFFY_JOB_ID"):
+        return hooks_lib.merge(hooks, make_scruffy_hooks())
+    return hooks
 
 
 def main():
@@ -88,6 +97,7 @@ def main():
         hooks = hooks_lib.merge(hooks, make_jsonl_hooks(jsonl_path))
     if cfg_wandb and getattr(cfg_wandb, "enabled", False):
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(cfg_wandb))
+    hooks = _maybe_add_scruffy_hooks(hooks)
 
     # Resume
     latest = checkpoint_lib.latest(str(cfg_train.out_dir))
