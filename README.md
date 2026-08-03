@@ -26,6 +26,7 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
     - `jsonl.py` – `JSONLLogger` and `make_jsonl_hooks(path)`.
+    - `events.py` – bounded lifecycle/progress hooks and an optional lazy Scruffy adapter.
     - `wandb_logger.py` – optional W&B hooks (lazy import), artifact upload.
   - `jobs/`
     - `specs.py` – typed job specs, Slurm resources, runtime flags, config patches, and handles.
@@ -254,9 +255,24 @@ def step_fn(model, batch, ctx):
   - `koochak.logging.stdout.make_stdout_hooks()` – TSV prints; rank-0 only.
   - `koochak.logging.csv.make_csv_hooks(path)` – append metrics to CSV; rank-0 only.
   - `koochak.logging.jsonl.make_jsonl_hooks(path)` – one JSON per line; rank-0 only.
+  - `koochak.logging.events.make_event_hooks(publish)` – rank-0
+    `workload.phase`, `workload.progress`, `workload.milestone`, and
+    `workload.artifact` events for an external coordinator. Training progress
+    defaults to approximately one event every 30 seconds at completed-step
+    boundaries; evaluations and checkpoint references are always published.
+    Payloads contain at most 32 finite scalar metrics and never include resolved
+    config or checkpoint contents.
+  - `koochak.logging.events.make_scruffy_hooks()` – adapts those events to the
+    current `SCRUFFY_ROOT` / `SCRUFFY_JOB_ID`; Scruffy is imported lazily and is
+    not a Koochak dependency.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.
-- Each built-in logger records the resolved config once at `on_train_start` (stdout prints JSON, CSV/JSONL write a config row, W&B receives it via `wandb.init(config=...)`).
+- The detailed stdout, CSV/JSONL, and W&B loggers record the resolved config
+  once at `on_train_start`; coordination events deliberately do not.
 - Compose hooks with `koochak.core.hooks.merge(a, b)`. Gate any custom hook via `koochak.core.hooks.rank0_only(fn)` to ensure single-emission under DDP.
+- The generic `python -m koochak.cli.train` entrypoint automatically merges the
+  Scruffy hooks when both worker variables are present. Publisher errors warn once
+  and remain non-fatal; CSV, JSONL, W&B, and raw training logs remain the detailed
+  telemetry sources.
 
 YAML-driven logging (example):
 

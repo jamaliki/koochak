@@ -1152,20 +1152,20 @@ class _TrainLoop:
     # ------------------------------------------------------------------ orchestrator
 
     def run(self) -> Dict[str, Any]:
-        self._shard_datasets()
-        _emit(self.hooks, "on_train_start", self.ctx, suppress_exceptions=False)
-        self._apply_compile()
-        self._wrap_ddp()
-
-        if self.is_rank0:
-            counts = _parameter_counts(self.model)
-            print(
-                f"[training] Model parameters — total: {counts['total']:,} | "
-                f"trainable: {counts['trainable']:,} | frozen: {counts['frozen']:,}"
-            )
-
         it: Iterator[Any] | None = None
         try:
+            self._shard_datasets()
+            _emit(self.hooks, "on_train_start", self.ctx, suppress_exceptions=False)
+            self._apply_compile()
+            self._wrap_ddp()
+
+            if self.is_rank0:
+                counts = _parameter_counts(self.model)
+                print(
+                    f"[training] Model parameters — total: {counts['total']:,} | "
+                    f"trainable: {counts['trainable']:,} | frozen: {counts['frozen']:,}"
+                )
+
             start_step = self._resume_from_checkpoint()
             it = self._make_iterator()
             train_ended_normally = False

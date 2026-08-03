@@ -31,6 +31,7 @@ This doc tracks incremental design decisions and changes from the initial design
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
   - `koochak/logging/wandb_logger.py` – lazy-import W&B hooks, logs metrics and artifacts, tracks `best/*` summaries.
+  - `koochak/logging/events.py` – bounded, rank-0 lifecycle/progress events plus a lazy optional Scruffy adapter. It deliberately excludes config and checkpoint contents so coordination events cannot become a telemetry stream.
   - CSV/JSONL/W&B/Stdout loggers all record the resolved config via `on_train_start` so runs capture their inputs alongside metrics.
 
 - Jobs
@@ -150,6 +151,7 @@ Done recently
 - Config: adopted OmegaConf for YAML loading and interpolation/resolution.
 - Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).
 - Generic CLI: `python -m koochak.cli.train --config ...` with strict validation and standard hooks.
+- Generic CLI automatically attaches Scruffy workload-event hooks when both `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID` identify a managed worker; Scruffy remains an optional lazy import.
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
 
 Open TODOs (authoritative)
