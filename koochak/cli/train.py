@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
-from typing import Any
 
 from ..loop import training_loop
 from ..core import hooks as hooks_lib
@@ -46,7 +45,6 @@ def main():
 
     # Sections
     cfg_train = config_lib.get_section(cfg_all, "train")
-    cfg_data = config_lib.get_section(cfg_all, "data")
     cfg_optim = config_lib.get_section(cfg_all, "optim")
     cfg_logging = config_lib.get_section(cfg_all, "logging")
     cfg_wandb = config_lib.get_section(cfg_all, "wandb")
