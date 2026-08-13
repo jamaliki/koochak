@@ -240,6 +240,8 @@ def test_training_loop_writes_emergency_checkpoint_and_failure_json(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    import koochak.loop as loop_mod
+
     class FakeWatchdog:
         enabled = True
         slurm_disabled = True
@@ -280,7 +282,7 @@ def test_training_loop_writes_emergency_checkpoint_and_failure_json(
         def perform_slurm_recovery(self, failures):
             return []
 
-    monkeypatch.setattr("koochak.loop.GpuHealthWatchdog", FakeWatchdog)
+    monkeypatch.setattr(loop_mod, "GpuHealthWatchdog", FakeWatchdog)
 
     model = torch.nn.Linear(1, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
