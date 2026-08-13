@@ -96,7 +96,10 @@ class DataConfig:
     pin_memory: bool = True
     persistent_workers: bool = True
     prefetch_factor: int = 1
-    shard_cache_size: int = 2
+    # None means that each global (rank, worker) owner preloads all of its
+    # disjoint shards. An integer retains a bounded lazy cache for small-memory
+    # environments and tests.
+    shard_cache_size: int | None = None
     seed: int = 42
     length_buckets: tuple[int, ...] = (64, 96, 128)
 
@@ -105,8 +108,8 @@ class DataConfig:
             raise ValueError("data length bounds are invalid")
         if self.batch_size <= 0 or self.num_workers < 0:
             raise ValueError("batch_size must be positive and num_workers non-negative")
-        if self.shard_cache_size <= 0:
-            raise ValueError("shard_cache_size must be positive")
+        if self.shard_cache_size is not None and self.shard_cache_size <= 0:
+            raise ValueError("shard_cache_size must be positive or null")
         if self.mean_plddt_min is not None and not 0.0 <= self.mean_plddt_min <= 100.0:
             raise ValueError("data.mean_plddt_min must lie in [0, 100]")
         if self.loop_content_max is not None and not 0.0 <= self.loop_content_max <= 1.0:
@@ -205,6 +208,8 @@ class TrainingConfig:
     prefetch_pipeline: str = "two_stage"
     autocast_in_step_fn: bool = True
     scalarize_loss_every_step: bool = False
+    profile_step_fn_timing: bool = False
+    profile_step_fn_cuda_sync: bool = True
     self_conditioning_probability: float = 1.0
     compile: CompileConfig = field(default_factory=CompileConfig)
     require_compile: bool = False

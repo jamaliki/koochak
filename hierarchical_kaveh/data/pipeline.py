@@ -37,12 +37,32 @@ def shard_references(
     worker_id: int,
     num_workers: int,
 ) -> tuple[SampleReference, ...]:
-    """Return one non-overlapping deterministic DDP/DataLoader partition."""
+    """Assign whole shards to one deterministic global worker.
+
+    Shard ownership prevents independent workers and ranks from retaining
+    duplicate decompressed arrays. Greedy sample-count balancing keeps the
+    number of eligible examples per owner close without splitting a shard.
+    """
 
     if not 0 <= rank < world_size or not 0 <= worker_id < num_workers:
         raise ValueError("invalid rank or worker partition")
     global_worker = rank * num_workers + worker_id
-    return tuple(references[global_worker :: world_size * num_workers])
+    global_workers = world_size * num_workers
+    grouped: dict[object, list[SampleReference]] = {}
+    for reference in references:
+        grouped.setdefault(reference.shard, []).append(reference)
+
+    assignments: list[list[SampleReference]] = [[] for _ in range(global_workers)]
+    loads = [0] * global_workers
+    ordered_groups = sorted(
+        grouped.values(),
+        key=lambda group: (-len(group), str(group[0].shard)),
+    )
+    for group in ordered_groups:
+        owner = min(range(global_workers), key=lambda index: (loads[index], index))
+        assignments[owner].extend(group)
+        loads[owner] += len(group)
+    return tuple(assignments[global_worker])
 
 
 class _CyclicPool:
@@ -181,7 +201,11 @@ class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
         buffers: dict[int, list[dict[str, Tensor]]] = {
             edge: [] for edge in self.length_buckets
         }
-        shard_cache = ShardCache(self.data.shard_cache_size)
+        owned_shards = tuple(dict.fromkeys(reference.shard for reference in assigned))
+        cache_all = self.data.shard_cache_size is None
+        shard_cache = ShardCache(None if cache_all else self.data.shard_cache_size)
+        if cache_all:
+            shard_cache.preload(owned_shards)
 
         while True:
             clean = _crop(
@@ -205,7 +229,30 @@ class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
             buffer = buffers[edge]
             buffer.append(sample)
             if len(buffer) == self.data.batch_size:
-                yield collate_samples(buffer, pad_to=edge)
+                batch = collate_samples(buffer, pad_to=edge)
+                batch.update(
+                    {
+                        "data_worker_id": torch.tensor(
+                            rank * worker_count + worker_id, dtype=torch.long
+                        ),
+                        "data_owned_shard_count": torch.tensor(
+                            len(owned_shards), dtype=torch.long
+                        ),
+                        "data_cached_shard_count": torch.tensor(
+                            len(shard_cache), dtype=torch.long
+                        ),
+                        "data_cache_hit_count": torch.tensor(
+                            shard_cache.hits, dtype=torch.long
+                        ),
+                        "data_cache_miss_count": torch.tensor(
+                            shard_cache.misses, dtype=torch.long
+                        ),
+                        "data_cache_bytes": torch.tensor(
+                            shard_cache.resident_bytes, dtype=torch.long
+                        ),
+                    }
+                )
+                yield batch
                 buffer.clear()
 
 

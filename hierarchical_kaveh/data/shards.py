@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -43,24 +44,40 @@ class ShardCache:
 
     _keys = ("pos", "mask", "aatype", "chain_idx", "res_idx")
 
-    def __init__(self, capacity: int):
-        if capacity <= 0:
-            raise ValueError("shard cache capacity must be positive")
-        self.capacity = int(capacity)
+    def __init__(self, capacity: int | None):
+        if capacity is not None and capacity <= 0:
+            raise ValueError("shard cache capacity must be positive or None")
+        self.capacity = None if capacity is None else int(capacity)
         self._arrays: OrderedDict[Path, dict[str, np.ndarray]] = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+        self.resident_bytes = 0
 
     def arrays(self, shard: Path) -> dict[str, np.ndarray]:
         shard = shard.resolve()
         cached = self._arrays.get(shard)
         if cached is not None:
+            self.hits += 1
             self._arrays.move_to_end(shard)
             return cached
         with np.load(shard, allow_pickle=False) as payload:
             cached = {key: np.asarray(payload[key]) for key in self._keys}
+        self.misses += 1
+        self.resident_bytes += sum(int(array.nbytes) for array in cached.values())
         self._arrays[shard] = cached
-        while len(self._arrays) > self.capacity:
-            self._arrays.popitem(last=False)
+        while self.capacity is not None and len(self._arrays) > self.capacity:
+            _, evicted = self._arrays.popitem(last=False)
+            self.resident_bytes -= sum(int(array.nbytes) for array in evicted.values())
         return cached
+
+    def preload(self, shards: Iterable[Path]) -> None:
+        """Load an owned shard set once before the worker starts yielding."""
+
+        for shard in shards:
+            self.arrays(shard)
+
+    def __len__(self) -> int:
+        return len(self._arrays)
 
 
 def index_shards(

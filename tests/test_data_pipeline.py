@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -173,6 +174,45 @@ def test_rank_and_worker_partition_is_deterministic_and_exhaustive(tmp_path) -> 
     ]
 
 
+def test_rank_and_worker_partition_owns_whole_shards_and_balances_samples(tmp_path) -> None:
+    references = []
+    template = index_shards(_ragged_fixture(tmp_path))[0]
+    sample_index = 0
+    largest_shard = 0
+    for shard_index, count in enumerate((11, 9, 7, 5, 3, 2, 1)):
+        largest_shard = max(largest_shard, count)
+        shard = tmp_path / f"shard_{shard_index}.npz"
+        for local_index in range(count):
+            references.append(
+                replace(
+                    template,
+                    shard=shard,
+                    index=sample_index,
+                    start=local_index,
+                    stop=local_index + 1,
+                    resolved_length=1,
+                )
+            )
+            sample_index += 1
+
+    partitions = [
+        shard_references(references, rank=rank, world_size=2, worker_id=worker, num_workers=2)
+        for rank in range(2)
+        for worker in range(2)
+    ]
+    owners = {}
+    for owner, partition in enumerate(partitions):
+        for reference in partition:
+            previous = owners.setdefault(reference.shard, owner)
+            assert previous == owner
+    assert len(owners) == 7
+    assert sorted(reference.index for group in partitions for reference in group) == list(
+        range(sample_index)
+    )
+    loads = [len(group) for group in partitions]
+    assert max(loads) - min(loads) <= largest_shard
+
+
 def test_corruption_hides_sequence_and_preserves_rigid_internal_geometry(tmp_path) -> None:
     clean = load_sample(index_shards(_ragged_fixture(tmp_path), min_length=4)[0])
     sample = corrupt_structure(
@@ -220,6 +260,32 @@ def test_worker_local_shard_cache_decompresses_once(tmp_path, monkeypatch) -> No
     assert calls == 1
 
 
+def test_unbounded_worker_cache_preloads_disjoint_working_set(tmp_path, monkeypatch) -> None:
+    references = index_shards(_ragged_fixture(tmp_path))
+    second_shard = tmp_path / "second.npz"
+    second_shard.write_bytes((tmp_path / "shard.npz").read_bytes())
+    second_reference = replace(references[0], shard=second_shard)
+    calls = 0
+    original_load = np.load
+
+    def counted_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(np, "load", counted_load)
+    cache = ShardCache(None)
+    cache.preload((references[0].shard, second_reference.shard))
+    load_sample(references[0], cache=cache)
+    load_sample(second_reference, cache=cache)
+
+    assert calls == 2
+    assert len(cache) == 2
+    assert cache.misses == 2
+    assert cache.hits == 2
+    assert cache.resident_bytes > 0
+
+
 def test_loader_buckets_and_prefix_pads(tmp_path) -> None:
     metadata = _ragged_fixture(tmp_path)
     data = DataConfig(
@@ -240,3 +306,7 @@ def test_loader_buckets_and_prefix_pads(tmp_path) -> None:
         assert batch["residue_mask"][row, :length].all()
         assert not batch["residue_mask"][row, length:].any()
         assert batch["aatype_input"][row, length:].eq(21).all()
+    assert batch["data_owned_shard_count"].item() == 1
+    assert batch["data_cached_shard_count"].item() == 1
+    assert batch["data_cache_miss_count"].item() == 1
+    assert batch["data_cache_hit_count"].item() >= 2

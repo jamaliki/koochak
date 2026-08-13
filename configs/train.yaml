@@ -28,7 +28,8 @@ data:
   num_workers: 16
   length_buckets: [64, 96, 128]
   prefetch_factor: 1
-  shard_cache_size: 2
+  # null: disjoint shard ownership and full worker-local preload.
+  shard_cache_size: null
   pin_memory: true
   persistent_workers: true
   seed: 42
@@ -70,6 +71,8 @@ train:
   prefetch_pipeline: two_stage
   autocast_in_step_fn: true
   scalarize_loss_every_step: false
+  profile_step_fn_timing: false
+  profile_step_fn_cuda_sync: true
   # One deterministic Bernoulli decision per batch, shared across DDP ranks.
   self_conditioning_probability: 1.0
   compile:

@@ -31,6 +31,23 @@ from .model.backend import require_fused
 from .types import DenoiserInput, Prediction
 
 
+_BATCH_TELEMETRY = (
+    "data_worker_id",
+    "data_owned_shard_count",
+    "data_cached_shard_count",
+    "data_cache_hit_count",
+    "data_cache_miss_count",
+    "data_cache_bytes",
+    "koochak_prefetch_cpu_fetch_time_s",
+    "koochak_prefetch_get_wait_s",
+    "koochak_prefetch_event_ready",
+    "koochak_prefetch_queue_depth",
+    "koochak_prefetch_cpu_queue_depth",
+    "koochak_prefetch_age_s",
+    "koochak_prefetch_prepare_submit_s",
+)
+
+
 def denoiser_input(
     batch: Mapping[str, Tensor],
     previous: Prediction | None = None,
@@ -100,7 +117,7 @@ class PallatomTrainingStep:
                 patch_distogram_implementation="triton" if require_fused() else "auto",
             )
 
-        return {
+        metrics: dict[str, Tensor | float] = {
             "loss": losses["loss"],
             "coordinate_loss": losses["coordinate_loss"].detach(),
             "aatype_loss": losses["aatype_loss"].detach(),
@@ -110,6 +127,8 @@ class PallatomTrainingStep:
             "node_count": batch["residue_mask"].sum(),
             "node_slot_count": batch["atom14_mask"].sum(),
         }
+        metrics.update({key: batch[key] for key in _BATCH_TELEMETRY if key in batch})
+        return metrics
 
 
 def _hooks(config: RunConfig) -> dict[str, list]:

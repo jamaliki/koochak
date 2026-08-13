@@ -47,10 +47,14 @@ for each structure as `sigma_data * exp(N(-1.2, 1.5^2))`. Batches are emitted
 as already-batched prefix-padded mappings. The
 DataLoader therefore uses `batch_size=None`; Koochak must not shard it again.
 
-Each worker keeps an explicitly bounded `data.shard_cache_size` LRU of
-decompressed NPZ arrays. No pLDDT bucket, ambient target, rotamer resampling, or
-sidechain-specific noise path exists.
+Whole shards, rather than individual samples, are assigned without overlap to
+global `(rank, worker)` owners and balanced by eligible sample count. With the
+default `data.shard_cache_size: null`, each worker preloads its complete owned
+shard set and the existing random sample pool then draws entirely from RAM.
+Set a positive integer only for a memory-constrained bounded LRU. No pLDDT
+bucket, ambient target, rotamer resampling, or sidechain-specific noise path
+exists.
 
-For each process, the number of available samples should be at least the total
-number of DataLoader workers across all ranks. Reduce `data.num_workers` if a
-worker reports an empty partition.
+The number of shards should be at least the total number of DataLoader workers
+across all ranks. Reduce `data.num_workers` if a worker reports an empty
+partition.

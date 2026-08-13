@@ -95,6 +95,8 @@ def test_training_step_always_self_conditions_coordinates(monkeypatch) -> None:
 
 def test_training_step_can_skip_self_conditioning_and_distogram(monkeypatch) -> None:
     batch = _batch()
+    batch["data_owned_shard_count"] = torch.tensor(17)
+    batch["koochak_prefetch_get_wait_s"] = 0.125
     prediction = _prediction(batch)
     model = FakeModel(prediction)
     loss = prediction.coordinates.sum() * 0 + 3.0
@@ -120,6 +122,8 @@ def test_training_step_can_skip_self_conditioning_and_distogram(monkeypatch) -> 
     assert final_input.self_conditioned_coordinates is None
     assert final_kwargs == {"compute_distogram": False}
     assert output["self_conditioned"].item() == 0.0
+    assert output["data_owned_shard_count"].item() == 17
+    assert output["koochak_prefetch_get_wait_s"] == 0.125
 
 
 def test_half_self_conditioning_schedule_is_deterministic_and_nontrivial() -> None:
