@@ -1,0 +1,27 @@
+# Replace these generic shared paths and exact package versions with one
+# site's immutable environment. Never put secret values in this file.
+version: 1
+id: project-gpu-v1
+python: /shared/envs/project/bin/python
+environment:
+  set:
+    PATH: /shared/toolchains/bin:/shared/envs/project/bin:/usr/bin:/bin
+    CC: /shared/toolchains/bin/gcc
+    CXX: /shared/toolchains/bin/g++
+    CUDA_HOME: /usr/local/cuda
+    PYTHONUNBUFFERED: "1"
+    TRITON_CACHE_DIR: "{run_dir}/triton-cache"
+    TORCHINDUCTOR_CACHE_DIR: "{run_dir}/torchinductor-cache"
+  secrets: [TRACKING_TOKEN]
+  create_directories:
+    - "{run_dir}/triton-cache"
+    - "{run_dir}/torchinductor-cache"
+requirements:
+  executables:
+    - /shared/toolchains/bin/gcc
+    - /shared/toolchains/bin/g++
+  files: []
+  packages:
+    torch: "2.8.0"
+    triton: "3.4.0"
+preflight: [c_compiler, cuda, torch_compile]

@@ -29,9 +29,10 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
     - `events.py` – bounded lifecycle/progress hooks and an optional lazy Scruffy adapter.
     - `wandb_logger.py` – optional W&B hooks (lazy import), artifact upload.
   - `jobs/`
-    - `specs.py` – typed job specs, Slurm resources, runtime flags, config patches, and handles.
-    - `ssh.py` – injected SSH command runner, compatible with plain SSH or multiplexing helpers.
-    - `slurm.py` – render, stage, submit, status, tail, and JSONL metrics helpers for Slurm jobs.
+    - `profile.py` – strict, reusable execution-environment profiles.
+    - `manifest.py` – deterministic config materialization and immutable launch manifests.
+    - `runner.py` – clean-environment checks followed by an exact Python `execve`.
+    - `backends.py` – thin Python adapters for Pazuzu and Scruffy.
   - `optim/`
     - `build.py` – tiny builders for optimizers/schedulers (supports cosine, step, plateau, cosine_warmup).
   - `storage/`
@@ -149,63 +150,103 @@ wandb: { enabled: false, project: ... }
 
 The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop` with `train_cfg`.
 
-## SSH/Slurm Job API
+## Reproducible Job Submission
 
-Koochak also includes a small publishable job-launch layer for config-driven
-Slurm training over an injected SSH command. It does not know any private
-cluster hostnames, users, or paths. Pass either a plain SSH command or a local
-multiplexing helper as `ssh_command`; Koochak treats it as an opaque executable
-that accepts one remote shell command argument.
+Koochak compiles a training config and an execution-environment profile into an
+immutable launch manifest. Pazuzu and Scruffy then launch the same isolated
+runner. Koochak contains no hostnames, users, filesystem layout, scheduler
+defaults, or other site policy.
 
+Environment profiles are strict YAML. They define an absolute Python,
+deterministic `PATH`, explicit compiler paths, required files and package
+versions, named secret inputs, cache directories, and built-in checks. Unknown
+fields and OmegaConf environment interpolation are rejected. Secret values are
+read only inside the worker and are never written to the profile or manifest.
+
+```yaml
+version: 1
+id: project-gpu-v1
+python: /shared/envs/project/bin/python
+environment:
+  set:
+    PATH: /shared/toolchains/bin:/shared/envs/project/bin:/usr/bin:/bin
+    CC: /shared/toolchains/bin/gcc
+    CXX: /shared/toolchains/bin/g++
+    TRITON_CACHE_DIR: "{run_dir}/triton-cache"
+  secrets: [TRACKING_TOKEN]
+  create_directories: ["{run_dir}/triton-cache"]
+requirements:
+  executables: [/shared/toolchains/bin/gcc, /shared/toolchains/bin/g++]
+  files: []
+  packages: {torch: "2.8.0", triton: "3.4.0"}
+preflight: [c_compiler, cuda, torch_compile]
 ```
-from koochak.jobs import (
-    ConfigPatch,
-    RemotePaths,
-    SlurmResources,
-    SshSlurmBackend,
-    TrainJobSpec,
-)
 
-backend = SshSlurmBackend(
-    ssh_command=["ssh", "-o", "ConnectTimeout=60", "cluster-login"],
-    remote_paths=RemotePaths(
-        repo="/remote/repo",
-        run_root="/remote/repo/runs",
-        python="/remote/env/bin/python",
-    ),
-)
+Prepare a run in a committed Python submission script:
 
-job = TrainJobSpec(
-    name="smoke_len128",
+```python
+from koochak.jobs import ConfigPatch, load_environment_profile, prepare_run
+
+prepared = prepare_run(
+    name="smoke-len128",
+    profile=load_environment_profile("environments/gpu.yaml"),
+    python_args=["-m", "my_pkg.train", "--config", "{config}"],
+    cwd="/shared/project/repo",
+    run_dir="/shared/project/runs/smoke-len128",
     base_config="configs/train.yaml",
-    patches=[
-        ConfigPatch("train.max_steps", 500),
-        ConfigPatch("data.max_length", 128),
-        ConfigPatch("wandb.enabled", False),
-    ],
-    command=["-m", "my_pkg.train", "--config", "{config}"],
-    resources=SlurmResources(
-        partition="gpu",
-        gpus=1,
-        cpus=32,
-        mem_gb=128,
-        time="02:00:00",
-    ),
+    patches=[ConfigPatch("data.max_length", 128)],
 )
-
-rendered = backend.render(job, local_dir="./rendered-smoke")  # dry-run
-handle = backend.submit(job)
-print(handle.job_id, handle.run_dir)
 ```
 
-Config patches are applied in Python with OmegaConf, then written as a
-materialized YAML file. The generated sbatch file only points to that config
-path; it does not embed YAML in shell heredocs. `SlurmResources.mem_gb` is
-required so launchers do not accidentally submit unbounded-memory jobs.
+For a standalone Slurm job, pass backend-native resources to Pazuzu:
 
-See `examples/clusters/slurm_ssh.toml` for a sanitized profile shape. Keep real
-cluster details in user-local config such as
-`~/.config/koochak/clusters/<name>.toml`.
+```python
+from pazuzu import PazuzuClient, SlurmResources
+from koochak.jobs import submit_pazuzu
+
+handle = await submit_pazuzu(
+    PazuzuClient(),
+    prepared,
+    resources=SlurmResources(
+        nodes=1,
+        gpus_per_node=1,
+        cpus_per_task=14,
+        memory_gb_per_node=128,
+        time_limit="02:00:00",
+    ),
+    log_dir=f"{prepared.run_dir}/logs",
+)
+```
+
+Inside a filesystem that can see a Scruffy queue and the run directory:
+
+```python
+from scruffy import ResourceRequest
+from koochak.jobs import submit_scruffy
+
+job = submit_scruffy(
+    prepared,
+    root="/shared/queues/allocation",
+    resources=ResourceRequest(
+        nodes=1,
+        gpus_per_node=1,
+        cpus_per_node=14,
+        memory_gb_per_node=128,
+        time_limit_seconds=7200,
+    ),
+    request_id="campaign/smoke/attempt-1",
+    project_id="project",
+)
+```
+
+The runner starts under `python -I`, reconstructs the environment from a small
+allowlist, restores scheduler-owned `SLURM_*`, `SCRUFFY_*`, and GPU identity,
+verifies manifest/config digests, performs the declared checks, writes
+`preflight.json`, and only then uses `execve` to start user code. A missing C
+compiler or failed Torch/Triton compilation therefore fails before model code
+runs. Ordinary variables, including `NCCL_*`, must be explicit under `set`;
+only fixed runtime identity and named secrets are inherited. See
+`examples/jobs/` for complete site-neutral examples.
 
 
 ## Core API

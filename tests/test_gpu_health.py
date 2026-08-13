@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
+import koochak.loop as loop_module
 from koochak.health.gpu import (
     PRIMARY_QUERY_FIELDS,
     GpuHealthSample,
@@ -171,9 +172,9 @@ def test_good_sample_resets_consecutive_failure_counter(tmp_path: Path) -> None:
 
 
 def test_slurm_requeue_is_default_and_updates_pending_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("USER", "kiarash-eitgbi")
+    monkeypatch.setenv("USER", "researcher")
     monkeypatch.setenv("SLURM_JOB_ID", "7832")
-    monkeypatch.setenv("SLURM_JOB_NAME", "kaveh_pf_norm_p2n")
+    monkeypatch.setenv("SLURM_JOB_NAME", "project_training")
     watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
 
     commands = []
@@ -205,9 +206,9 @@ def test_slurm_disable_prevents_all_slurm_commands(monkeypatch: pytest.MonkeyPat
 
 
 def test_slurm_cancel_action_uses_scancel_not_requeue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("USER", "kiarash-eitgbi")
+    monkeypatch.setenv("USER", "researcher")
     monkeypatch.setenv("SLURM_JOB_ID", "7832")
-    monkeypatch.setenv("SLURM_JOB_NAME", "kaveh_pf_norm_p2n")
+    monkeypatch.setenv("SLURM_JOB_NAME", "project_training")
     monkeypatch.setenv("KOOCHAK_GPU_HEALTH_SLURM_ACTION", "cancel")
     watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
 
@@ -280,7 +281,7 @@ def test_training_loop_writes_emergency_checkpoint_and_failure_json(
         def perform_slurm_recovery(self, failures):
             return []
 
-    monkeypatch.setattr("koochak.loop.GpuHealthWatchdog", FakeWatchdog)
+    monkeypatch.setattr(loop_module, "GpuHealthWatchdog", FakeWatchdog)
 
     model = torch.nn.Linear(1, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
