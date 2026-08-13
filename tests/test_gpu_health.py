@@ -171,10 +171,20 @@ def test_good_sample_resets_consecutive_failure_counter(tmp_path: Path) -> None:
     assert watchdog.check_local(40) is None
 
 
-def test_slurm_requeue_is_default_and_updates_pending_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_slurm_exit_is_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SLURM_JOB_ID", "7832")
+    watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
+    watchdog._run_command = lambda cmd: pytest.fail(f"unexpected slurm command: {cmd}")  # type: ignore[method-assign]
+
+    assert watchdog.slurm_action == "exit"
+    assert watchdog.perform_slurm_recovery([_sample().to_dict()]) == []
+
+
+def test_explicit_slurm_requeue_updates_pending_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("USER", "researcher")
     monkeypatch.setenv("SLURM_JOB_ID", "7832")
     monkeypatch.setenv("SLURM_JOB_NAME", "project_training")
+    monkeypatch.setenv("KOOCHAK_GPU_HEALTH_SLURM_ACTION", "requeue")
     watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
 
     commands = []
@@ -194,6 +204,34 @@ def test_slurm_requeue_is_default_and_updates_pending_jobs(monkeypatch: pytest.M
     assert ["scontrol", "update", "JobId=7833", "ExcNodeList=gpu-8"] in commands
     assert ["scontrol", "update", "JobId=7834", "ExcNodeList=gpu-8"] in commands
     assert commands[-1] == ["scontrol", "requeue", "7832"]
+
+
+@pytest.mark.parametrize(
+    ("runtime_env", "reason"),
+    [
+        ({"SCRUFFY_JOB_ID": "job-123"}, "Scruffy workloads"),
+        ({"SCRUFFY_ROOT": "/shared/scruffy"}, "Scruffy workloads"),
+        ({"SLURM_STEP_ID": "17"}, "nested step 17"),
+        ({"SLURM_STEPID": "18"}, "nested step 18"),
+    ],
+)
+def test_nested_workload_cannot_mutate_parent_slurm_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runtime_env: dict[str, str],
+    reason: str,
+) -> None:
+    monkeypatch.setenv("SLURM_JOB_ID", "263106")
+    monkeypatch.setenv("KOOCHAK_GPU_HEALTH_SLURM_ACTION", "requeue")
+    for key, value in runtime_env.items():
+        monkeypatch.setenv(key, value)
+    watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
+    watchdog._run_command = lambda cmd: pytest.fail(f"unexpected slurm command: {cmd}")  # type: ignore[method-assign]
+
+    assert watchdog.slurm_action == "exit"
+    assert watchdog.requested_slurm_action == "requeue"
+    assert reason in (watchdog.slurm_mutation_blocked_reason or "")
+    assert watchdog.perform_slurm_recovery([_sample().to_dict()]) == []
 
 
 def test_slurm_disable_prevents_all_slurm_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

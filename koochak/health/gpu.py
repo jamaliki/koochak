@@ -312,10 +312,11 @@ class GpuHealthWatchdog:
         self.nvidia_smi = shutil.which("nvidia-smi")
         self.enabled = device.type == "cuda" and not _env_enabled("KOOCHAK_GPU_HEALTH_DISABLE")
         self.slurm_disabled = _env_enabled("KOOCHAK_GPU_HEALTH_SLURM_DISABLE")
-        default_slurm_action = "requeue" if os.environ.get("SLURM_JOB_ID") else "exit"
-        self.slurm_action = os.environ.get("KOOCHAK_GPU_HEALTH_SLURM_ACTION", default_slurm_action).strip().lower()
-        if self.slurm_action not in {"requeue", "cancel", "exit"}:
-            self.slurm_action = "requeue"
+        self.requested_slurm_action = os.environ.get("KOOCHAK_GPU_HEALTH_SLURM_ACTION", "exit").strip().lower()
+        if self.requested_slurm_action not in {"requeue", "cancel", "exit"}:
+            self.requested_slurm_action = "exit"
+        self.slurm_mutation_blocked_reason = self._slurm_mutation_blocked_reason()
+        self.slurm_action = "exit" if self.slurm_mutation_blocked_reason else self.requested_slurm_action
         self.exit_code = EXIT_CODE
         self._consecutive_failures = 0
         self._notice_written = False
@@ -386,6 +387,8 @@ class GpuHealthWatchdog:
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
             "slurm_job_name": os.environ.get("SLURM_JOB_NAME"),
             "slurm_action": self.slurm_action,
+            "requested_slurm_action": self.requested_slurm_action,
+            "slurm_mutation_blocked_reason": self.slurm_mutation_blocked_reason,
             "slurm_disabled": self.slurm_disabled,
             "slurm_results": list(slurm_results or []),
         }
@@ -417,6 +420,16 @@ class GpuHealthWatchdog:
             results.extend(self._exclude_pending_same_name(bad_nodes_csv))
             results.append(self._run_command(["scancel", job_id]))
         return results
+
+    @staticmethod
+    def _slurm_mutation_blocked_reason() -> Optional[str]:
+        if os.environ.get("SCRUFFY_JOB_ID") or os.environ.get("SCRUFFY_ROOT"):
+            return "parent Slurm mutation is forbidden for Scruffy workloads"
+
+        step_id = os.environ.get("SLURM_STEP_ID") or os.environ.get("SLURM_STEPID")
+        if step_id and step_id.strip().lower() not in {"batch", "extern"}:
+            return f"parent Slurm mutation is forbidden from nested step {step_id}"
+        return None
 
     def _query_sample(self, step: int) -> Optional[GpuHealthSample]:
         if self.nvidia_smi is None:
