@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from hierarchical_kaveh.config import DataConfig, ModelConfig, TrainingConfig, load_config
+from scripts.materialize_resident_resume import materialize as materialize_resident_resume
 from scripts.materialize_short128_screen import materialize
 
 
@@ -78,3 +79,33 @@ def test_short128_preflight_keeps_bounded_main_process_cache(tmp_path) -> None:
     config = load_config(output / "lr1e3_none" / "config.yaml")
     assert config.data.num_workers == 0
     assert config.data.shard_cache_size == 2
+
+
+def test_resident_resume_changes_only_loader_and_wandb_resume_policy(tmp_path) -> None:
+    source = tmp_path / "source.yaml"
+    source.write_text(
+        """
+data:
+  metadata_path: /data/metadata.json
+  shard_cache_size: 2
+train:
+  out_dir: /runs/screen/lr1e3_none
+optimizer:
+  lr: 0.0003
+wandb:
+  enabled: true
+  project: hierarchical-kaveh-short128-100k
+  name: short128-lr1e3_none
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "resident.yaml"
+    materialize_resident_resume(source, output)
+
+    before = load_config(source).to_dict()
+    after = load_config(output).to_dict()
+    assert after["data"]["shard_cache_size"] is None
+    assert after["wandb"]["resume"] == "must"
+    after["data"]["shard_cache_size"] = before["data"]["shard_cache_size"]
+    after["wandb"]["resume"] = before["wandb"]["resume"]
+    assert after == before

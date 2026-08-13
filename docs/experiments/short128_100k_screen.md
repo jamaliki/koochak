@@ -93,3 +93,20 @@ python scripts/materialize_short128_screen.py \
 
 Omit `--preflight` for the 100k configs. Production materialization is the only
 mode that enables W&B, using project `hierarchical-kaveh-short128-100k`.
+
+At the first 25k checkpoint, runs created before resident shard ownership was
+promoted can move losslessly to the current loader with:
+
+```bash
+python scripts/materialize_resident_resume.py \
+  --source RUN_DIR/config.yaml \
+  --output RUN_DIR/config-resident.yaml
+python -m torch.distributed.run --standalone --nproc-per-node=1 \
+  -m hierarchical_kaveh.train \
+  --config RUN_DIR/config-resident.yaml \
+  --resume RUN_DIR/step000025000.pt
+```
+
+The materializer changes only `data.shard_cache_size` to `null` and sets
+`wandb.resume: must`; scientific configuration and checkpoint RNG/optimizer/EMA
+state remain unchanged.

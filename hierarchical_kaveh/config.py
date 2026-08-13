@@ -245,6 +245,7 @@ class WandbConfig:
     group: str | None = None
     tags: tuple[str, ...] = ()
     mode: str | None = None
+    resume: str | None = None
 
 
 @dataclass(frozen=True)
