@@ -75,7 +75,6 @@ class TrainConfig:
     ddp_gradient_as_bucket_view: bool = False
     ddp_bucket_cap_mb: Optional[int] = None
     ddp_broadcast_buffers: bool = True
-    ddp_gradient_compression: str = "none"
     seed: int = 42
     compile: Optional[Any] = None
     prefetch_batches: int = 0

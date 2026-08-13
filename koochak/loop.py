@@ -196,19 +196,11 @@ class _TrainSettings:
     ddp_gradient_as_bucket_view: bool
     ddp_bucket_cap_mb: Optional[int]
     ddp_broadcast_buffers: bool
-    ddp_gradient_compression: str
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_TrainSettings":
         get = config_lib.get
         ddp_bucket_cap_raw = get(train_cfg, "ddp_bucket_cap_mb", None)
-        ddp_gradient_compression = str(
-            get(train_cfg, "ddp_gradient_compression", "none")
-        ).lower()
-        if ddp_gradient_compression not in {"none", "bf16"}:
-            raise ValueError(
-                "train.ddp_gradient_compression must be one of: none, bf16"
-            )
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -246,7 +238,6 @@ class _TrainSettings:
                 int(ddp_bucket_cap_raw) if ddp_bucket_cap_raw is not None else None
             ),
             ddp_broadcast_buffers=bool(get(train_cfg, "ddp_broadcast_buffers", True)),
-            ddp_gradient_compression=ddp_gradient_compression,
         )
 
 
@@ -644,10 +635,6 @@ class _TrainLoop:
         if getattr(self.device, "type", "cpu") == "cuda":
             ddp_kwargs["device_ids"] = [torch.cuda.current_device()]
         self.model = DistributedDataParallel(self.model, **ddp_kwargs)
-        if self.settings.ddp_gradient_compression == "bf16":
-            from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
-
-            self.model.register_comm_hook(None, default_hooks.bf16_compress_hook)
         self.ctx["model"] = self.model
 
     def _resume_from_checkpoint(self) -> int:
