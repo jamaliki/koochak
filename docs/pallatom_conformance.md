@@ -51,7 +51,7 @@ are explicitly paper-only.
 | residue distogram | directional logits summed with their transpose, 64 bins over 2.3125..21.6875 A, all `i,j` pairs including diagonal, weight `0.5` |
 | optimizer | Adam, `lr=1e-3`, betas 0.9/0.999, no warmup, no weight decay |
 | reference run | batch 32, crop 128, 300,000 steps, 100% self-conditioning |
-| sampler | 200 perturbed-time Euler steps, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, final sequence temperature `0.1` |
+| sampler | released-code semantics: 200 perturbed-time Euler steps, one denoiser call per step, previous-step coordinate self-conditioning, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, and final temperature-0.1 softmax/argmax sequence decoding |
 
 Protenix independently confirms the scaled log-normal training noise, rigid
 augmentation, FP32 stopped-gradient target alignment, and EDM scaling. It is a
@@ -79,9 +79,10 @@ weight. Pallatom remains normative here, so neither Emyx change is copied.
   Hierarchical Kaveh deliberately has no geometry refresh or node-to-pair path,
   so its 100% self-conditioning supplies the detached first-pass coordinates to
   the persistent atom stream. Pair state remains initialized once.
-- The paper's Algorithm 1 performs two denoiser calls per sampling step; the
-  released sampler carries one prediction into the next step. This repository
-  follows the paper's two-pass algorithm.
+- The paper's Algorithm 1 can be read as two model evaluations per step, while
+  the released sampler performs one evaluation and carries its prediction into
+  the next step. The executable Pallatom implementation is authoritative here,
+  so this repository follows the released one-call recurrent path.
 - Pallatom supervises every decoder unit. Hierarchical Kaveh intentionally emits
   final predictions only, so intermediate loss is absent.
 - Pallatom projects a persistent local atom-pair representation to a 22-bin

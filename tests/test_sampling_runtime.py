@@ -22,9 +22,12 @@ class RecordingDenoiser(nn.Module):
     def forward(self, inputs, **kwargs):
         self.inputs.append((inputs, kwargs))
         batch, residues = inputs.coordinates.shape[:2]
+        call = len(self.inputs)
+        logits = torch.zeros(batch, residues, 20, device=inputs.coordinates.device)
+        logits[..., call % 20] = 1.0
         return Prediction(
-            coordinates=torch.zeros_like(inputs.coordinates),
-            aatype_logits=torch.zeros(batch, residues, 20, device=inputs.coordinates.device),
+            coordinates=torch.full_like(inputs.coordinates, float(call)),
+            aatype_logits=logits,
             distogram=None,
         )
 
@@ -44,7 +47,7 @@ def test_chain_length_parser_and_schedule() -> None:
     assert torch.all(sigmas[:-1] > sigmas[1:])
 
 
-def test_sampler_uses_two_pass_coordinate_self_conditioning() -> None:
+def test_sampler_carries_previous_prediction_as_self_conditioning() -> None:
     config = replace(SamplingConfig(), num_steps=3)
     model = RecordingDenoiser()
     result = sample(
@@ -58,14 +61,41 @@ def test_sampler_uses_two_pass_coordinate_self_conditioning() -> None:
     )
     first, first_kwargs = model.inputs[0]
     second, second_kwargs = model.inputs[1]
+    third, third_kwargs = model.inputs[2]
     assert torch.all(first.sigma == first.sigma[..., :1])
     assert first.self_conditioned_coordinates is None
-    assert second.self_conditioned_coordinates is not None
-    assert first_kwargs == second_kwargs == {"compute_distogram": False}
-    assert len(model.inputs) == 2 * config.num_steps
-    assert all(model.inputs[index][0].self_conditioned_coordinates is None for index in range(0, 6, 2))
-    assert all(model.inputs[index][0].self_conditioned_coordinates is not None for index in range(1, 6, 2))
+    assert torch.all(second.self_conditioned_coordinates == 1.0)
+    assert torch.all(third.self_conditioned_coordinates == 2.0)
+    assert first_kwargs == second_kwargs == third_kwargs == {"compute_distogram": False}
+    assert len(model.inputs) == config.num_steps
+    assert torch.all(result.aatype == 3)
     assert result.coordinates.shape == (1, 4, 14, 3)
+
+
+def test_final_sequence_decode_is_deterministic_argmax() -> None:
+    config = replace(SamplingConfig(), num_steps=1, sequence_temperature=0.1)
+    first_model = RecordingDenoiser()
+    second_model = RecordingDenoiser()
+    first = sample(
+        first_model,
+        (4,),
+        batch_size=1,
+        config=config,
+        device="cpu",
+        dtype=torch.float32,
+        generator=torch.Generator().manual_seed(1),
+    )
+    second = sample(
+        second_model,
+        (4,),
+        batch_size=1,
+        config=config,
+        device="cpu",
+        dtype=torch.float32,
+        generator=torch.Generator().manual_seed(999),
+    )
+    assert torch.equal(first.aatype, second.aatype)
+    assert torch.all(first.aatype == 1)
 
 
 def test_output_writes_paired_pdb_and_fasta(tmp_path: Path) -> None:

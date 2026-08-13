@@ -118,17 +118,11 @@ def _augment_batch(
     )
 
 
-def _sample_aatype(
-    logits: Tensor,
-    temperature: float,
-    generator: torch.Generator | None,
-) -> Tensor:
+def _decode_aatype(logits: Tensor, temperature: float) -> Tensor:
+    """Match Pallatom's final temperature-softmax followed by argmax."""
+
     probabilities = (logits.float() / float(temperature)).softmax(dim=-1)
-    return torch.multinomial(
-        probabilities.flatten(0, -2),
-        1,
-        generator=generator,
-    ).view(logits.shape[:-1])
+    return probabilities.argmax(dim=-1)
 
 
 def sample(
@@ -141,7 +135,7 @@ def sample(
     dtype: torch.dtype = torch.bfloat16,
     generator: torch.Generator | None = None,
 ) -> SampleBatch:
-    """Run Algorithm 1 from the Pallatom paper with two-pass self-conditioning."""
+    """Run the stochastic Euler sampler released with Pallatom."""
 
     device = torch.device(device)
     topology = build_topology(chain_lengths, batch_size, device)
@@ -245,12 +239,10 @@ def sample(
                 atom_mask=topology.atom_mask,
                 aatype_input=unknown_aatype,
             )
+            if last_prediction is not None:
+                inputs = inputs.with_self_conditioning(last_prediction)
             with autocast():
-                first_prediction = model(inputs, compute_distogram=False)
-                last_prediction = model(
-                    inputs.with_self_conditioning(first_prediction),
-                    compute_distogram=False,
-                )
+                last_prediction = model(inputs, compute_distogram=False)
             denoised = last_prediction.coordinates.float()
             score = (coordinates_hat - denoised) / sigma_hat.clamp_min(1.0e-12)
             coordinates = coordinates_hat + config.step_scale * (sigma_next - sigma_hat) * score
@@ -260,11 +252,7 @@ def sample(
     final_coordinates = last_prediction.coordinates.float()
     if not torch.isfinite(final_coordinates).all():
         raise FloatingPointError("sampler produced non-finite coordinates")
-    final_aatype = _sample_aatype(
-        last_prediction.aatype_logits,
-        config.sequence_temperature,
-        generator,
-    )
+    final_aatype = _decode_aatype(last_prediction.aatype_logits, config.sequence_temperature)
     return SampleBatch(final_coordinates, final_aatype, topology)
 
 

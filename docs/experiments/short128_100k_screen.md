@@ -57,6 +57,28 @@ finite, avoid persistent gradient clipping or collapse, improve common metrics,
 and later survive the same fixed sampling/evaluation panel. Throughput is a
 guardrail rather than the primary objective in this round.
 
+## Milestone sampling
+
+Every 25k checkpoint is sampled with EMA weights and the released Pallatom
+sampler: 200 perturbed-time Euler steps, recurrent previous-step coordinate
+self-conditioning, gamma 0.2, noise scale 1.003, step scale 2.25, and final
+temperature-0.1 softmax/argmax sequence decoding. The comparison screen uses
+32 samples at each of lengths 64, 96, and 128 with the same seeds for every
+variant.
+
+```bash
+python scripts/sample_short128_milestone.py \
+  --config /runs/lr1e3_none/config.yaml \
+  --checkpoint /runs/lr1e3_none/step000025000.pt \
+  --output-dir /samples/step025000/lr1e3_none \
+  --lengths 64,96,128 --samples-per-length 32 --batch-size 32 \
+  --seed 20260813 --compile
+```
+
+The driver loads one checkpoint once, uses EMA unless `--raw` is explicit,
+and writes a manifest with the checkpoint step, weight source, schedule, seeds,
+precision, and sample counts next to the PDB/FASTA outputs.
+
 ## Reproduction
 
 Materialize immutable preflight configs with:
