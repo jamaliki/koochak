@@ -702,8 +702,17 @@ class _TrainLoop:
         self._restore_ema(ckpt.get("ema"), ckpt.get("ema_dual"))
 
         try:
-            return int(ckpt.get("step", 0)) + 1
-        except (TypeError, ValueError):
+            if "next_step" in ckpt:
+                return int(ckpt["next_step"])
+            saved_step = int(ckpt.get("step", 0))
+            saved_config = ckpt.get("config", {})
+            saved_train_config = saved_config.get("train", saved_config)
+            saved_max_steps = int(saved_train_config.get("max_steps", -1))
+            # Older terminal checkpoints used the completed-step count, while
+            # periodic checkpoints used the last zero-based step. Preserve
+            # both conventions when the explicit next-step marker is absent.
+            return saved_step if saved_step == saved_max_steps else saved_step + 1
+        except (AttributeError, TypeError, ValueError):
             return 0
 
     def _restore_one_ema(
@@ -796,7 +805,13 @@ class _TrainLoop:
 
     # ------------------------------------------------------------------ checkpoint
 
-    def _build_checkpoint(self, step: int, *, metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _build_checkpoint(
+        self,
+        step: int,
+        *,
+        next_step: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         model_to_save = self._module_for_state()
         try:
             rng_record = get_rng_state()
@@ -804,6 +819,7 @@ class _TrainLoop:
             rng_record = None
         ckpt: Dict[str, Any] = {
             "step": step,
+            "next_step": step + 1 if next_step is None else int(next_step),
             "model": model_to_save.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
@@ -1167,11 +1183,13 @@ class _TrainLoop:
                 )
 
             start_step = self._resume_from_checkpoint()
+            next_step = start_step
             it = self._make_iterator()
             train_ended_normally = False
             for step in range(start_step, self.settings.max_steps):
                 if not self._run_step(step, it):
                     break
+                next_step = step + 1
             else:
                 train_ended_normally = True
             if train_ended_normally or start_step >= self.settings.max_steps:
@@ -1184,8 +1202,20 @@ class _TrainLoop:
             if callable(close_iterator):
                 close_iterator()
 
-        if self.final_ckpt is None:
-            self.final_ckpt = self._build_checkpoint(self.settings.max_steps)
+        # Always assemble from the terminal in-memory state. ``final_ckpt`` may
+        # otherwise still refer to the input checkpoint or to an earlier
+        # periodic save, silently discarding updates made later in this run.
+        # Preserve the legacy ``step`` value when that checkpoint already
+        # describes the terminal update; ``next_step`` carries the unambiguous
+        # resume cursor.
+        terminal_step = next_step
+        if self.final_ckpt is not None:
+            try:
+                if int(self.final_ckpt.get("next_step", -1)) == next_step:
+                    terminal_step = int(self.final_ckpt["step"])
+            except (TypeError, ValueError):
+                pass
+        self.final_ckpt = self._build_checkpoint(terminal_step, next_step=next_step)
         return self.final_ckpt
 
     def _run_step(self, step: int, it: Iterator[Any]) -> bool:
