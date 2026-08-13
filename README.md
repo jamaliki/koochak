@@ -2,6 +2,134 @@
 
 A tiny, hackable, function‑first training loop for PyTorch. Built to be easy to read, fork, and extend. It favors explicit functions and small modules over opaque classes or global state.
 
+## Related Projects
+
+Koochak prepares reproducible workloads; it deliberately does not own cluster
+connectivity or GPU scheduling. It integrates with two small, independent
+projects:
+
+- [Scruffy](https://github.com/jamaliki/scruffy) is an asynchronous resource
+  scheduler for jobs running inside an existing multi-node allocation. It owns
+  GPU reservations, dependencies, fair queueing, lifecycle state, and the event
+  stream used by agents and dashboards.
+- [Pazuzu](https://github.com/jamaliki/pazuzu) is a resilient, site-neutral
+  OpenSSH gateway with a typed Slurm client. It owns remote transport and is the
+  backend for standalone Slurm jobs when no suitable Scruffy allocation is
+  available.
+
+The boundary is intentional: Koochak defines exactly *what* runs, Scruffy
+decides *where and when* it runs inside an allocation, and Pazuzu carries
+commands safely to a remote cluster.
+
+## Architecture at a Glance
+
+### From Experiment to Execution
+
+```mermaid
+flowchart TB
+    config["Training config<br/>model · data · optimization"]
+    profile["Environment profile<br/>Python · packages · compilers"]
+    script["Submission script<br/>resources · run identity"]
+
+    prepare(["prepare_run()"])
+    bundle[["PreparedRun<br/>resolved config + immutable manifest"]]
+    route{"Choose backend"}
+
+    scruffy["Scruffy<br/>queue inside an active allocation"]
+    pazuzu["Pazuzu<br/>standalone Slurm transport"]
+
+    runner["Koochak runner<br/>verify digests · preflight · exec"]
+    loop(["training_loop()<br/>iterables · DDP · AMP · hooks"])
+    outputs[("checkpoints<br/>metrics · logs · events")]
+
+    config --> prepare
+    profile --> prepare
+    script --> prepare
+    prepare --> bundle --> route
+    route -->|active allocation| scruffy
+    route -->|standalone job| pazuzu
+    scruffy --> runner
+    pazuzu --> runner
+    runner --> loop --> outputs
+
+    classDef input fill:#F4F0FF,stroke:#6D5BD0,color:#241C3A,stroke-width:1.5px;
+    classDef core fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
+    classDef choice fill:#FFF4E8,stroke:#D97745,color:#3A2117,stroke-width:1.5px;
+    classDef scruffyNode fill:#DDF7F3,stroke:#168B83,color:#123B38,stroke-width:1.5px;
+    classDef pazuzuNode fill:#FCE8DE,stroke:#D9674B,color:#44231A,stroke-width:1.5px;
+    classDef runtime fill:#E8F0FF,stroke:#4977B8,color:#172D4D,stroke-width:1.5px;
+    classDef result fill:#F4EDC9,stroke:#9C7B21,color:#352B10,stroke-width:1.5px;
+
+    class config,profile,script input;
+    class prepare,bundle core;
+    class route choice;
+    class scruffy scruffyNode;
+    class pazuzu pazuzuNode;
+    class runner,loop runtime;
+    class outputs result;
+    linkStyle default stroke:#88859A,stroke-width:1.5px;
+```
+
+The backend choice does not alter the prepared workload. Both paths invoke the
+same runner, which rejects configuration or environment drift before importing
+training code. Once admitted, `training_loop()` remains the small functional
+core; checkpointing, logging, distributed execution, and workload events attach
+through focused helpers and hooks.
+
+### Inside `training_loop()`
+
+```mermaid
+flowchart TB
+    user["User computation<br/>model · step_fn · optimizer"]
+    data["Data and policy<br/>iterables · train_cfg · scheduler"]
+    extensions["Optional extensions<br/>hooks · eval_fn · checkpoint_dict"]
+
+    setup["Setup once<br/>device → shard → start hook → compile → DDP → resume"]
+    batch["Next batch<br/>optional CUDA prefetch + prepare_batch_fn"]
+    micro["Micro-step × grad_accum<br/>autocast → step_fn → scaled backward"]
+    gradients["Gradient gate<br/>unscale → finite check → clip"]
+    update["Parameter update<br/>optimizer → scaler → EMA → scheduler"]
+
+    hooks["Observe<br/>metrics · rank timing · hooks"]
+    health["Protect<br/>GPU health watchdog"]
+    periodic["Persist<br/>evaluation · atomic checkpoint"]
+    done{"max_steps reached<br/>or data exhausted?"}
+    result[["Resume-ready checkpoint<br/>model · optimizer · RNG · EMA · config"]]
+
+    user --> setup
+    data --> setup
+    extensions --> setup
+    setup --> batch --> micro --> gradients --> update
+    update --> hooks --> health --> periodic --> done
+    done -->|next step| batch
+    done -->|finished| result
+
+    classDef input fill:#F4F0FF,stroke:#6D5BD0,color:#241C3A,stroke-width:1.5px;
+    classDef setupNode fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
+    classDef dataNode fill:#DDF7F3,stroke:#168B83,color:#123B38,stroke-width:1.5px;
+    classDef compute fill:#E8F0FF,stroke:#4977B8,color:#172D4D,stroke-width:1.5px;
+    classDef updateNode fill:#F4EDC9,stroke:#9C7B21,color:#352B10,stroke-width:1.5px;
+    classDef boundary fill:#FCE8DE,stroke:#D9674B,color:#44231A,stroke-width:1.5px;
+    classDef choice fill:#FFF4E8,stroke:#D97745,color:#3A2117,stroke-width:1.5px;
+    classDef resultNode fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
+
+    class user,data,extensions input;
+    class setup setupNode;
+    class batch dataNode;
+    class micro,gradients compute;
+    class update updateNode;
+    class hooks,health,periodic boundary;
+    class done choice;
+    class result resultNode;
+    linkStyle default stroke:#88859A,stroke-width:1.5px;
+```
+
+The user-defined `step_fn` owns model semantics and returns a loss plus optional
+metrics. Koochak owns the repetitive mechanics around it. Optional behavior is
+composed through functions and event hooks rather than subclasses, while the
+returned checkpoint captures everything required to resume the optimization
+state deterministically.
+
 ## Goals
 
 - Functional core: a single `training_loop(...)` with a clear, compact signature.
@@ -54,7 +182,7 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
 
 ## Installation
 
-- Python 3.9+
+- Python 3.10+
 - PyTorch (CUDA optional): https://pytorch.org
 - Required: `pip install omegaconf`
 - Optional: `pip install torchvision wandb tqdm`
@@ -153,9 +281,12 @@ The CLI loads config via `koochak.config.load_config`, prints the summary, build
 ## Reproducible Job Submission
 
 Koochak compiles a training config and an execution-environment profile into an
-immutable launch manifest. Pazuzu and Scruffy then launch the same isolated
-runner. Koochak contains no hostnames, users, filesystem layout, scheduler
-defaults, or other site policy.
+immutable launch manifest. [Scruffy](https://github.com/jamaliki/scruffy) can
+enqueue that runner inside an active allocation, while
+[Pazuzu](https://github.com/jamaliki/pazuzu) can stage and submit it as a
+standalone Slurm job. Both use the same prepared run, so changing the backend
+does not change its configuration or environment contract. Koochak contains no
+hostnames, users, filesystem layout, scheduler defaults, or other site policy.
 
 Environment profiles are strict YAML. They define an absolute Python,
 deterministic `PATH`, explicit compiler paths, required files and package
