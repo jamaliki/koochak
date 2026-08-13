@@ -50,6 +50,7 @@ def test_ddp_runtime_options_are_known_and_resolved():
                 "ddp_gradient_as_bucket_view": True,
                 "ddp_bucket_cap_mb": 64,
                 "ddp_broadcast_buffers": False,
+                "ddp_gradient_compression": "bf16",
             }
         }
     )
@@ -63,3 +64,10 @@ def test_ddp_runtime_options_are_known_and_resolved():
     assert settings.ddp_gradient_as_bucket_view is True
     assert settings.ddp_bucket_cap_mb == 64
     assert settings.ddp_broadcast_buffers is False
+    assert settings.ddp_gradient_compression == "bf16"
+
+
+def test_ddp_gradient_compression_rejects_unknown_mode():
+    cfg = OmegaConf.create({"ddp_gradient_compression": "lossy-mystery"})
+    with pytest.raises(ValueError, match="ddp_gradient_compression"):
+        _TrainSettings.from_cfg(cfg)
