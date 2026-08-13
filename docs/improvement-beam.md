@@ -14,7 +14,7 @@ The first training baseline is the fixed `3/3/8/3/3`, p=4 architecture in
 | `OBJ-DIST` | complementary | stable coarse-pair supervision improves global topology and pair-state learning | distogram off/on main effect at both LRs and lDDT states | queued |
 | `OPT-LR` | optimization | the deeper 3/3/8/3/3 network benefits from the lower 3e-4 update scale | 1e-3 vs 3e-4 across all objective states | queued |
 | `INTERACTION` | structural | local all-atom and coarse residue-pair losses are complementary rather than redundant | full three-factor interaction | queued |
-| `IO-SHARD-OWNERSHIP` | systems | sample-strided workers repeatedly decompress the same 4,606 Lustre shards despite abundant host RAM | compare immutable `d68c966` against disjoint global-worker shard ownership with full owned-shard preload; require lower p95 and higher completed-step throughput without changing eligible samples | active |
+| `IO-SHARD-OWNERSHIP` | systems | sample-strided workers repeatedly decompress the same 4,606 Lustre shards despite abundant host RAM | paired real-data H100 comparison of identical whole-shard ownership with cache size 2 versus full owned-shard preload | promoted (`9da44d0`) |
 
 ## Short-128 latency tail
 
@@ -36,6 +36,27 @@ scientific sample set, corruption, and model are unchanged. Promotion requires:
 - at least 20% lower p95 completed-step latency and no median/throughput regression
   in paired one-H100 tests using the real filtered dataset;
 - bounded resident memory well below the job allocation.
+
+Paired synchronized H100 jobs on `gpu-1` GPU 5 established causality:
+
+| metric (steps 100--299) | owned shards, cache 2 | owned shards resident | change |
+|---|---:|---:|---:|
+| CPU fetch p95 | 1.753 s | 0.188 ms | 9,349x lower |
+| prefetch get-wait p95 | 0.906 s | 0.028 ms | 32,175x lower |
+| loop batch-wait p95 | 0.907 s | 1.141 ms | 795x lower |
+| synchronized completed-step p50 | 147 ms | 119 ms | 19% lower |
+| synchronized completed-step p95 | 1.610 s | 155 ms | **10.4x lower** |
+
+The resident run held 287--288 shards and 8.23--8.29 GB per worker, about
+132 GB across 16 workers. Both runs completed 300 finite real-data steps with
+the same total timed node count. Authoritative Scruffy jobs:
+`job-3102797687ea132f276d` (cache 2) and
+`job-55fe1131b1a6e19faa52` (resident).
+
+Rare p99 outliers remain attributable to `torch.compile` recompilation across
+residue lengths, compact patch counts, gradient modes, and the optional
+self-conditioning input. They no longer affect p95 and are a separate compiler
+beam; do not conflate them with DataLoader starvation.
 
 ## Decision state
 

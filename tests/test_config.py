@@ -1,8 +1,10 @@
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
 from hierarchical_kaveh.config import DataConfig, ModelConfig, TrainingConfig, load_config
+from scripts.materialize_short128_screen import materialize
 
 
 def test_model_architecture_defaults_are_consistent() -> None:
@@ -63,3 +65,16 @@ def test_training_and_quality_filter_probabilities_are_bounded() -> None:
         DataConfig(mean_plddt_min=101.0)
     with pytest.raises(ValueError, match="loop_content_max"):
         DataConfig(loop_content_max=-0.1)
+
+
+def test_short128_preflight_keeps_bounded_main_process_cache(tmp_path) -> None:
+    output = tmp_path / "preflight"
+    materialize(
+        Path("configs/experiments/short128_100k.yaml"),
+        output,
+        tmp_path / "metadata.json",
+        preflight=True,
+    )
+    config = load_config(output / "lr1e3_none" / "config.yaml")
+    assert config.data.num_workers == 0
+    assert config.data.shard_cache_size == 2

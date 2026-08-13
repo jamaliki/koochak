@@ -60,6 +60,7 @@ def materialize(
         if preflight:
             values["data"]["num_workers"] = 0
             values["data"]["persistent_workers"] = False
+            values["data"]["shard_cache_size"] = 2
             values["train"]["max_steps"] = 2
             values["train"]["log_every"] = 1
             values["train"]["ckpt_every"] = 1
@@ -107,4 +108,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
