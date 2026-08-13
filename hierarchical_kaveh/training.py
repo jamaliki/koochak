@@ -56,9 +56,20 @@ class PallatomTrainingStep:
         self,
         loss_config: LossConfig,
         model_config: ModelConfig,
+        *,
+        self_conditioning_probability: float = 1.0,
+        seed: int = 0,
     ) -> None:
         self.loss_config = loss_config
         self.model_config = model_config
+        self.self_conditioning_probability = float(self_conditioning_probability)
+        self.seed = int(seed)
+
+    def _use_self_conditioning(self, step: int) -> bool:
+        if self.self_conditioning_probability in {0.0, 1.0}:
+            return bool(self.self_conditioning_probability)
+        generator = torch.Generator().manual_seed(self.seed + int(step))
+        return bool(torch.rand((), generator=generator) < self.self_conditioning_probability)
 
     def __call__(
         self,
@@ -68,12 +79,18 @@ class PallatomTrainingStep:
     ) -> dict[str, Tensor]:
         inputs = denoiser_input(batch)
         autocast = context["autocast"]
-        with torch.no_grad(), autocast():
-            previous = model(inputs, compute_distogram=False)
+        use_self_conditioning = self._use_self_conditioning(int(context.get("step", 0)))
+        previous = None
+        if use_self_conditioning:
+            with torch.no_grad(), autocast():
+                previous = model(inputs, compute_distogram=False)
         inputs = denoiser_input(batch, previous)
 
         with autocast():
-            output = model(inputs, compute_distogram=True)
+            output = model(
+                inputs,
+                compute_distogram=self.loss_config.distogram_weight > 0.0,
+            )
             losses = compute_losses(
                 output,
                 inputs,
@@ -89,7 +106,7 @@ class PallatomTrainingStep:
             "aatype_loss": losses["aatype_loss"].detach(),
             "smooth_lddt_loss": losses["smooth_lddt_loss"].detach(),
             "distogram_loss": losses["distogram_loss"].detach(),
-            "self_conditioned": losses["loss"].new_ones(()),
+            "self_conditioned": losses["loss"].new_tensor(float(use_self_conditioning)),
             "node_count": batch["residue_mask"].sum(),
             "node_slot_count": batch["atom14_mask"].sum(),
         }
@@ -167,7 +184,12 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
         sigma_data=config.model.sigma_data,
         global_step=global_step,
     )
-    step = PallatomTrainingStep(config.loss, config.model)
+    step = PallatomTrainingStep(
+        config.loss,
+        config.model,
+        self_conditioning_probability=config.train.self_conditioning_probability,
+        seed=config.train.seed,
+    )
     hooks = _hooks(config)
     final_checkpoint = training_loop(
         model=model,

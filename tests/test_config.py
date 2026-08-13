@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from hierarchical_kaveh.config import ModelConfig, load_config
+from hierarchical_kaveh.config import DataConfig, ModelConfig, TrainingConfig, load_config
 
 
 def test_model_architecture_defaults_are_consistent() -> None:
@@ -54,3 +54,12 @@ train:
     )
     with pytest.raises(ValueError, match="legacy_mode"):
         load_config(config_file)
+
+
+def test_training_and_quality_filter_probabilities_are_bounded() -> None:
+    with pytest.raises(ValueError, match="self_conditioning_probability"):
+        TrainingConfig(self_conditioning_probability=1.01)
+    with pytest.raises(ValueError, match="mean_plddt_min"):
+        DataConfig(mean_plddt_min=101.0)
+    with pytest.raises(ValueError, match="loop_content_max"):
+        DataConfig(loop_content_max=-0.1)

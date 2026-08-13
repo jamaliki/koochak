@@ -91,3 +91,46 @@ def test_training_step_always_self_conditions_coordinates(monkeypatch) -> None:
     )
     assert output["loss"] is loss
     assert output["self_conditioned"].item() == 1.0
+
+
+def test_training_step_can_skip_self_conditioning_and_distogram(monkeypatch) -> None:
+    batch = _batch()
+    prediction = _prediction(batch)
+    model = FakeModel(prediction)
+    loss = prediction.coordinates.sum() * 0 + 3.0
+    compute_losses = Mock(
+        return_value={
+            "loss": loss,
+            "coordinate_loss": loss + 1,
+            "aatype_loss": loss + 2,
+            "smooth_lddt_loss": loss + 3,
+            "distogram_loss": loss + 4,
+        }
+    )
+    monkeypatch.setattr("hierarchical_kaveh.training.compute_losses", compute_losses)
+    step = PallatomTrainingStep(
+        LossConfig(distogram_weight=0.0),
+        ModelConfig(),
+        self_conditioning_probability=0.0,
+    )
+    output = step(model, batch, {"autocast": torch.no_grad, "step": 17})
+
+    assert len(model.inputs) == 1
+    final_input, final_kwargs = model.inputs[0]
+    assert final_input.self_conditioned_coordinates is None
+    assert final_kwargs == {"compute_distogram": False}
+    assert output["self_conditioned"].item() == 0.0
+
+
+def test_half_self_conditioning_schedule_is_deterministic_and_nontrivial() -> None:
+    left = PallatomTrainingStep(
+        LossConfig(), ModelConfig(), self_conditioning_probability=0.5, seed=42
+    )
+    right = PallatomTrainingStep(
+        LossConfig(), ModelConfig(), self_conditioning_probability=0.5, seed=42
+    )
+    left_schedule = [left._use_self_conditioning(step) for step in range(64)]
+    right_schedule = [right._use_self_conditioning(step) for step in range(64)]
+    assert left_schedule == right_schedule
+    assert any(left_schedule)
+    assert not all(left_schedule)

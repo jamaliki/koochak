@@ -1,0 +1,83 @@
+# Common configuration for the eight-run short-length architecture screen.
+# Runtime launch materializes one immutable config per loss/LR combination.
+model:
+  atom_encoder_depth: 3
+  residue_encoder_depth: 3
+  coarse_depth: 8
+  residue_decoder_depth: 3
+  atom_decoder_depth: 3
+  checkpoint_blocks: false
+
+data:
+  metadata_path: /path/to/np_shards/metadata.json
+  min_length: 4
+  max_length: 128
+  mean_plddt_min: 80.0       # strict: mean_plddt > 80
+  loop_content_max: 0.5      # strict: loop_content < 0.5 (coil fraction)
+  batch_size: 32
+  num_workers: 16
+  length_buckets: [64, 96, 128]
+  prefetch_factor: 1
+  shard_cache_size: 2
+  pin_memory: true
+  persistent_workers: true
+  seed: 42
+
+diffusion:
+  p_mean: -1.2
+  p_std: 1.5
+  translation_std: 1.0
+
+# The materialized baseline is coordinate + AA only. The factorial screen
+# independently enables smooth lDDT (weight 1.0) and distogram CE (weight 0.5).
+loss:
+  coordinate_weight: 1.0
+  aatype_weight: 0.25
+  smooth_lddt_weight: 0.0
+  distogram_weight: 0.0
+
+train:
+  max_steps: 100000
+  log_every: 25
+  ckpt_every: 25000
+  save_final: true
+  keep_last_k: 5
+  grad_accum: 1
+  grad_clip_norm: 1.0
+  nonfinite_grad_check_every: 100
+  amp: bf16
+  ddp: false
+  seed: 42
+  self_conditioning_probability: 0.5
+  prefetch_batches: 2
+  prefetch_threaded: true
+  prefetch_pipeline: two_stage
+  autocast_in_step_fn: true
+  scalarize_loss_every_step: false
+  compile:
+    enabled: true
+    mode: default
+    fullgraph: false
+    dynamic: false
+  require_compile: true
+  require_fused: true
+  ema:
+    enabled: true
+    profile: constant
+    decay: 0.999
+    offload_to_cpu: true
+    update_every: 2
+    compensate_update_every: true
+
+optimizer:
+  name: adam
+  lr: 0.001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+wandb:
+  enabled: false
+  # Production launch enables this brand-new project after preflight passes.
+  project: hierarchical-kaveh-short128-100k
+  group: short128-100k-3a3r8c

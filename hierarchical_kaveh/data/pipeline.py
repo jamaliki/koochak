@@ -140,7 +140,14 @@ class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
         self.diffusion = diffusion
         self.sigma_data = float(sigma_data)
         self.global_step = int(global_step)
-        self.references = tuple(index_shards(data.metadata_path, min_length=data.min_length))
+        self.references = tuple(
+            index_shards(
+                data.metadata_path,
+                min_length=data.min_length,
+                mean_plddt_min=data.mean_plddt_min,
+                loop_content_max=data.loop_content_max,
+            )
+        )
         edges = tuple(edge for edge in data.length_buckets if edge <= data.max_length)
         self.length_buckets = (
             edges if edges and edges[-1] == data.max_length else (*edges, data.max_length)

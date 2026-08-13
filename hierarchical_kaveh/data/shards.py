@@ -63,8 +63,14 @@ class ShardCache:
         return cached
 
 
-def index_shards(metadata_path: str | Path, *, min_length: int = 1) -> list[SampleReference]:
-    """Index samples without retaining decompressed coordinate arrays."""
+def index_shards(
+    metadata_path: str | Path,
+    *,
+    min_length: int = 1,
+    mean_plddt_min: float | None = None,
+    loop_content_max: float | None = None,
+) -> list[SampleReference]:
+    """Index samples passing strict quality bounds without retaining shard arrays."""
 
     metadata_path = Path(metadata_path).expanduser().resolve()
     if not metadata_path.is_file():
@@ -75,6 +81,20 @@ def index_shards(metadata_path: str | Path, *, min_length: int = 1) -> list[Samp
         shard = Path(shard_name)
         if not shard.is_absolute():
             shard = metadata_path.parent / shard
+        feature_names = [str(name) for name in entry.get("cond_feature_names", ())]
+        requested_features = {
+            "mean_plddt": mean_plddt_min,
+            "loop_content": loop_content_max,
+        }
+        missing = [
+            name
+            for name, bound in requested_features.items()
+            if bound is not None and name not in feature_names
+        ]
+        if missing:
+            raise ValueError(
+                f"quality filters {missing} are absent from cond_feature_names in {shard}"
+            )
         with np.load(shard, allow_pickle=False) as payload:
             offsets = np.asarray(payload["sample_offsets"], dtype=np.int64)
             if offsets.ndim != 1 or len(offsets) < 2 or offsets[0] != 0:
@@ -86,7 +106,23 @@ def index_shards(metadata_path: str | Path, *, min_length: int = 1) -> list[Samp
                 or offsets[-1] != len(atom_mask)
             ):
                 raise ValueError(f"invalid Atom14 mask in {shard}")
+            conditions = None
+            if mean_plddt_min is not None or loop_content_max is not None:
+                conditions = np.asarray(payload["cond"], dtype=np.float32)
+                if conditions.shape != (len(offsets) - 1, len(feature_names)):
+                    raise ValueError(f"invalid conditioning array in {shard}")
+            plddt_index = feature_names.index("mean_plddt") if mean_plddt_min is not None else None
+            loop_index = feature_names.index("loop_content") if loop_content_max is not None else None
             for sample_idx, (start, stop) in enumerate(zip(offsets[:-1], offsets[1:])):
+                if conditions is not None:
+                    if plddt_index is not None:
+                        mean_plddt = float(conditions[sample_idx, plddt_index])
+                        if not np.isfinite(mean_plddt) or mean_plddt <= mean_plddt_min:
+                            continue
+                    if loop_index is not None:
+                        loop_content = float(conditions[sample_idx, loop_index])
+                        if not np.isfinite(loop_content) or loop_content >= loop_content_max:
+                            continue
                 resolved_length = int(np.count_nonzero(atom_mask[start:stop, 1]))
                 if resolved_length < min_length:
                     continue
@@ -100,7 +136,9 @@ def index_shards(metadata_path: str | Path, *, min_length: int = 1) -> list[Samp
                     )
                 )
     if not references:
-        raise ValueError("no samples contain the configured minimum number of resolved C-alpha atoms")
+        raise ValueError(
+            "no samples satisfy the configured quality filters and minimum resolved C-alpha length"
+        )
     return references
 
 

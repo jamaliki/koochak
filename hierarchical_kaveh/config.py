@@ -89,6 +89,8 @@ class DataConfig:
     metadata_path: str = ""
     max_length: int = 128
     min_length: int = 4
+    mean_plddt_min: float | None = None
+    loop_content_max: float | None = None
     batch_size: int = 32
     num_workers: int = 16
     pin_memory: bool = True
@@ -105,6 +107,10 @@ class DataConfig:
             raise ValueError("batch_size must be positive and num_workers non-negative")
         if self.shard_cache_size <= 0:
             raise ValueError("shard_cache_size must be positive")
+        if self.mean_plddt_min is not None and not 0.0 <= self.mean_plddt_min <= 100.0:
+            raise ValueError("data.mean_plddt_min must lie in [0, 100]")
+        if self.loop_content_max is not None and not 0.0 <= self.loop_content_max <= 1.0:
+            raise ValueError("data.loop_content_max must lie in [0, 1]")
         if any(a >= b for a, b in zip(self.length_buckets, self.length_buckets[1:])):
             raise ValueError("length_buckets must be strictly increasing")
 
@@ -199,10 +205,15 @@ class TrainingConfig:
     prefetch_pipeline: str = "two_stage"
     autocast_in_step_fn: bool = True
     scalarize_loss_every_step: bool = False
+    self_conditioning_probability: float = 1.0
     compile: CompileConfig = field(default_factory=CompileConfig)
     require_compile: bool = False
     require_fused: bool = False
     ema: EmaConfig = field(default_factory=EmaConfig)
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.self_conditioning_probability <= 1.0:
+            raise ValueError("train.self_conditioning_probability must lie in [0, 1]")
 
 
 @dataclass(frozen=True)

@@ -41,11 +41,20 @@ def _ragged_fixture(tmp_path):
         chain_idx=chain_idx,
         res_idx=res_idx,
         sample_offsets=offsets,
-        cond=np.asarray([[95.0], [85.0], [70.0]], dtype=np.float32),
+        cond=np.asarray([[95.0, 0.2], [85.0, 0.4], [70.0, 0.6]], dtype=np.float32),
     )
     metadata = tmp_path / "metadata.json"
     metadata.write_text(
-        json.dumps([{"shard": shard.name, "count": 3, "ids": [0], "cond_feature_names": ["mean_plddt"]}])
+        json.dumps(
+            [
+                {
+                    "shard": shard.name,
+                    "count": 3,
+                    "ids": [0],
+                    "cond_feature_names": ["mean_plddt", "loop_content"],
+                }
+            ]
+        )
     )
     return metadata
 
@@ -92,6 +101,35 @@ def test_index_excludes_post_filter_short_samples_before_worker_partition(tmp_pa
     references = index_shards(metadata, min_length=4)
     assert [reference.index for reference in references] == [1]
     assert references[0].length == 7
+
+
+def test_quality_filters_are_strict_and_applied_before_partition(tmp_path) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    shard = tmp_path / "shard.npz"
+    with np.load(shard) as payload:
+        arrays = {key: payload[key].copy() for key in payload.files}
+    arrays["cond"] = np.asarray(
+        [[95.0, 0.5], [80.0, 0.4], [85.0, 0.49]],
+        dtype=np.float32,
+    )
+    np.savez_compressed(shard, **arrays)
+
+    references = index_shards(
+        metadata,
+        mean_plddt_min=80.0,
+        loop_content_max=0.5,
+    )
+    assert [reference.index for reference in references] == [2]
+
+
+def test_quality_filter_requires_named_conditioning_feature(tmp_path) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    contents = json.loads(metadata.read_text())
+    contents[0]["cond_feature_names"] = ["mean_plddt", "helix_content"]
+    metadata.write_text(json.dumps(contents))
+
+    with pytest.raises(ValueError, match="loop_content"):
+        index_shards(metadata, loop_content_max=0.5)
 
 
 def test_index_rejects_dataset_without_enough_resolved_ca(tmp_path) -> None:

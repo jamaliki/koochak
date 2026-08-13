@@ -21,6 +21,9 @@ data:
   metadata_path: /path/to/np_shards/metadata.json
   min_length: 4
   max_length: 128
+  # Strict sample-level bounds when set: mean_plddt > min, loop_content < max.
+  mean_plddt_min: null
+  loop_content_max: null
   batch_size: 32
   num_workers: 16
   length_buckets: [64, 96, 128]
@@ -67,6 +70,8 @@ train:
   prefetch_pipeline: two_stage
   autocast_in_step_fn: true
   scalarize_loss_every_step: false
+  # One deterministic Bernoulli decision per batch, shared across DDP ranks.
+  self_conditioning_probability: 1.0
   compile:
     enabled: true
     mode: default
