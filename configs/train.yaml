@@ -1,0 +1,111 @@
+# The one supported hierarchical architecture. Only depths and widths are scaling knobs.
+model:
+  node_dim: 768
+  condition_dim: 256
+  pair_dim: 64
+  atom_dim: 128
+  attention_heads: 12
+  attention_head_dim: 64
+  atom_heads: 4
+  atom_head_dim: 32
+  atom_encoder_depth: 1
+  residue_encoder_depth: 4
+  coarse_depth: 6
+  residue_decoder_depth: 4
+  atom_decoder_depth: 1
+  atom_window_radius: 1
+  dropout: 0.2
+  checkpoint_blocks: false
+
+data:
+  metadata_path: /path/to/np_shards/metadata.json
+  min_length: 4
+  max_length: 128
+  batch_size: 32
+  num_workers: 16
+  length_buckets: [64, 96, 128]
+  prefetch_factor: 1
+  shard_cache_size: 2
+  pin_memory: true
+  persistent_workers: true
+  seed: 42
+
+diffusion:
+  p_mean: -1.2
+  p_std: 1.5
+  translation_std: 1.0
+
+loss:
+  coordinate_weight: 1.0
+  aatype_weight: 0.25
+  smooth_lddt_weight: 1.0
+  distogram_weight: 0.5
+  # Pallatom specifies "polar residues" but does not publish the exact set.
+  polar_aatypes: RNDCEQHKSTY
+  polar_weight: 2.0
+  smooth_lddt_cutoff: 15.0
+  smooth_lddt_chunk_size: 128
+  distogram_drop_diagonal: false
+
+train:
+  max_steps: 300000
+  log_every: 5
+  ckpt_every: 10000
+  save_final: true
+  grad_accum: 1
+  grad_clip_norm: 1.0
+  amp: bf16
+  ddp: true
+  ddp_gradient_as_bucket_view: true
+  ddp_bucket_cap_mb: 32
+  ddp_broadcast_buffers: false
+  seed: 42
+  out_dir: ./runs/hierarchical-kaveh
+  keep_last_k: 3
+  prefetch_batches: 2
+  prefetch_threaded: true
+  prefetch_pipeline: two_stage
+  autocast_in_step_fn: true
+  scalarize_loss_every_step: false
+  compile:
+    enabled: true
+    mode: default
+    fullgraph: false
+    dynamic: false
+  require_compile: true
+  require_fused: true
+  ema:
+    enabled: true
+    profile: constant
+    decay: 0.999
+    offload_to_cpu: true
+    update_every: 2
+    compensate_update_every: true
+
+optimizer:
+  name: adam
+  lr: 0.001
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+logging:
+  csv_path: ./runs/hierarchical-kaveh/log.csv
+  jsonl_path: ./runs/hierarchical-kaveh/log.jsonl
+
+wandb:
+  enabled: false
+  project: hierarchical-kaveh
+  name: hierarchical-kaveh
+
+sampling:
+  num_steps: 200
+  p_mean: -1.2
+  p_std: 1.5
+  gamma: 0.2
+  churn_tmin: 0.01
+  churn_tmax: 1.0
+  noise_scale: 1.003
+  step_scale: 2.25
+  translation_std: 1.0
+  sequence_temperature: 0.1
