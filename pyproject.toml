@@ -7,7 +7,7 @@ name = "koochak"
 version = "0.1.0"
 description = "Function-first training loop for PyTorch"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "torch>=2.1",
   "omegaconf>=2.3",

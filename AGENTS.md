@@ -35,8 +35,10 @@ This doc tracks incremental design decisions and changes from the initial design
   - Stdout and W&B record resolved config at `on_train_start`; CSV/JSONL remain metric logs.
 
 - Jobs
-  - `koochak/jobs` provides a generic SSH/Slurm launch layer: typed resources, config patches, runtime env flags, render/stage/submit, status, tail, and JSONL metrics helpers.
-  - The backend accepts an injected SSH command prefix, so plain SSH and local multiplexing helpers are supported without hard-coding private cluster details.
+  - `koochak/jobs` compiles strict environment YAML and resolved training config into an immutable launch manifest.
+  - One isolated runner verifies the environment and uses exact Python argv for both Pazuzu and Scruffy. Thin adapters retain each backend's native resource model.
+  - Agent-authored experiment submission must live in a committed Python script using `prepare_run`, then `submit_pazuzu` or `submit_scruffy`. Do not assemble SSH, `sbatch`, or scheduler CLI submissions in tool calls.
+  - Profiles contain no secret values. They name required secrets, inherit only Koochak's fixed runtime identity, and cannot override it. All ordinary values, including compiler and NCCL settings, belong under `environment.set`.
 
 - Optim
   - `koochak/optim/build.py` – tiny builders for optimizers (AdamW/Adam/SGD) and schedulers (cosine, step, plateau). Added cosine-with-warmup (`cosine_warmup`).
@@ -81,10 +83,12 @@ This list guides ongoing work. All contributors (agents and humans) should updat
   - Behavior: Imports callables, builds model/optim/scheduler/datasets, attaches hooks (stdout/CSV/JSONL/W&B), handles resume via latest checkpoint, supports DDP (auto `init_process_group` + sharding), then calls `training_loop`.
   - Value: Consistent UX; reduces boilerplate; easier automation.
 - Tests: unit tests for precision helpers, checkpoint round-trip, sharding helpers [TODO]
-- SSH/Slurm jobs API [DONE]
-  - Generic `koochak.jobs` package with no private cluster backend.
-  - Config materialization uses OmegaConf patches; sbatch files reference config paths rather than embedding YAML.
-  - Tests cover rendering, submit/status parsing, SSH command injection, and private-string scanning.
+- Reproducible jobs API [DONE]
+  - Strict, site-neutral environment profiles with no ambient inheritance or private cluster policy.
+  - Content-addressed manifests and resolved configs are staged atomically and cannot be clobbered by another agent.
+  - The runner checks interpreters, files, packages, CUDA, the C compiler, and Torch compilation before user code.
+  - Python-only Pazuzu and Scruffy adapters replace the raw SSH backend.
+  - Tests cover validation, digesting, tamper detection, environment ownership, preflight records, adapters, and private-string scanning.
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
 
