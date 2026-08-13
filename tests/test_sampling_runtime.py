@@ -154,3 +154,27 @@ def test_checkpoint_overlays_partial_trainable_ema_on_strict_raw_state(tmp_path:
     load_checkpoint(model, checkpoint_file, config=RunConfig())
     assert torch.equal(model.weight, torch.zeros_like(model.weight))
     assert model.bias.shape == (1,)
+
+
+def test_checkpoint_loader_normalizes_compile_and_ddp_wrappers(tmp_path: Path) -> None:
+    model = nn.Linear(2, 1)
+    checkpoint_file = tmp_path / "compiled.pt"
+    torch.save(
+        {
+            "model": {
+                "module._orig_mod.weight": torch.full_like(model.weight, 3.0),
+                "module._orig_mod.bias": torch.full_like(model.bias, 4.0),
+            },
+            "ema": {
+                "shadow": {
+                    "_orig_mod.module.weight": torch.full_like(model.weight, 7.0),
+                    "_orig_mod.module.bias": torch.full_like(model.bias, 8.0),
+                },
+            },
+            "config": RunConfig().to_dict(),
+        },
+        checkpoint_file,
+    )
+    load_checkpoint(model, checkpoint_file, config=RunConfig())
+    assert torch.equal(model.weight, torch.full_like(model.weight, 7.0))
+    assert torch.equal(model.bias, torch.full_like(model.bias, 8.0))

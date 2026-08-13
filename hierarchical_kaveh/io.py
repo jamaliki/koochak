@@ -41,6 +41,26 @@ ATOM14_NAMES = (
     ("N", "CA", "C", "O", "CB", "CG1", "CG2"),
 )
 CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+_STATE_WRAPPER_PREFIXES = ("module.", "_orig_mod.")
+
+
+def _strip_state_wrapper_prefixes(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove DDP/torch.compile wrappers without weakening strict loading."""
+
+    normalized: dict[str, Any] = {}
+    for original_key, value in state.items():
+        key = original_key
+        changed = True
+        while changed:
+            changed = False
+            for prefix in _STATE_WRAPPER_PREFIXES:
+                if key.startswith(prefix):
+                    key = key[len(prefix):]
+                    changed = True
+        if key in normalized:
+            raise ValueError(f"checkpoint keys collide after wrapper normalization: {key!r}")
+        normalized[key] = value
+    return normalized
 
 
 def load_checkpoint(
@@ -60,12 +80,12 @@ def load_checkpoint(
     raw = checkpoint.get("model")
     if not isinstance(raw, Mapping):
         raise ValueError("checkpoint has no model state dictionary")
-    state = dict(checkpoint_lib.strip_module_prefix(dict(raw)))
+    state = _strip_state_wrapper_prefixes(raw)
     if use_ema:
         ema = checkpoint.get("ema")
         if not isinstance(ema, Mapping) or not isinstance(ema.get("shadow"), Mapping):
             raise ValueError("checkpoint has no EMA state; pass --raw to use training weights")
-        shadow = checkpoint_lib.strip_module_prefix(dict(ema["shadow"]))
+        shadow = _strip_state_wrapper_prefixes(ema["shadow"])
         unknown = set(shadow) - set(state)
         if unknown:
             raise ValueError(f"EMA contains unknown model keys: {sorted(unknown)[:5]}")
