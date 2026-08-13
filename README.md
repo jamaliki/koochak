@@ -27,20 +27,29 @@ commands safely to a remote cluster.
 
 ```mermaid
 flowchart TB
-    config["Training config<br/>model · data · optimization"]
-    profile["Environment profile<br/>Python · packages · compilers"]
-    script["Submission script<br/>resources · run identity"]
+    config["Training config
+model · data · optimization"]
+    profile["Environment profile
+Python · packages · compilers"]
+    script["Submission script
+resources · run identity"]
 
     prepare(["prepare_run()"])
-    bundle[["PreparedRun<br/>resolved config + immutable manifest"]]
+    bundle[["PreparedRun
+resolved config + immutable manifest"]]
     route{"Choose backend"}
 
-    scruffy["Scruffy<br/>queue inside an active allocation"]
-    pazuzu["Pazuzu<br/>standalone Slurm transport"]
+    scruffy["Scruffy
+queue inside an active allocation"]
+    pazuzu["Pazuzu
+standalone Slurm transport"]
 
-    runner["Koochak runner<br/>verify digests · preflight · exec"]
-    loop(["training_loop()<br/>iterables · DDP · AMP · hooks"])
-    outputs[("checkpoints<br/>metrics · logs · events")]
+    runner["Koochak runner
+verify digests · preflight · exec"]
+    loop(["training_loop()
+iterables · DDP · AMP · hooks"])
+    outputs[("checkpoints
+metrics · logs · events")]
 
     config --> prepare
     profile --> prepare
@@ -80,21 +89,34 @@ through focused helpers and hooks.
 
 ```mermaid
 flowchart TB
-    user["User computation<br/>model · step_fn · optimizer"]
-    data["Data and policy<br/>iterables · train_cfg · scheduler"]
-    extensions["Optional extensions<br/>hooks · eval_fn · checkpoint_dict"]
+    user["User computation
+model · step_fn · optimizer"]
+    data["Data and policy
+iterables · train_cfg · scheduler"]
+    extensions["Optional extensions
+hooks · eval_fn · checkpoint_dict"]
 
-    setup["Setup once<br/>device → shard → start hook → compile → DDP → resume"]
-    batch["Next batch<br/>optional CUDA prefetch + prepare_batch_fn"]
-    micro["Micro-step × grad_accum<br/>autocast → step_fn → scaled backward"]
-    gradients["Gradient gate<br/>unscale → finite check → clip"]
-    update["Parameter update<br/>optimizer → scaler → EMA → scheduler"]
+    setup["Setup once
+device → shard → start hook → compile → DDP → resume"]
+    batch["Next batch
+optional CUDA prefetch + prepare_batch_fn"]
+    micro["Micro-step × grad_accum
+autocast → step_fn → scaled backward"]
+    gradients["Gradient gate
+unscale → finite check → clip"]
+    update["Parameter update
+optimizer → scaler → EMA → scheduler"]
 
-    hooks["Observe<br/>metrics · rank timing · hooks"]
-    health["Protect<br/>GPU health watchdog"]
-    periodic["Persist<br/>evaluation · atomic checkpoint"]
-    done{"max_steps reached<br/>or data exhausted?"}
-    result[["Resume-ready checkpoint<br/>model · optimizer · RNG · EMA · config"]]
+    hooks["Observe
+metrics · rank timing · hooks"]
+    health["Protect
+GPU health watchdog"]
+    periodic["Persist
+evaluation · atomic checkpoint"]
+    done{"max_steps reached
+or data exhausted?"}
+    result[["Resume-ready checkpoint
+model · optimizer · RNG · EMA · config"]]
 
     user --> setup
     data --> setup
