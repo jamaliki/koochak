@@ -51,7 +51,7 @@ are explicitly paper-only.
 | residue distogram | directional logits summed with their transpose, 64 bins over 2.3125..21.6875 A, all `i,j` pairs including diagonal, weight `0.5` |
 | optimizer | Adam, `lr=1e-3`, betas 0.9/0.999, no warmup, no weight decay |
 | reference run | batch 32, crop 128, 300,000 steps, 100% self-conditioning |
-| sampler | 200 coherent perturbed-time Euler steps, one denoiser call per step, previous-step coordinate self-conditioning, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, and final temperature-0.1 softmax/argmax sequence decoding |
+| sampler | 200 coherent perturbed-time Euler steps, one denoiser call per step, previous-step coordinate self-conditioning, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, and final temperature-0.1 softmax/argmax sequence decoding; churn is gated on the unperturbed discrete `t/T` fraction as in Pallatom Algorithm 1 |
 
 Protenix independently confirms the scaled log-normal training noise, rigid
 augmentation, FP32 stopped-gradient target alignment, and EDM scaling. It is a

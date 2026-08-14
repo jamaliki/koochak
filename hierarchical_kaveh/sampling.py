@@ -150,6 +150,21 @@ def _sample_time_grid(
     return initial_time * (1.0 - fractions)
 
 
+def _churn_gamma(
+    step_index: int,
+    config: SamplingConfig,
+    normalized_time: Tensor,
+) -> Tensor:
+    """Return Pallatom churn from the unperturbed discrete step fraction."""
+
+    reference_time = (config.num_steps - step_index) / config.num_steps
+    return normalized_time.new_tensor(
+        config.gamma
+        if config.churn_tmin <= reference_time <= config.churn_tmax
+        else 0.0
+    )
+
+
 def sample(
     model: nn.Module,
     chain_lengths: tuple[int, ...],
@@ -224,12 +239,9 @@ def sample(
                 generator,
                 config.translation_std,
             )
-            gamma = torch.where(
-                (normalized_time >= config.churn_tmin)
-                & (normalized_time <= config.churn_tmax),
-                normalized_time.new_tensor(config.gamma),
-                normalized_time.new_zeros(()),
-            )
+            # Pallatom gates churn on t/T, while the denoiser receives the
+            # perturbed time grid.
+            gamma = _churn_gamma(step_index, config, normalized_time)
             sigma_hat = sigma * (1.0 + gamma + 1.0e-6)
             churn = config.noise_scale * (
                 sigma_hat.square() - sigma.square()

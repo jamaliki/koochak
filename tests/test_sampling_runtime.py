@@ -13,6 +13,7 @@ from hierarchical_kaveh.diffusion.corruption import random_rigid_augmentation
 from hierarchical_kaveh.io import load_checkpoint, sequence_string, write_sample_batch
 from hierarchical_kaveh.sampling import (
     _augment_batch,
+    _churn_gamma,
     build_topology,
     parse_chain_lengths,
     sample,
@@ -163,6 +164,13 @@ def test_sampler_coordinates_match_declared_sigma_on_every_step(monkeypatch) -> 
         observed_rms = inputs.coordinates.square().mean().sqrt()
         declared_sigma = inputs.sigma[0, 0, 0]
         torch.testing.assert_close(observed_rms, declared_sigma, rtol=0.03, atol=0.0)
+
+
+def test_churn_uses_inclusive_unperturbed_pallatom_step_fraction() -> None:
+    config = SamplingConfig(num_steps=200, gamma=0.2)
+    normalized_time = torch.tensor(0.004, dtype=torch.float64)
+    assert _churn_gamma(198, config, normalized_time).item() == config.gamma
+    assert _churn_gamma(199, config, normalized_time).item() == 0.0
 
 
 def test_final_sequence_decode_is_deterministic_argmax() -> None:
