@@ -51,7 +51,7 @@ are explicitly paper-only.
 | residue distogram | directional logits summed with their transpose, 64 bins over 2.3125..21.6875 A, all `i,j` pairs including diagonal, weight `0.5` |
 | optimizer | Adam, `lr=1e-3`, betas 0.9/0.999, no warmup, no weight decay |
 | reference run | batch 32, crop 128, 300,000 steps, 100% self-conditioning |
-| sampler | released-code semantics: 200 perturbed-time Euler steps, one denoiser call per step, previous-step coordinate self-conditioning, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, and final temperature-0.1 softmax/argmax sequence decoding |
+| sampler | 200 coherent perturbed-time Euler steps, one denoiser call per step, previous-step coordinate self-conditioning, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, and final temperature-0.1 softmax/argmax sequence decoding |
 
 Protenix independently confirms the scaled log-normal training noise, rigid
 augmentation, FP32 stopped-gradient target alignment, and EDM scaling. It is a
@@ -72,6 +72,11 @@ weight. Pallatom remains normative here, so neither Emyx change is copied.
 
 ## Explicit interpretations and deviations
 
+- The released sampler independently perturbs the time used to initialize the
+  coordinates and each subsequent denoiser time. Hierarchical Kaveh instead
+  samples one perturbed high-noise start and derives a monotone grid ending at
+  zero. Each Euler endpoint is therefore the noise level declared at the next
+  denoiser call; this corrects a sampler-state/conditioning mismatch.
 - The paper assigns 2x weight to “polar residues” but neither the paper nor
   public code defines the set. The default is explicitly configured as
   `RNDCEQHKSTY`; it can be changed without editing loss code.

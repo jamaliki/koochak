@@ -125,6 +125,24 @@ def _decode_aatype(logits: Tensor, temperature: float) -> Tensor:
     return probabilities.argmax(dim=-1)
 
 
+def _sample_time_grid(
+    num_steps: int,
+    *,
+    device: torch.device,
+    generator: torch.Generator | None,
+) -> Tensor:
+    """Return one coherent, perturbed descending time grid ending at zero."""
+
+    delta_t = 1.0 / num_steps
+    initial_time = 1.0 - delta_t * torch.rand(
+        (), device=device, generator=generator, dtype=torch.float64
+    )
+    fractions = torch.arange(
+        num_steps + 1, device=device, dtype=torch.float64
+    ) / num_steps
+    return initial_time * (1.0 - fractions)
+
+
 def sample(
     model: nn.Module,
     chain_lengths: tuple[int, ...],
@@ -135,17 +153,18 @@ def sample(
     dtype: torch.dtype = torch.bfloat16,
     generator: torch.Generator | None = None,
 ) -> SampleBatch:
-    """Run the stochastic Euler sampler released with Pallatom."""
+    """Run a stochastic Euler sampler on one coherent EDM time grid."""
 
     device = torch.device(device)
     topology = build_topology(chain_lengths, batch_size, device)
     sigma_data = float(getattr(getattr(model, "config", None), "sigma_data", ModelConfig().sigma_data))
-    delta_t = 1.0 / config.num_steps
-    initial_t = 1.0 - delta_t * torch.rand(
-        (), device=device, generator=generator, dtype=torch.float64
+    time_grid = _sample_time_grid(
+        config.num_steps,
+        device=device,
+        generator=generator,
     )
     initial_sigma = sigma_from_probability(
-        initial_t,
+        time_grid[0],
         p_mean=config.p_mean,
         p_std=config.p_std,
         sigma_data=sigma_data,
@@ -173,34 +192,23 @@ def sample(
 
     model.eval()
     with torch.inference_mode():
-        for time_index in range(config.num_steps - 1, -1, -1):
-            perturbation = delta_t * torch.rand(
-                (), device=device, generator=generator, dtype=torch.float64
-            )
-            normalized_time = (
-                torch.tensor(
-                    time_index / max(config.num_steps - 1, 1),
-                    device=device,
-                    dtype=torch.float64,
-                )
-                - perturbation
-            ).clamp_min(0.0)
+        for step_index in range(config.num_steps):
+            normalized_time = time_grid[step_index]
             sigma = sigma_from_probability(
                 normalized_time,
                 p_mean=config.p_mean,
                 p_std=config.p_std,
                 sigma_data=sigma_data,
             ).float()
-            next_time = normalized_time - delta_t
-            sigma_next = torch.where(
-                next_time > 0,
+            sigma_next = (
                 sigma_from_probability(
-                    next_time,
+                    time_grid[step_index + 1],
                     p_mean=config.p_mean,
                     p_std=config.p_std,
                     sigma_data=sigma_data,
-                ).float(),
-                torch.zeros((), device=device),
+                ).float()
+                if step_index + 1 < config.num_steps
+                else torch.zeros((), device=device)
             )
             coordinates = _augment_batch(
                 coordinates,

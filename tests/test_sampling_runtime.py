@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+import hierarchical_kaveh.sampling as sampling_module
 from hierarchical_kaveh.config import SamplingConfig
 from hierarchical_kaveh.config import RunConfig
 from hierarchical_kaveh.io import load_checkpoint, sequence_string, write_sample_batch
@@ -28,6 +29,21 @@ class RecordingDenoiser(nn.Module):
         return Prediction(
             coordinates=torch.full_like(inputs.coordinates, float(call)),
             aatype_logits=logits,
+            distogram=None,
+        )
+
+
+class ZeroDenoiser(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.inputs = []
+
+    def forward(self, inputs, **kwargs):
+        self.inputs.append(inputs)
+        batch, residues = inputs.coordinates.shape[:2]
+        return Prediction(
+            coordinates=torch.zeros_like(inputs.coordinates),
+            aatype_logits=torch.zeros(batch, residues, 20, device=inputs.coordinates.device),
             distogram=None,
         )
 
@@ -70,6 +86,36 @@ def test_sampler_carries_previous_prediction_as_self_conditioning() -> None:
     assert len(model.inputs) == config.num_steps
     assert torch.all(result.aatype == 3)
     assert result.coordinates.shape == (1, 4, 14, 3)
+
+
+def test_sampler_coordinates_match_declared_sigma_on_every_step(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sampling_module,
+        "_augment_batch",
+        lambda coordinates, atom_mask, generator, translation_std: coordinates,
+    )
+    model = ZeroDenoiser()
+    config = SamplingConfig(
+        num_steps=4,
+        gamma=0.0,
+        noise_scale=1.0,
+        step_scale=1.0,
+        translation_std=0.0,
+    )
+    sample(
+        model,
+        (4096,),
+        batch_size=1,
+        config=config,
+        device="cpu",
+        dtype=torch.float32,
+        generator=torch.Generator().manual_seed(31),
+    )
+
+    for inputs in model.inputs:
+        observed_rms = inputs.coordinates.square().mean().sqrt()
+        declared_sigma = inputs.sigma[0, 0, 0]
+        torch.testing.assert_close(observed_rms, declared_sigma, rtol=0.03, atol=0.0)
 
 
 def test_final_sequence_decode_is_deterministic_argmax() -> None:
