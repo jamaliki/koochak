@@ -137,6 +137,7 @@ class LossConfig:
 
     coordinate_weight: float = 1.0
     aatype_weight: float = 0.25
+    aatype_sigma_max: float = 0.5
     smooth_lddt_weight: float = 1.0
     distogram_weight: float = 0.5
     polar_aatypes: str = "RNDCEQHKSTY"
@@ -151,6 +152,8 @@ class LossConfig:
             raise ValueError("loss.polar_aatypes must contain unique residue codes")
         if not set(self.polar_aatypes) <= alphabet:
             raise ValueError("loss.polar_aatypes contains an unknown residue code")
+        if self.aatype_sigma_max <= 0:
+            raise ValueError("loss.aatype_sigma_max must be positive")
         if self.polar_weight <= 0 or self.smooth_lddt_cutoff <= 0:
             raise ValueError("loss polar weight and lDDT cutoff must be positive")
         if self.smooth_lddt_chunk_size <= 0:

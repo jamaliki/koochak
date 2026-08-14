@@ -30,10 +30,13 @@ Required arrays are ragged-concatenated over residues:
 | `chain_idx` | `[total_residues]` | chain identifier |
 | `res_idx` | `[total_residues]` | residue index |
 
-The reader converts physical Atom14 to Pallatom-style unified Atom14:
-nonexistent side-chain slots take the residue's C-alpha coordinate and become
-valid virtual atom tokens. Experimental missingness is not erased: unresolved
-N/C/O atoms stay masked, and residues without a resolved C-alpha are removed.
+The reader converts physical Atom14 to Pallatom-style unified Atom14. All 14
+slots of a C-alpha-resolved residue are model tokens in both training and
+sampling. Chemically nonexistent slots take the residue's C-alpha coordinate
+and remain supervised virtual targets. A separate coordinate mask excludes
+experimentally unresolved real atoms from coordinate and smooth-lDDT objectives;
+their model input uses a C-alpha placeholder. Residues without a resolved
+C-alpha are removed.
 An internal unresolved gap therefore remains visible as a residue-index break.
 The sample is then centered, and geometric chain breaks are inferred from
 adjacent C-alpha distances above 4 Angstrom.

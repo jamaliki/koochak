@@ -60,7 +60,7 @@ def denoiser_input(
         residue_index=batch["res_idx"],
         chain_index=batch["chain_idx"],
         chain_break=batch["chain_breaks_per_residue"],
-        atom_mask=batch["atom14_mask"].to(torch.bool),
+        atom_mask=batch["model_atom_mask"].to(torch.bool),
         aatype_input=batch["aatype_input"],
     )
     return inputs.with_self_conditioning(previous)
@@ -121,11 +121,13 @@ class PallatomTrainingStep:
             "loss": losses["loss"],
             "coordinate_loss": losses["coordinate_loss"].detach(),
             "aatype_loss": losses["aatype_loss"].detach(),
+            "aatype_active_fraction": losses["aatype_active_fraction"].detach(),
             "smooth_lddt_loss": losses["smooth_lddt_loss"].detach(),
             "distogram_loss": losses["distogram_loss"].detach(),
             "self_conditioned": losses["loss"].new_tensor(float(use_self_conditioning)),
             "node_count": batch["residue_mask"].sum(),
-            "node_slot_count": batch["atom14_mask"].sum(),
+            "node_slot_count": batch["model_atom_mask"].sum(),
+            "supervised_slot_count": batch["coordinate_mask"].sum(),
         }
         metrics.update({key: batch[key] for key in _BATCH_TELEMETRY if key in batch})
         return metrics

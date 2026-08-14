@@ -56,6 +56,7 @@ def materialize(
             f"lr={learning_rate:g}",
             f"lddt={lddt_weight:g}",
             f"distogram={distogram_weight:g}",
+            f"aatype_sigma_max={values['loss']['aatype_sigma_max']:g}",
         ]
         if preflight:
             values["data"]["num_workers"] = 0
@@ -76,6 +77,7 @@ def materialize(
                 "learning_rate": learning_rate,
                 "smooth_lddt_weight": lddt_weight,
                 "distogram_weight": distogram_weight,
+                "aatype_sigma_max": values["loss"]["aatype_sigma_max"],
                 "preflight": preflight,
             }
         )

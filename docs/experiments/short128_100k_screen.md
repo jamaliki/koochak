@@ -18,6 +18,8 @@ change its common denoising diagnostics?
 - Maximum length 128, batch size 32 per H100, BF16, compilation and fused paths
   required, seed 42.
 - Standard EDM coordinate loss and 20-class AA CE are always enabled.
+- AA CE is gated per example to coordinate noise `sigma <= 0.5 A`; the active
+  fraction is logged so the low-noise sequence factor is auditable.
 - One deterministic batch-level self-conditioning Bernoulli with `p=0.5`;
   identical `(seed, step)` gives the same decision in every variant and after
   resume.

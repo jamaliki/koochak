@@ -45,7 +45,7 @@ are explicitly paper-only.
 | augmentation | center valid atoms, random rigid rotation, translation std 1 A |
 | preconditioning | standard EDM `c_in`, `c_skip`, `c_out`; `c_noise=log(sigma/sigma_data)/4` |
 | coordinate objective | align target to prediction with stopped-gradient FP32 Kabsch, then MSE divided by `3 * valid_atoms` and weighted by `1/c_out^2` |
-| sequence objective | final 20-class cross entropy, weight `0.25` |
+| sequence objective | final 20-class cross entropy, weight `0.25`, active only for examples with `sigma <= 0.5 A` by default |
 | sequence head | layer-normalize and transform final atom features, mean-pool per residue, zero-initialized 20-class projection |
 | smooth lDDT | all Atom14 pairs within 15 A, thresholds 0.5/1/2/4 A, exact chunked evaluation, weight `1.0` |
 | residue distogram | directional logits summed with their transpose, 64 bins over 2.3125..21.6875 A, all `i,j` pairs including diagonal, weight `0.5` |
@@ -71,6 +71,11 @@ material ways: it excludes same-token pairs and applies a flow-time-dependent
 weight. Pallatom remains normative here, so neither Emyx change is copied.
 
 ## Explicit interpretations and deviations
+
+- The public Pallatom materials do not specify a sequence-loss noise cutoff.
+  Hierarchical Kaveh makes this training factor explicit as
+  `loss.aatype_sigma_max`; the default factorial-screen gate is inclusive at
+  `0.5 A`, and the active-example fraction is logged.
 
 - The released sampler independently perturbs the time used to initialize the
   coordinates and each subsequent denoiser time. Hierarchical Kaveh instead

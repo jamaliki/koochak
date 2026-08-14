@@ -28,7 +28,7 @@ def _ragged_fixture(tmp_path):
     for sample_idx, (start, stop) in enumerate(zip(offsets[:-1], offsets[1:])):
         local = np.arange(stop - start)
         pos[start:stop, :, 0] = local[:, None] * 3.0
-        mask[start:stop, :4] = True
+        mask[start:stop] = True
         res_idx[start:stop] = local + 1
     # A multichain, non-p=4 sample whose chain boundary remains spatially local.
     chain_idx[3:5] = 1
@@ -65,7 +65,8 @@ def test_ragged_reader_preserves_multichain_non_divisible_by_four(tmp_path) -> N
     assert [reference.length for reference in references] == [5, 7]
     sample = load_sample(references[0])
     assert sample["atom14_coordinates"].shape == (5, 14, 3)
-    assert sample["atom14_mask"].all()  # unified Atom14 repeats missing atoms at CA
+    assert sample["model_atom_mask"].all()
+    assert sample["coordinate_mask"].all()
     assert sample["chain_idx"].tolist() == [0, 0, 0, 1, 1]
     assert sample["res_idx"].tolist() == [1, 2, 3, 1, 2]
     # Chain metadata, rather than this distance-only feature, segments patches.
@@ -79,16 +80,20 @@ def test_reader_distinguishes_virtual_sidechains_from_unresolved_backbone(tmp_pa
         arrays = {key: payload[key].copy() for key in payload.files}
     arrays["mask"][0, 0] = False  # unresolved N is not a virtual atom
     arrays["mask"][1, 1] = False  # a residue without CA is removed
+    arrays["mask"][2, 4] = False  # unresolved real ASN CB is not supervised
     np.savez_compressed(shard, **arrays)
 
     sample = load_sample(index_shards(metadata, min_length=4)[0])
     assert sample["res_idx"].tolist() == [1, 3, 1, 2]
-    assert not sample["atom14_mask"][0, 0]
-    assert sample["atom14_mask"][0, 4:].all()
+    assert sample["model_atom_mask"].all()
+    assert not sample["coordinate_mask"][0, 0]
+    assert not sample["coordinate_mask"][1, 4]
+    assert sample["coordinate_mask"][0, 5:].all()
     assert torch.equal(
         sample["atom14_coordinates"][0, 4:],
         sample["atom14_coordinates"][0, 1].expand(10, -1),
     )
+    assert torch.equal(sample["atom14_coordinates"][1, 4], sample["atom14_coordinates"][1, 1])
 
 
 def test_index_excludes_post_filter_short_samples_before_worker_partition(tmp_path) -> None:
@@ -305,6 +310,9 @@ def test_loader_buckets_and_prefix_pads(tmp_path) -> None:
     for row, length in enumerate(batch["lengths"].tolist()):
         assert batch["residue_mask"][row, :length].all()
         assert not batch["residue_mask"][row, length:].any()
+        assert batch["model_atom_mask"][row, :length].all()
+        assert not batch["model_atom_mask"][row, length:].any()
+        assert not (batch["coordinate_mask"][row] & ~batch["model_atom_mask"][row]).any()
         assert batch["aatype_input"][row, length:].eq(21).all()
     assert batch["data_owned_shard_count"].item() == 1
     assert batch["data_cached_shard_count"].item() == 1

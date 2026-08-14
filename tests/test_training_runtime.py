@@ -18,7 +18,8 @@ def _batch() -> dict[str, torch.Tensor]:
         "x0": torch.randn(batch, residues, 14, 3),
         "t": torch.full((batch, residues, 14), 0.1),
         "sigma": torch.full((batch,), 0.1),
-        "atom14_mask": atom_mask,
+        "model_atom_mask": atom_mask,
+        "coordinate_mask": atom_mask,
         "residue_mask": atom_mask[..., 1],
         "aatype": torch.randint(0, 20, (batch, residues)),
         "aatype_input": torch.full((batch, residues), 20),
@@ -66,6 +67,7 @@ def test_training_step_always_self_conditions_coordinates(monkeypatch) -> None:
             "loss": loss,
             "coordinate_loss": loss + 1,
             "aatype_loss": loss + 2,
+            "aatype_active_fraction": loss + 2.5,
             "smooth_lddt_loss": loss + 3,
             "distogram_loss": loss + 4,
         }
@@ -105,6 +107,7 @@ def test_training_step_can_skip_self_conditioning_and_distogram(monkeypatch) -> 
             "loss": loss,
             "coordinate_loss": loss + 1,
             "aatype_loss": loss + 2,
+            "aatype_active_fraction": loss + 2.5,
             "smooth_lddt_loss": loss + 3,
             "distogram_loss": loss + 4,
         }

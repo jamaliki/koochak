@@ -99,11 +99,16 @@ def corrupt_structure(
     """Create one standard EDM pair ``x_t = x0 + sigma * epsilon``."""
 
     coordinates = torch.as_tensor(clean["atom14_coordinates"]).to(torch.float32)
-    atom_mask = torch.as_tensor(clean["atom14_mask"]).to(torch.bool)
+    model_atom_mask = torch.as_tensor(clean["model_atom_mask"]).to(torch.bool)
+    coordinate_mask = torch.as_tensor(clean["coordinate_mask"]).to(torch.bool)
     if coordinates.ndim != 3 or coordinates.shape[-2:] != (14, 3):
         raise ValueError("atom14_coordinates must have shape [N,14,3]")
-    if atom_mask.shape != coordinates.shape[:-1]:
-        raise ValueError("atom14_mask must have shape [N,14]")
+    if model_atom_mask.shape != coordinates.shape[:-1]:
+        raise ValueError("model_atom_mask must have shape [N,14]")
+    if coordinate_mask.shape != coordinates.shape[:-1]:
+        raise ValueError("coordinate_mask must have shape [N,14]")
+    if bool((coordinate_mask & ~model_atom_mask).any()):
+        raise ValueError("coordinate_mask must be a subset of model_atom_mask")
     sigma_scalar = torch.as_tensor(
         sigma,
         device=coordinates.device,
@@ -114,7 +119,7 @@ def corrupt_structure(
 
     target = random_rigid_augmentation(
         coordinates,
-        atom_mask,
+        model_atom_mask,
         generator,
         translation_std=translation_std,
     )
@@ -124,14 +129,15 @@ def corrupt_structure(
         device=target.device,
         dtype=target.dtype,
     )
-    noisy = (target + sigma_scalar * noise) * atom_mask[..., None]
-    residue_mask = atom_mask[..., 1]
+    noisy = (target + sigma_scalar * noise) * model_atom_mask[..., None]
+    residue_mask = model_atom_mask[..., 1]
     aatype = torch.as_tensor(clean["aatype"], device=target.device, dtype=torch.long)
     return {
         "x0": target,
         "x_t": noisy,
-        "t": torch.full_like(atom_mask, sigma_scalar, dtype=target.dtype),
-        "atom14_mask": atom_mask,
+        "t": torch.full_like(model_atom_mask, sigma_scalar, dtype=target.dtype),
+        "model_atom_mask": model_atom_mask,
+        "coordinate_mask": coordinate_mask,
         "residue_mask": residue_mask,
         "aatype": aatype,
         "aatype_input": torch.where(

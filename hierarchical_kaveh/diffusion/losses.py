@@ -79,14 +79,21 @@ def aatype_cross_entropy(
     target: Tensor,
     residue_mask: Tensor,
     *,
+    sample_mask: Tensor | None = None,
     polar_aatypes: str = "RNDCEQHKSTY",
     polar_weight: float = 2.0,
 ) -> Tensor:
-    """Twenty-class CE with the paper's 2x polar-residue weighting."""
+    """Twenty-class CE over selected low-noise samples."""
 
     if logits.shape[-1] != len(AA_ALPHABET):
         raise ValueError("Pallatom sequence logits must contain exactly 20 classes")
+    if sample_mask is None:
+        sample_mask = torch.ones(logits.shape[0], device=logits.device, dtype=torch.bool)
+    if sample_mask.shape != (logits.shape[0],):
+        raise ValueError("sample_mask must have shape [batch]")
+    sample_mask = sample_mask.to(device=logits.device, dtype=torch.bool)
     selected = residue_mask.bool() & target.ge(0) & target.lt(len(AA_ALPHABET))
+    selected &= sample_mask[:, None]
     safe_target = target.clamp(0, len(AA_ALPHABET) - 1)
     errors = F.cross_entropy(
         logits.float().movedim(-1, 1),
@@ -98,7 +105,8 @@ def aatype_cross_entropy(
     class_weights[polar_indices] = float(polar_weight)
     weights = class_weights[safe_target] * selected
     per_sample = (errors * weights).sum(-1) / weights.sum(-1).clamp_min(1.0)
-    return torch.where(selected.any(-1), per_sample, torch.zeros_like(per_sample)).mean()
+    active = selected.any(-1)
+    return (per_sample * active).sum() / active.sum().clamp_min(1)
 
 
 def smooth_lddt_loss(
@@ -222,21 +230,26 @@ def compute_losses(
     coordinate = aligned_edm_loss(
         prediction.coordinates,
         batch["x0"],
-        batch["atom14_mask"],
+        batch["coordinate_mask"],
         batch["sigma"],
         sigma_data=model_config.sigma_data,
     )
+    aatype_sigma = batch["sigma"].to(prediction.aatype_logits.device)
+    if aatype_sigma.shape != (prediction.aatype_logits.shape[0],):
+        raise ValueError("batch sigma must have shape [batch]")
+    aatype_active = aatype_sigma <= float(loss_config.aatype_sigma_max)
     aatype = aatype_cross_entropy(
         prediction.aatype_logits,
         batch["aatype"],
         batch["residue_mask"],
+        sample_mask=aatype_active,
         polar_aatypes=loss_config.polar_aatypes,
         polar_weight=loss_config.polar_weight,
     )
     smooth_lddt = smooth_lddt_loss(
         prediction.coordinates,
         batch["x0"],
-        batch["atom14_mask"],
+        batch["coordinate_mask"],
         cutoff=loss_config.smooth_lddt_cutoff,
         chunk_size=loss_config.smooth_lddt_chunk_size,
     )
@@ -265,6 +278,7 @@ def compute_losses(
         "loss": total,
         "coordinate_loss": coordinate,
         "aatype_loss": aatype,
+        "aatype_active_fraction": aatype_active.float().mean(),
         "smooth_lddt_loss": smooth_lddt,
         "distogram_loss": distogram,
     }

@@ -41,6 +41,40 @@ def test_aatype_loss_applies_explicit_polar_weights() -> None:
     torch.testing.assert_close(weighted, (errors[0, 0] + 2 * errors[0, 1]) / 3)
 
 
+def test_aatype_loss_uses_only_selected_samples() -> None:
+    logits = torch.zeros(2, 2, 20, requires_grad=True)
+    target = torch.tensor([[0, 1], [2, 3]])
+    mask = torch.ones(2, 2, dtype=torch.bool)
+    loss = aatype_cross_entropy(
+        logits,
+        target,
+        mask,
+        sample_mask=torch.tensor([True, False]),
+        polar_aatypes="R",
+        polar_weight=2.0,
+    )
+    expected = torch.nn.functional.cross_entropy(logits[0].float(), target[0], reduction="none")
+    torch.testing.assert_close(loss, (expected[0] + 2 * expected[1]) / 3)
+    loss.backward()
+    assert logits.grad is not None
+    assert torch.count_nonzero(logits.grad[0]) > 0
+    assert torch.count_nonzero(logits.grad[1]) == 0
+
+
+def test_aatype_loss_all_inactive_is_differentiable_zero() -> None:
+    logits = torch.randn(2, 3, 20, requires_grad=True)
+    loss = aatype_cross_entropy(
+        logits,
+        torch.zeros(2, 3, dtype=torch.long),
+        torch.ones(2, 3, dtype=torch.bool),
+        sample_mask=torch.zeros(2, dtype=torch.bool),
+    )
+    torch.testing.assert_close(loss, torch.zeros(()))
+    loss.backward()
+    assert logits.grad is not None
+    assert torch.count_nonzero(logits.grad) == 0
+
+
 def test_smooth_lddt_is_rigid_invariant_and_penalizes_distortion() -> None:
     target = torch.randn(1, 3, 14, 3)
     mask = torch.ones(1, 3, 14, dtype=torch.bool)
@@ -105,7 +139,8 @@ def test_compute_losses_has_only_supported_final_objectives() -> None:
     batch = {
         "x0": target,
         "sigma": torch.full((batch_size,), 0.25),
-        "atom14_mask": atom_mask,
+        "model_atom_mask": atom_mask,
+        "coordinate_mask": atom_mask,
         "residue_mask": atom_mask[..., 1],
         "aatype": torch.arange(residues)[None],
     }
@@ -124,7 +159,52 @@ def test_compute_losses_has_only_supported_final_objectives() -> None:
         "loss",
         "coordinate_loss",
         "aatype_loss",
+        "aatype_active_fraction",
         "smooth_lddt_loss",
         "distogram_loss",
     }
     torch.testing.assert_close(losses["coordinate_loss"], torch.zeros(()))
+
+
+def test_compute_losses_gates_sequence_ce_at_inclusive_sigma_boundary() -> None:
+    batch_size, residues = 3, 2
+    atom_mask = torch.ones(batch_size, residues, 14, dtype=torch.bool)
+    target = torch.randn(batch_size, residues, 14, 3)
+    sigma = torch.tensor([0.49, 0.5, 1.0])
+    logits = torch.zeros(batch_size, residues, 20, requires_grad=True)
+    inputs = DenoiserInput(
+        coordinates=target.clone(),
+        sigma=sigma[:, None, None].expand(-1, residues, 14),
+        residue_index=torch.arange(residues)[None].expand(batch_size, -1),
+        chain_index=torch.zeros(batch_size, residues, dtype=torch.long),
+        chain_break=torch.zeros(batch_size, residues, dtype=torch.bool),
+        atom_mask=atom_mask,
+        aatype_input=torch.full((batch_size, residues), 20),
+    )
+    batch = {
+        "x0": target,
+        "sigma": sigma,
+        "model_atom_mask": atom_mask,
+        "coordinate_mask": atom_mask,
+        "residue_mask": atom_mask[..., 1],
+        "aatype": torch.zeros(batch_size, residues, dtype=torch.long),
+    }
+    losses = compute_losses(
+        Prediction(coordinates=target, aatype_logits=logits),
+        inputs,
+        batch,
+        LossConfig(
+            coordinate_weight=0.0,
+            aatype_weight=1.0,
+            aatype_sigma_max=0.5,
+            smooth_lddt_weight=0.0,
+            distogram_weight=0.0,
+            polar_weight=1.0,
+        ),
+        ModelConfig(),
+    )
+    torch.testing.assert_close(losses["aatype_active_fraction"], torch.tensor(2 / 3))
+    losses["loss"].backward()
+    assert logits.grad is not None
+    assert torch.count_nonzero(logits.grad[:2]) > 0
+    assert torch.count_nonzero(logits.grad[2]) == 0

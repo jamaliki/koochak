@@ -13,6 +13,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from hierarchical_kaveh.residue_constants import physical_atom14_mask
+
 
 @dataclass(frozen=True)
 class SampleReference:
@@ -184,33 +186,38 @@ def load_sample(
     aatype = aatype[resolved_residue]
     chain_idx = chain_idx[resolved_residue]
     res_idx = res_idx[resolved_residue]
+    if not bool(aatype.ge(0).logical_and(aatype.lt(20)).all()):
+        raise ValueError("training samples require canonical residue types in [0, 20)")
 
-    # Pallatom virtualizes only side-chain slots absent from a residue type.
-    # Genuinely unresolved backbone atoms remain masked.
+    # Unified Atom14 exposes every slot to the denoiser. Chemically nonexistent
+    # slots have a supervised virtual CA target; unresolved real atoms use the
+    # same placeholder input but remain outside coordinate objectives.
     ca = coordinates[:, 1:2]
-    unified_mask = atom_mask.clone()
-    unified_mask[:, 4:] |= atom_mask[:, 1:2]
-    coordinates[:, 4:] = torch.where(
-        atom_mask[:, 4:, None],
-        coordinates[:, 4:],
-        ca.expand(-1, 10, -1),
+    physical_mask = physical_atom14_mask(aatype)
+    resolved_atom_mask = atom_mask & physical_mask
+    coordinate_mask = resolved_atom_mask | ~physical_mask
+    model_atom_mask = torch.ones_like(coordinate_mask)
+    coordinates = torch.where(
+        resolved_atom_mask[..., None],
+        coordinates,
+        ca.expand(-1, 14, -1),
     )
-    coordinates = coordinates * unified_mask[..., None]
-    weights = unified_mask.to(coordinates.dtype)[..., None]
+    weights = model_atom_mask.to(coordinates.dtype)[..., None]
     coordinates = coordinates - (coordinates * weights).sum((0, 1), keepdim=True) / weights.sum(
         (0, 1), keepdim=True
     ).clamp_min(1.0)
-    coordinates = coordinates * weights
 
     chain_break = torch.zeros(len(coordinates), dtype=torch.bool)
     if len(coordinates) > 1:
         ca_distance = torch.linalg.vector_norm(coordinates[1:, 1] - coordinates[:-1, 1], dim=-1)
-        pair_valid = unified_mask[1:, 1] & unified_mask[:-1, 1]
+        pair_valid = model_atom_mask[1:, 1] & model_atom_mask[:-1, 1]
         chain_break[1:] = pair_valid & (ca_distance > 4.0)
 
     return {
         "atom14_coordinates": coordinates,
-        "atom14_mask": unified_mask,
+        "model_atom_mask": model_atom_mask,
+        "coordinate_mask": coordinate_mask,
+        "resolved_atom_mask": resolved_atom_mask,
         "aatype": aatype,
         "chain_idx": chain_idx,
         "res_idx": res_idx,

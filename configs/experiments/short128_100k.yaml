@@ -34,6 +34,7 @@ diffusion:
 loss:
   coordinate_weight: 1.0
   aatype_weight: 0.25
+  aatype_sigma_max: 0.5
   smooth_lddt_weight: 0.0
   distogram_weight: 0.0
 
