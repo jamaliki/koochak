@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from .config import ModelConfig, SamplingConfig
-from .diffusion.corruption import random_rigid_augmentation
+from .diffusion.corruption import aligned_random_rigid_augmentation
 from .diffusion.schedules import sigma_from_probability
 from .types import DenoiserInput, Prediction
 
@@ -98,23 +98,30 @@ def sigma_schedule(
 
 def _augment_batch(
     coordinates: Tensor,
+    self_conditioning: Tensor | None,
     atom_mask: Tensor,
     generator: torch.Generator | None,
     translation_std: float,
-) -> Tensor:
+) -> tuple[Tensor, Tensor | None]:
     if generator is None:
         generator = torch.Generator(device=coordinates.device)
         generator.seed()
-    return torch.stack(
-        [
-            random_rigid_augmentation(
-                sample,
-                mask,
-                generator,
-                translation_std=translation_std,
-            )
-            for sample, mask in zip(coordinates, atom_mask, strict=True)
-        ]
+    transformed: list[Tensor] = []
+    transformed_self_conditioning: list[Tensor] = []
+    companions = self_conditioning if self_conditioning is not None else [None] * len(coordinates)
+    for sample, companion, mask in zip(coordinates, companions, atom_mask, strict=True):
+        state, aligned = aligned_random_rigid_augmentation(
+            sample,
+            companion,
+            mask,
+            generator,
+            translation_std=translation_std,
+        )
+        transformed.append(state)
+        if aligned is not None:
+            transformed_self_conditioning.append(aligned)
+    return torch.stack(transformed), (
+        torch.stack(transformed_self_conditioning) if self_conditioning is not None else None
     )
 
 
@@ -210,8 +217,9 @@ def sample(
                 if step_index + 1 < config.num_steps
                 else torch.zeros((), device=device)
             )
-            coordinates = _augment_batch(
+            coordinates, aligned_self_conditioning = _augment_batch(
                 coordinates,
+                last_prediction.coordinates if last_prediction is not None else None,
                 topology.atom_mask,
                 generator,
                 config.translation_std,
@@ -246,9 +254,8 @@ def sample(
                 chain_break=topology.chain_break,
                 atom_mask=topology.atom_mask,
                 aatype_input=unknown_aatype,
+                self_conditioned_coordinates=aligned_self_conditioning,
             )
-            if last_prediction is not None:
-                inputs = inputs.with_self_conditioning(last_prediction)
             with autocast():
                 last_prediction = model(inputs, compute_distogram=False)
             denoised = last_prediction.coordinates.float()

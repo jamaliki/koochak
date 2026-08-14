@@ -44,6 +44,26 @@ def random_rigid_augmentation(
 ) -> Tensor:
     """Center valid atoms, then apply one random rotation and translation."""
 
+    augmented, _ = aligned_random_rigid_augmentation(
+        coordinates,
+        None,
+        atom_mask,
+        generator,
+        translation_std=translation_std,
+    )
+    return augmented
+
+
+def aligned_random_rigid_augmentation(
+    coordinates: Tensor,
+    companion: Tensor | None,
+    atom_mask: Tensor,
+    generator: torch.Generator,
+    *,
+    translation_std: float,
+) -> tuple[Tensor, Tensor | None]:
+    """Apply one rigid frame change to a state and optional companion tensor."""
+
     weights = atom_mask.to(coordinates.dtype)[..., None]
     center = (coordinates * weights).sum(dim=(-3, -2), keepdim=True) / weights.sum(
         dim=(-3, -2), keepdim=True
@@ -53,7 +73,7 @@ def random_rigid_augmentation(
         dtype=coordinates.dtype,
         device=coordinates.device,
     )
-    augmented = torch.einsum("ij,naj->nai", rotation, coordinates - center)
+    translation = coordinates.new_zeros(3)
     if translation_std:
         translation = float(translation_std) * torch.randn(
             3,
@@ -61,8 +81,12 @@ def random_rigid_augmentation(
             device=coordinates.device,
             dtype=coordinates.dtype,
         )
-        augmented = augmented + translation
-    return augmented * weights
+
+    def apply(values: Tensor) -> Tensor:
+        transformed = torch.einsum("ij,naj->nai", rotation, values - center)
+        return (transformed + translation) * weights
+
+    return apply(coordinates), None if companion is None else apply(companion)
 
 
 def corrupt_structure(
@@ -126,4 +150,8 @@ def corrupt_structure(
     }
 
 
-__all__ = ["corrupt_structure", "random_rigid_augmentation"]
+__all__ = [
+    "aligned_random_rigid_augmentation",
+    "corrupt_structure",
+    "random_rigid_augmentation",
+]

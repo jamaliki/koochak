@@ -9,8 +9,15 @@ from torch import nn
 import hierarchical_kaveh.sampling as sampling_module
 from hierarchical_kaveh.config import SamplingConfig
 from hierarchical_kaveh.config import RunConfig
+from hierarchical_kaveh.diffusion.corruption import random_rigid_augmentation
 from hierarchical_kaveh.io import load_checkpoint, sequence_string, write_sample_batch
-from hierarchical_kaveh.sampling import build_topology, parse_chain_lengths, sample, sigma_schedule
+from hierarchical_kaveh.sampling import (
+    _augment_batch,
+    build_topology,
+    parse_chain_lengths,
+    sample,
+    sigma_schedule,
+)
 from hierarchical_kaveh.types import Prediction
 
 
@@ -80,19 +87,59 @@ def test_sampler_carries_previous_prediction_as_self_conditioning() -> None:
     third, third_kwargs = model.inputs[2]
     assert torch.all(first.sigma == first.sigma[..., :1])
     assert first.self_conditioned_coordinates is None
-    assert torch.all(second.self_conditioned_coordinates == 1.0)
-    assert torch.all(third.self_conditioned_coordinates == 2.0)
+    assert second.self_conditioned_coordinates is not None
+    assert third.self_conditioned_coordinates is not None
+    assert torch.isfinite(second.self_conditioned_coordinates).all()
+    assert torch.isfinite(third.self_conditioned_coordinates).all()
     assert first_kwargs == second_kwargs == third_kwargs == {"compute_distogram": False}
     assert len(model.inputs) == config.num_steps
     assert torch.all(result.aatype == 3)
     assert result.coordinates.shape == (1, 4, 14, 3)
 
 
+def test_sampling_applies_the_same_rigid_frame_to_state_and_self_conditioning() -> None:
+    coordinates = torch.randn(2, 4, 14, 3, generator=torch.Generator().manual_seed(3))
+    self_conditioning = coordinates + torch.tensor([1.0, 2.0, 3.0])
+    atom_mask = torch.ones(2, 4, 14, dtype=torch.bool)
+    baseline_generator = torch.Generator().manual_seed(13)
+    aligned_generator = torch.Generator().manual_seed(13)
+    baseline = torch.stack(
+        [
+            random_rigid_augmentation(
+                sample,
+                mask,
+                baseline_generator,
+                translation_std=1.0,
+            )
+            for sample, mask in zip(coordinates, atom_mask, strict=True)
+        ]
+    )
+    transformed, transformed_sc = _augment_batch(
+        coordinates,
+        self_conditioning,
+        atom_mask,
+        aligned_generator,
+        1.0,
+    )
+
+    torch.testing.assert_close(transformed, baseline)
+    assert transformed_sc is not None
+    torch.testing.assert_close(
+        (transformed_sc - transformed).norm(dim=-1),
+        (self_conditioning - coordinates).norm(dim=-1),
+    )
+    assert torch.equal(
+        torch.rand(16, generator=baseline_generator),
+        torch.rand(16, generator=aligned_generator),
+    )
+
+
 def test_sampler_coordinates_match_declared_sigma_on_every_step(monkeypatch) -> None:
     monkeypatch.setattr(
         sampling_module,
         "_augment_batch",
-        lambda coordinates, atom_mask, generator, translation_std: coordinates,
+        lambda coordinates, self_conditioning, atom_mask, generator, translation_std:
+        (coordinates, self_conditioning),
     )
     model = ZeroDenoiser()
     config = SamplingConfig(
