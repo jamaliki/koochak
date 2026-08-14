@@ -155,12 +155,18 @@ def _churn_gamma(
     config: SamplingConfig,
     normalized_time: Tensor,
 ) -> Tensor:
-    """Return Pallatom churn from the unperturbed discrete step fraction."""
+    """Return Pallatom churn from the perturbed normalized sampling time.
 
-    reference_time = (config.num_steps - step_index) / config.num_steps
+    Pallatom's released sampler applies the inclusive ``t_min <= t <= t_max``
+    gate inside ``add_additional_noise`` after perturbing ``t``.  ``step_index``
+    remains part of the signature so callers can keep the per-step sampling
+    boundary explicit, but the gate is intentionally determined by ``t``.
+    """
+
+    del step_index
     return normalized_time.new_tensor(
         config.gamma
-        if config.churn_tmin <= reference_time <= config.churn_tmax
+        if config.churn_tmin <= normalized_time.item() <= config.churn_tmax
         else 0.0
     )
 
@@ -239,8 +245,8 @@ def sample(
                 generator,
                 config.translation_std,
             )
-            # Pallatom gates churn on t/T, while the denoiser receives the
-            # perturbed time grid.
+            # Pallatom gates churn on the perturbed normalized time passed to
+            # add_additional_noise, inclusively at t_min and t_max.
             gamma = _churn_gamma(step_index, config, normalized_time)
             sigma_hat = sigma * (1.0 + gamma + 1.0e-6)
             churn = config.noise_scale * (

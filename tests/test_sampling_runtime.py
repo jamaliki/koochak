@@ -166,11 +166,14 @@ def test_sampler_coordinates_match_declared_sigma_on_every_step(monkeypatch) -> 
         torch.testing.assert_close(observed_rms, declared_sigma, rtol=0.03, atol=0.0)
 
 
-def test_churn_uses_inclusive_unperturbed_pallatom_step_fraction() -> None:
+def test_churn_uses_inclusive_perturbed_pallatom_time_gate() -> None:
     config = SamplingConfig(num_steps=200, gamma=0.2)
-    normalized_time = torch.tensor(0.004, dtype=torch.float64)
-    assert _churn_gamma(198, config, normalized_time).item() == config.gamma
-    assert _churn_gamma(199, config, normalized_time).item() == 0.0
+    at_min = torch.tensor(0.01, dtype=torch.float64)
+    below_min = torch.tensor(0.009999, dtype=torch.float64)
+    above_max = torch.tensor(1.000001, dtype=torch.float64)
+    assert _churn_gamma(0, config, at_min).item() == config.gamma
+    assert _churn_gamma(0, config, below_min).item() == 0.0
+    assert _churn_gamma(0, config, above_max).item() == 0.0
 
 
 def test_final_sequence_decode_is_deterministic_argmax() -> None:
