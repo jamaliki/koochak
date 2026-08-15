@@ -152,6 +152,7 @@ class HierarchicalKaveh(nn.Module):
             c.pair_distance_max,
             c.pair_geometry_mode,
             c.pair_self_conditioned_geometry,
+            c.pair_cross_patch_geometry,
         )
         self.coarse = nn.ModuleList(
             CoarseBlock(

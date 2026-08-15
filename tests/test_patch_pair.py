@@ -56,6 +56,28 @@ def test_local_center_geometry_separates_intra_patch_and_center_distances():
     assert not torch.allclose(center[0, 0, 0], center[0, 0, 1])
 
 
+def test_local_center_can_add_all_cross_patch_distances():
+    mask = torch.ones(1, 8, dtype=torch.bool)
+    index = torch.arange(8)[None]
+    layout = build_patch_layout(mask, torch.zeros_like(index), index, torch.zeros_like(index))
+    ca = layout.pack(torch.randn(1, 8, 14, 3)[..., 1, :])
+    initializer = PairInitializer(
+        pair_dim=4,
+        rbf_bins=5,
+        distance_min=0.05,
+        distance_max=16.0,
+        geometry_mode="local_center",
+        cross_patch_geometry=True,
+    )
+
+    cross = initializer.geometry_features(ca, layout)
+    pair = initializer(ca, layout, torch.float32)
+
+    assert cross.shape == (1, 2, 2, 4, 4, 5)
+    assert pair.shape == (1, 2, 2, 4)
+    assert torch.isfinite(pair).all()
+
+
 def test_compact_distogram_expands_with_slot_bias_and_symmetry():
     mask = torch.ones(1, 5, dtype=torch.bool)
     index = torch.arange(5)[None]

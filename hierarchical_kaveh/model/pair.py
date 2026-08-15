@@ -34,6 +34,7 @@ class PairInitializer(nn.Module):
         distance_max: float,
         geometry_mode: str = "legacy",
         self_conditioned_geometry: bool = False,
+        cross_patch_geometry: bool = False,
     ):
         super().__init__()
         if geometry_mode not in {"legacy", "local_center"}:
@@ -42,6 +43,7 @@ class PairInitializer(nn.Module):
         self.distance_min = distance_min
         self.distance_max = distance_max
         self.geometry_mode = geometry_mode
+        self.cross_patch_geometry = bool(cross_patch_geometry)
         self.self_conditioned_geometry = bool(self_conditioned_geometry)
         self.static_projection = nn.Linear(PATCH_SIZE**2 * 6, pair_dim, bias=False)
         self.geometry_projection = init_linear(
@@ -55,6 +57,11 @@ class PairInitializer(nn.Module):
             self.center_projection = init_linear(nn.Linear(rbf_bins, pair_dim, bias=False))
             self.local_scale = nn.Parameter(torch.tensor(1.0))
             self.center_scale = nn.Parameter(torch.tensor(1.0))
+            if self.cross_patch_geometry:
+                self.cross_projection = init_linear(
+                    nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False)
+                )
+                self.cross_scale = nn.Parameter(torch.tensor(1.0))
             if self_conditioned_geometry:
                 self.sc_local_projection = init_linear(
                     nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False), "zero"
@@ -62,6 +69,10 @@ class PairInitializer(nn.Module):
                 self.sc_center_projection = init_linear(
                     nn.Linear(rbf_bins, pair_dim, bias=False), "zero"
                 )
+                if self.cross_patch_geometry:
+                    self.sc_cross_projection = init_linear(
+                        nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False), "zero"
+                    )
 
     def _rbf(self, distance: Tensor) -> Tensor:
         centers = torch.linspace(
@@ -118,11 +129,17 @@ class PairInitializer(nn.Module):
             center_embedding = self.center_projection(
                 center.to(self.center_projection.weight.dtype)
             )
-            return (
+            geometry = (
                 self.local_scale.to(local_embedding.dtype)
                 * (local_embedding[:, :, None, :] + local_embedding[:, None, :, :])
                 + self.center_scale.to(center_embedding.dtype) * center_embedding
             )
+            if self.cross_patch_geometry:
+                cross_embedding = self._cross_patch_geometry(
+                    ca_slots, layout, self.cross_projection
+                )
+                geometry = geometry + self.cross_scale.to(cross_embedding.dtype) * cross_embedding
+            return geometry
         if ca_slots.is_cuda and ca_slots.shape[1] >= 96:
             try:
                 from .kernels.patch_pair import project_patch_distances
@@ -135,6 +152,22 @@ class PairInitializer(nn.Module):
                 fused_failure("p=4 RBF geometry projection", error)
         rbf = self.geometry_features(ca_slots, layout)
         return self.geometry_projection(rbf.flatten(3).to(self.geometry_projection.weight.dtype))
+
+    def _cross_patch_geometry(
+        self, ca_slots: Tensor, layout: PatchLayout, projection: nn.Linear,
+    ) -> Tensor:
+        if ca_slots.is_cuda and ca_slots.shape[1] >= 96:
+            try:
+                from .kernels.patch_pair import project_patch_distances
+
+                return project_patch_distances(
+                    ca_slots, layout.slot_mask, projection.weight,
+                    self.distance_min, self.distance_max,
+                )
+            except (ImportError, RuntimeError) as error:
+                fused_failure("p=4 cross-patch RBF geometry projection", error)
+        rbf = self.geometry_features(ca_slots, layout)
+        return projection(rbf.flatten(3).to(projection.weight.dtype))
 
     def _static(self, layout: PatchLayout) -> Tensor:
         delta = layout.slot_residue_index[:, :, None, :, None] - layout.slot_residue_index[:, None, :, None]
@@ -170,6 +203,10 @@ class PairInitializer(nn.Module):
                     + local_embedding[:, None, :, :]
                     + center_embedding
                 ).to(dtype)
+                if self.cross_patch_geometry:
+                    pair = pair + self._cross_patch_geometry(
+                        self_conditioned_ca_slots, layout, self.sc_cross_projection
+                    ).to(dtype)
         return pair * layout.pair_mask[..., None].to(dtype)
 
 
