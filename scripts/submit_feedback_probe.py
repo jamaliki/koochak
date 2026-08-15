@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
 from koochak.jobs import load_environment_profile, prepare_run, submit_scruffy  # noqa: E402
 
 
-COMMIT = "272f876"
+COMMIT = "911291d"
 REMOTE_CODE = Path(f"/mnt/lustre/users/kiarash-eitgbi/code/hierarchical_kaveh_{COMMIT}")
 RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-100k/fef3561")
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
