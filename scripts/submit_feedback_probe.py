@@ -21,7 +21,7 @@ RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/g
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-614e355/site")
 PROJECT_ID = "kaveh-ce20-20260806"
-WORKFLOW_ID = "hk-geometry-feedback-probe-911291d-v1"
+WORKFLOW_ID = "hk-geometry-feedback-probe-911291d-v2"
 
 
 def _git(*args: str) -> str:
