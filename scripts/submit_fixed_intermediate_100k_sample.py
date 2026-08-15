@@ -16,7 +16,7 @@ from koochak.jobs import load_environment_profile, prepare_run, submit_scruffy  
 
 REMOTE_CODE = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical_kaveh_911291d")
 RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-100k/fef3561")
-SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263106")
+SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-614e355/site")
 PROJECT_ID = "kaveh-ce20-20260806"
 WORKFLOW_ID = "hk-geometry-fixed-intermediate-100k-911291d-v1"
