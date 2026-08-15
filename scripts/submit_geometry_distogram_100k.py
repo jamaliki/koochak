@@ -141,6 +141,15 @@ def _arm_patches(arm: str, run_dir: Path, *, production: bool) -> list[ConfigPat
     return patches
 
 
+def _checkpoint_path(train_dir: Path, step: int) -> Path:
+    """Return the checkpoint name used by periodic and final saves."""
+
+    # Periodic checkpoints use nine digits. The final-save path uses seven,
+    # making 100k ``step0100000.pt`` rather than ``step000100000.pt``.
+    width = 7 if step == 100_000 else 9
+    return train_dir / f"step{step:0{width}d}.pt"
+
+
 def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
     short = commit[:7]
     output_root = REMOTE_RUN_ROOT / "geometry-distogram-100k" / short
@@ -228,12 +237,12 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
                 profile=gpu_profile,
                 python_args=[
                     *(["{cwd}/scripts/wait_for_checkpoint_and_sample.py", "--checkpoint",
-                       str(train_dirs[arm] / f"step{step:09d}.pt"), "--timeout-seconds", "172800",
+                       str(_checkpoint_path(train_dirs[arm], step)), "--timeout-seconds", "172800",
                        "{cwd}/scripts/sample_short128_milestone.py"]
                       if step in EARLY_SAMPLE_MILESTONES else
                       ["{cwd}/scripts/sample_short128_milestone.py"]),
                     "--config", str(train_dirs[arm] / "config.yaml"),
-                    "--checkpoint", str(train_dirs[arm] / f"step{step:09d}.pt"),
+                    "--checkpoint", str(_checkpoint_path(train_dirs[arm], step)),
                     "--output-dir", str(run_dir),
                     "--lengths", "64,96,128",
                     "--samples-per-length", "32",
