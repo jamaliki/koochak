@@ -92,7 +92,8 @@ def main() -> None:
                     aatype_input=unknown,
                     self_conditioned_coordinates=previous,
                 )
-                prediction = model(inputs, compute_distogram=False, compute_intermediate_distograms=True)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                    prediction = model(inputs, compute_distogram=False, compute_intermediate_distograms=True)
                 rows.append({"step": step, "sigma": float(sigma), **_metrics(prediction.aatype_logits[0, residue_mask], target_aatype[residue_mask])})
                 score = (coordinates - prediction.coordinates) / sigma.clamp_min(1e-6)
                 coordinates = coordinates + 2.25 * (sigma_next - sigma) * score[0]

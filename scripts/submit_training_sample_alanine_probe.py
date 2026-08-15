@@ -19,7 +19,7 @@ RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/g
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-614e355/site")
 PROJECT_ID = "kaveh-ce20-20260806"
-WORKFLOW_ID = "hk-geometry-alanine-training-sample-probe-a0685fe-v2"
+WORKFLOW_ID = "hk-geometry-alanine-training-sample-probe-fc26197-v3"
 
 
 def _git(*args: str) -> str:
@@ -33,7 +33,7 @@ def main() -> None:
         datetime.UTC = datetime.timezone.utc  # type: ignore[attr-defined]
     sys.path.insert(0, str(SCRUFFY_SITE))
     from scruffy import ResourceRequest  # noqa: PLC0415
-    output = RUN_ROOT / "analysis" / "alanine_training_sample_probe_100k_v2.json"
+    output = RUN_ROOT / "analysis" / "alanine_training_sample_probe_100k_v3.json"
     config = RUN_ROOT / "train" / "intermediate_local_center" / "config.yaml"
     checkpoint = RUN_ROOT / "train" / "intermediate_local_center" / "step0100000.pt"
     profile = load_environment_profile(REPO_ROOT / "environments/tokyo-pair-distogram-gpu.yaml")
@@ -49,7 +49,7 @@ def main() -> None:
             "--config", str(config), "--checkpoint", str(checkpoint), "--output", str(output),
             "--sample-index", "0", "--max-length", "128", "--steps", "64", "--seed", "20260815",
         ],
-        cwd=str(REMOTE_CODE), run_dir=str(output.parent / "alanine_training_sample_probe_100k_v2"), base_config=None,
+        cwd=str(REMOTE_CODE), run_dir=str(output.parent / "alanine_training_sample_probe_100k_v3"), base_config=None,
     )
     result = submit_scruffy(
         prepared, root=SCRUFFY_ROOT,
