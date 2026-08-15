@@ -87,6 +87,43 @@ was generated before the sampler recycling fix. The corrected intermediate
 effective alphabet 4.190, entropy 1.995 bits, maximum residue fraction 0.611,
 maximum homopolymer run 10.03, and C-alpha clashes per residue 0.00274.
 
+## Corrected cross-patch analysis at 100k
+
+Both final cross-patch sampling jobs succeeded from the final
+`step0100000.pt` checkpoints. Each produced 96 samples (32 each at lengths
+64/96/128), with the fixed 200-step sampler and compiled inference. The
+analysis used only the corrected output directories.
+
+| Metric | `local_center` 100k | `cross_patch` 100k | `cross_patch_extrema` 100k |
+| --- | ---: | ---: | ---: |
+| Effective alphabet | **6.499** | 5.113 | 5.686 |
+| Entropy (bits) | **2.640** | 2.288 | 2.403 |
+| Maximum residue fraction | **0.423** | 0.513 | 0.496 |
+| Maximum homopolymer run | **5.59** | 8.35 | 7.45 |
+| C-alpha step bad fraction | 0.000 | 0.000 | 0.000 |
+| C-alpha clashes per residue | 0.00263 | 0.00282 | **0.00222** |
+
+At 100k, `cross_patch_extrema` is the better of the two cross variants: it
+reduces clashes 15% below the local-center control and has 11% higher effective
+alphabet and 5% higher entropy than `cross_patch`. However, local-center still
+has substantially better sequence diversity: 14% higher effective alphabet,
+10% higher entropy, 15% lower maximum residue fraction, and a 25% shorter
+maximum homopolymer than `cross_patch_extrema`.
+
+The trajectory is informative. At 25k, extrema was the less diverse arm
+(effective alphabet 4.552 versus 5.558 for plain cross-patch), but by 100k it
+had overtaken plain cross-patch (5.686 versus 5.113). Both cross variants also
+improved their clash rates by roughly 75-78% between 25k and 100k. Thus the
+extrema feature appears to improve long-run geometry and prevent the late
+sequence concentration seen in the plain cross arm, but it does not beat the
+local-center control on the current sequence-quality metrics.
+
+**Recommendation:** keep `local_center` as the sequence-quality control and
+promote `cross_patch_extrema` over plain `cross_patch` for a follow-up design
+run focused on geometry. Do not promote either cross arm as an unconditional
+replacement until a sequence-quality objective or a larger sample panel
+confirms the trade-off.
+
 ## Cross-patch run status and continuation
 
 The cross-patch arms were configured correctly (`max_steps: 100000`,
