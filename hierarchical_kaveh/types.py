@@ -85,6 +85,7 @@ class Prediction:
     coordinates: Tensor
     aatype_logits: Tensor
     distogram: Tensor | CompactDistogram | None = None
+    intermediate_distograms: tuple[CompactDistogram, ...] = ()
 
     def detach(self) -> "Prediction":
         """Detach a prediction for reuse as self-conditioning."""
@@ -98,4 +99,7 @@ class Prediction:
             coordinates=self.coordinates.detach(),
             aatype_logits=self.aatype_logits.detach(),
             distogram=distogram,
+            intermediate_distograms=tuple(
+                intermediate.detach() for intermediate in self.intermediate_distograms
+            ),
         )

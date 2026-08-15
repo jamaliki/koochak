@@ -69,6 +69,27 @@ def test_forward_contract_and_compact_distogram():
     assert torch.count_nonzero(prediction.coordinates[1, 5:]) == 0
 
 
+def test_local_center_geometry_and_intermediate_feedback_variant():
+    model = HierarchicalKaveh(
+        small_config(
+            pair_geometry_mode="local_center",
+            pair_self_conditioned_geometry=True,
+            intermediate_distograms=True,
+            intermediate_distogram_feedback=True,
+        )
+    ).eval()
+    inputs = sample_input()
+    previous = model(inputs, compute_distogram=False)
+    output = model(
+        inputs.with_self_conditioning(previous),
+        compute_intermediate_distograms=True,
+    )
+
+    assert len(output.intermediate_distograms) == 1
+    assert output.intermediate_distograms[0].coarse_logits.shape[:3] == (2, 2, 2)
+    assert torch.isfinite(output.intermediate_distograms[0].coarse_logits).all()
+
+
 def test_zero_initialized_coordinate_head_is_exact_edm_skip():
     model = HierarchicalKaveh(small_config()).eval()
     inputs = sample_input(lengths=(5,), padded=5)

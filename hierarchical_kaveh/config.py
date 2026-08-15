@@ -37,11 +37,15 @@ class ModelConfig:
     pair_rbf_bins: int = 16
     pair_distance_min: float = 0.05
     pair_distance_max: float = 22.0
+    pair_geometry_mode: str = "legacy"
+    pair_self_conditioned_geometry: bool = False
     distogram_bins: int = 64
     distogram_min: float = 2.3125
     distogram_max: float = 21.6875
     sigma_data: float = 16.0
     checkpoint_blocks: bool = False
+    intermediate_distograms: bool = False
+    intermediate_distogram_feedback: bool = False
 
     def __post_init__(self) -> None:
         positive = (
@@ -80,6 +84,12 @@ class ModelConfig:
             raise ValueError("dropout must be in [0, 1)")
         if not 0 < self.pair_distance_min < self.pair_distance_max:
             raise ValueError("pair distance bounds must be increasing and positive")
+        if self.pair_geometry_mode not in {"legacy", "local_center"}:
+            raise ValueError("pair_geometry_mode must be 'legacy' or 'local_center'")
+        if self.pair_self_conditioned_geometry and self.pair_geometry_mode != "local_center":
+            raise ValueError("pair_self_conditioned_geometry requires local_center geometry")
+        if self.intermediate_distogram_feedback and not self.intermediate_distograms:
+            raise ValueError("intermediate distogram feedback requires intermediate_distograms")
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,7 @@ class LossConfig:
     aatype_sigma_max: float = 0.5
     smooth_lddt_weight: float = 1.0
     distogram_weight: float = 0.5
+    intermediate_distogram_weight: float = 0.0
     polar_aatypes: str = "RNDCEQHKSTY"
     polar_weight: float = 2.0
     smooth_lddt_cutoff: float = 15.0
@@ -158,6 +169,8 @@ class LossConfig:
             raise ValueError("loss polar weight and lDDT cutoff must be positive")
         if self.smooth_lddt_chunk_size <= 0:
             raise ValueError("loss.smooth_lddt_chunk_size must be positive")
+        if self.intermediate_distogram_weight < 0:
+            raise ValueError("loss intermediate distogram weight must be non-negative")
 
 
 @dataclass(frozen=True)

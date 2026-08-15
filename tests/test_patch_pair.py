@@ -33,6 +33,29 @@ def test_pair_state_uses_topology_even_when_geometry_scale_is_zero():
     assert torch.count_nonzero(pair) > 0
 
 
+def test_local_center_geometry_separates_intra_patch_and_center_distances():
+    mask = torch.ones(1, 8, dtype=torch.bool)
+    index = torch.arange(8)[None]
+    layout = build_patch_layout(mask, torch.zeros_like(index), index, torch.zeros_like(index))
+    ca = torch.zeros(1, 8, 3)
+    ca[0, :, 0] = torch.arange(8)
+    initializer = PairInitializer(
+        pair_dim=4,
+        rbf_bins=5,
+        distance_min=0.05,
+        distance_max=16.0,
+        geometry_mode="local_center",
+    )
+
+    local, center = initializer.local_center_features(layout.pack(ca), layout)
+
+    assert local.shape == (1, 2, 4, 4, 5)
+    assert center.shape == (1, 2, 2, 5)
+    assert torch.allclose(center[0, 0, 1], center[0, 1, 0])
+    assert torch.allclose(local[0, 0, 0, 1], local[0, 0, 1, 0])
+    assert not torch.allclose(center[0, 0, 0], center[0, 0, 1])
+
+
 def test_compact_distogram_expands_with_slot_bias_and_symmetry():
     mask = torch.ones(1, 5, dtype=torch.bool)
     index = torch.arange(5)[None]

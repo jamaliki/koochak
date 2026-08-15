@@ -1,0 +1,43 @@
+version: 1
+id: hierarchical-kaveh-pair-distogram-gpu-koochak-48384ce
+python: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python
+environment:
+  set:
+    PATH: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/dev/bin:/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin:/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+    PYTHONPATH: "{cwd}/external/koochak:{cwd}:/mnt/lustre/users/kiarash-eitgbi/code/fa3_pair_bias_20260702/flash-attention/hopper"
+    CC: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/dev/bin/x86_64-conda-linux-gnu-gcc
+    CXX: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/dev/bin/x86_64-conda-linux-gnu-g++
+    CUDA_HOME: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    PYTHONUNBUFFERED: "1"
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    TORCHINDUCTOR_CACHE_DIR: "{run_dir}/torchinductor-cache"
+    TRITON_CACHE_DIR: "{run_dir}/triton-cache"
+    HIERARCHICAL_KAVEH_REQUIRE_FUSED: "1"
+    KOOCHAK_GPU_HEALTH_SLURM_ACTION: exit
+    KOOCHAK_EXPECTED_SOURCE_COMMIT: 48384ceae5e986b849eaa8b5b0ed1012b2f65a7c
+  secrets: []
+  create_directories:
+    - "{run_dir}/torchinductor-cache"
+    - "{run_dir}/triton-cache"
+requirements:
+  executables:
+    - /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/dev/bin/x86_64-conda-linux-gnu-gcc
+    - /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/dev/bin/x86_64-conda-linux-gnu-g++
+  files:
+    - "{cwd}/pyproject.toml"
+    - "{cwd}/hierarchical_kaveh/train.py"
+    - "{cwd}/scripts/profile_short128_latency.py"
+    - "{cwd}/scripts/sample_short128_milestone.py"
+    - "{cwd}/external/koochak/koochak/jobs/runner.py"
+    - /mnt/lustre/users/kiarash-eitgbi/code/fa3_pair_bias_20260702/flash-attention/hopper/flash_attn_interface.py
+  packages:
+    koochak: "*"
+    numpy: 2.2.6
+    omegaconf: 2.3.0
+    torch: 2.11.0+cu130
+    triton: 3.6.0
+    wandb: "*"
+preflight: [c_compiler, cuda, torch_compile]

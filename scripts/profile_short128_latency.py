@@ -40,6 +40,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-config", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--summary-output", type=Path, default=None)
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument(
@@ -131,6 +132,9 @@ def main() -> None:
             if (summary := _summary(rows, key)) is not None
         },
     }
+    if args.summary_output is not None:
+        args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print("LATENCY_SUMMARY " + json.dumps(result, sort_keys=True), flush=True)
 
 

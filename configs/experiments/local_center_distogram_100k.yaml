@@ -1,0 +1,102 @@
+# Current-main 100k geometry decomposition experiment.
+model:
+  atom_encoder_depth: 3
+  residue_encoder_depth: 3
+  coarse_depth: 8
+  residue_decoder_depth: 3
+  atom_decoder_depth: 3
+  pair_geometry_mode: local_center
+  pair_self_conditioned_geometry: true
+  intermediate_distograms: false
+  intermediate_distogram_feedback: false
+  checkpoint_blocks: false
+
+data:
+  metadata_path: /mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/metadata.json
+  min_length: 4
+  max_length: 128
+  mean_plddt_min: 80.0
+  loop_content_max: 0.5
+  batch_size: 32
+  num_workers: 16
+  length_buckets: [64, 96, 128]
+  prefetch_factor: 1
+  shard_cache_size: null
+  pin_memory: true
+  persistent_workers: true
+  seed: 42
+
+diffusion:
+  p_mean: -1.2
+  p_std: 1.5
+  translation_std: 1.0
+
+loss:
+  coordinate_weight: 1.0
+  aatype_weight: 0.25
+  aatype_sigma_max: 0.5
+  smooth_lddt_weight: 1.0
+  distogram_weight: 0.5
+  intermediate_distogram_weight: 0.0
+  polar_weight: 1.0
+
+train:
+  max_steps: 100000
+  log_every: 25
+  ckpt_every: 10000
+  save_final: true
+  keep_last_k: 21
+  grad_accum: 1
+  grad_clip_norm: 1.0
+  nonfinite_grad_check_every: 100
+  amp: bf16
+  ddp: false
+  seed: 42
+  self_conditioning_probability: 0.5
+  prefetch_batches: 2
+  prefetch_threaded: true
+  prefetch_pipeline: two_stage
+  autocast_in_step_fn: true
+  scalarize_loss_every_step: false
+  profile_step_fn_timing: false
+  profile_step_fn_cuda_sync: true
+  compile:
+    enabled: true
+    mode: default
+    fullgraph: false
+    dynamic: false
+  require_compile: true
+  require_fused: true
+  ema:
+    enabled: true
+    profile: constant
+    decay: 0.999
+    offload_to_cpu: true
+    update_every: 2
+    compensate_update_every: true
+
+optimizer:
+  name: adam
+  lr: 0.0003
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+wandb:
+  enabled: true
+  entity: jamaliki
+  project: hierarchical-kaveh-geometry-distogram-100k
+  group: current-main-local-center-v1
+  resume: never
+
+sampling:
+  num_steps: 200
+  p_mean: -1.2
+  p_std: 1.5
+  gamma: 0.2
+  churn_tmin: 0.01
+  churn_tmax: 1.0
+  noise_scale: 1.003
+  step_scale: 2.25
+  translation_std: 1.0
+  sequence_temperature: 0.1

@@ -255,6 +255,16 @@ def compute_losses(
     )
     if prediction.distogram is None and loss_config.distogram_weight != 0.0:
         raise ValueError("Prediction.distogram is required when distogram_weight is nonzero")
+    expected_intermediate = max(model_config.coarse_depth - 1, 0)
+    if (
+        loss_config.intermediate_distogram_weight != 0.0
+        and len(prediction.intermediate_distograms) != expected_intermediate
+    ):
+        raise ValueError(
+            "intermediate distogram supervision requires one prediction after each "
+            f"non-terminal coarse layer; expected {expected_intermediate}, got "
+            f"{len(prediction.intermediate_distograms)}"
+        )
     if prediction.distogram is None:
         distogram = coordinate.new_zeros(())
     else:
@@ -268,13 +278,31 @@ def compute_losses(
             drop_diagonal=loss_config.distogram_drop_diagonal,
             implementation=patch_distogram_implementation,
         )
+    intermediate_layers = [
+        distogram_cross_entropy(
+            intermediate,
+            batch["x0"],
+            batch["residue_mask"],
+            min_bin=model_config.distogram_min,
+            max_bin=model_config.distogram_max,
+            bins=model_config.distogram_bins,
+            drop_diagonal=loss_config.distogram_drop_diagonal,
+            implementation=patch_distogram_implementation,
+        )
+        for intermediate in prediction.intermediate_distograms
+    ]
+    intermediate_distogram = (
+        torch.stack(intermediate_layers).mean()
+        if intermediate_layers else coordinate.new_zeros(())
+    )
     total = (
         loss_config.coordinate_weight * coordinate
         + loss_config.aatype_weight * aatype
         + loss_config.smooth_lddt_weight * smooth_lddt
         + loss_config.distogram_weight * distogram
+        + loss_config.intermediate_distogram_weight * intermediate_distogram
     )
-    return {
+    losses = {
         "loss": total,
         "coordinate_loss": coordinate,
         "aatype_loss": aatype,
@@ -282,6 +310,13 @@ def compute_losses(
         "smooth_lddt_loss": smooth_lddt,
         "distogram_loss": distogram,
     }
+    if intermediate_layers or loss_config.intermediate_distogram_weight != 0.0:
+        losses["intermediate_distogram_loss"] = intermediate_distogram
+    losses.update({
+        f"intermediate_distogram_layer_{index}_loss": value
+        for index, value in enumerate(intermediate_layers, start=1)
+    })
+    return losses
 
 
 __all__ = [

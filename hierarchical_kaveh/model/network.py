@@ -19,7 +19,13 @@ from .attention import (
     build_packed_layout,
 )
 from .layers import FeedForward, TimeEmbedding, checkpoint, init_linear
-from .pair import CoarseBlock, DistogramHead, PairInitializer
+from .pair import (
+    CoarseBlock,
+    DistogramHead,
+    DistogramPairFeedback,
+    IntermediateDistogramHead,
+    PairInitializer,
+)
 from .patch import Patchify, Unpatchify, build_patch_layout
 
 
@@ -140,7 +146,12 @@ class HierarchicalKaveh(nn.Module):
         )
         self.patchify = Patchify(c.node_dim, c.condition_dim)
         self.pair_initializer = PairInitializer(
-            c.pair_dim, c.pair_rbf_bins, c.pair_distance_min, c.pair_distance_max
+            c.pair_dim,
+            c.pair_rbf_bins,
+            c.pair_distance_min,
+            c.pair_distance_max,
+            c.pair_geometry_mode,
+            c.pair_self_conditioned_geometry,
         )
         self.coarse = nn.ModuleList(
             CoarseBlock(
@@ -159,6 +170,14 @@ class HierarchicalKaveh(nn.Module):
         self.atom_decoder = nn.ModuleList(AtomBlock(*atom_args) for _ in range(c.atom_decoder_depth))
         self.aatype_output = AtomSequenceHead(c.atom_dim)
         self.distogram = DistogramHead(c.pair_dim, c.distogram_bins)
+        self.intermediate_distogram = (
+            IntermediateDistogramHead(c.pair_dim, c.condition_dim, c.distogram_bins)
+            if c.intermediate_distograms else None
+        )
+        self.distogram_pair_feedback = (
+            DistogramPairFeedback(c.distogram_bins, c.pair_dim)
+            if c.intermediate_distogram_feedback else None
+        )
 
     def _validate(self, inputs: DenoiserInput) -> tuple[Tensor, Tensor]:
         coordinates, atom_mask = inputs.coordinates, inputs.atom_mask.bool()
@@ -216,7 +235,13 @@ class HierarchicalKaveh(nn.Module):
             x = checkpoint(block, x, condition, mask, positions, enabled=self.config.checkpoint_blocks)
         return x
 
-    def forward(self, inputs: DenoiserInput, *, compute_distogram: bool = True) -> Prediction:
+    def forward(
+        self,
+        inputs: DenoiserInput,
+        *,
+        compute_distogram: bool = True,
+        compute_intermediate_distograms: bool = False,
+    ) -> Prediction:
         atom_mask, residue_mask = self._validate(inputs)
         raw_coordinates = inputs.coordinates
         sigma = _broadcast_sigma(inputs.sigma, raw_coordinates)
@@ -227,7 +252,8 @@ class HierarchicalKaveh(nn.Module):
         sigma_sq = sigma_sq / (14.0 * mask_float.sum(1, keepdim=True)).clamp_min(1.0).unsqueeze(-1)
         c_in = (self.config.sigma_data**2 + sigma_sq).rsqrt()
         coordinates = c_in[..., None] * raw_coordinates
-        self_conditioned_coordinates = inputs.self_conditioned_coordinates
+        raw_self_conditioned_coordinates = inputs.self_conditioned_coordinates
+        self_conditioned_coordinates = raw_self_conditioned_coordinates
         if self_conditioned_coordinates is not None:
             if self_conditioned_coordinates.shape != raw_coordinates.shape:
                 raise ValueError("self_conditioned_coordinates must match coordinates")
@@ -283,9 +309,17 @@ class HierarchicalKaveh(nn.Module):
         coarse_positions = torch.cat((register_positions, patch_positions), 1)
 
         ca_slots = layout.pack(raw_coordinates[..., 1, :])
+        sc_ca_slots = None
+        if raw_self_conditioned_coordinates is not None and self.config.pair_self_conditioned_geometry:
+            sc_ca_slots = layout.pack(raw_self_conditioned_coordinates[..., 1, :])
         pair_dtype = torch.bfloat16 if raw_coordinates.is_cuda else coarse_x.dtype
-        pair = self.pair_initializer(ca_slots, layout, pair_dtype)
-        for block in self.coarse:
+        pair = self.pair_initializer(ca_slots, layout, pair_dtype, sc_ca_slots)
+        structure_condition = (
+            (residue_condition * residue_mask[..., None]).sum(1)
+            / residue_mask.sum(1, keepdim=True).clamp_min(1).to(residue_condition.dtype)
+        )
+        intermediate_distograms = []
+        for layer_index, block in enumerate(self.coarse):
             if self.config.checkpoint_blocks and torch.is_grad_enabled():
                 coarse_x, pair = torch.utils.checkpoint.checkpoint(
                     block, coarse_x, coarse_condition, pair, coarse_mask,
@@ -295,6 +329,17 @@ class HierarchicalKaveh(nn.Module):
                 coarse_x, pair = block(
                     coarse_x, coarse_condition, pair, coarse_mask, coarse_positions, layout.pair_mask
                 )
+            if compute_intermediate_distograms and layer_index + 1 < len(self.coarse):
+                if self.intermediate_distogram is None:
+                    raise ValueError(
+                        "intermediate distograms requested but model.intermediate_distograms=false"
+                    )
+                intermediate = self.intermediate_distogram(pair, layout, structure_condition)
+                intermediate_distograms.append(intermediate)
+                if self.distogram_pair_feedback is not None:
+                    pair = self.distogram_pair_feedback(
+                        pair, intermediate.coarse_logits, layout.pair_mask
+                    )
 
         residue_x = self.unpatchify(residue_skip, coarse_x[:, REGISTER_COUNT:], layout)
         tokens = torch.cat((coarse_x[:, :REGISTER_COUNT], residue_x), 1)
@@ -324,15 +369,30 @@ class HierarchicalKaveh(nn.Module):
             coordinates=predicted_coordinates,
             aatype_logits=aatype_logits,
             distogram=self.distogram(pair, layout) if compute_distogram else None,
+            intermediate_distograms=tuple(intermediate_distograms),
         )
 
-    def denoise(self, inputs: DenoiserInput, *, compute_distogram: bool = True) -> Prediction:
+    def denoise(
+        self,
+        inputs: DenoiserInput,
+        *,
+        compute_distogram: bool = True,
+        compute_intermediate_distograms: bool = False,
+    ) -> Prediction:
         """Named alias used by the sampling runtime."""
 
-        return self(inputs, compute_distogram=compute_distogram)
+        return self(
+            inputs,
+            compute_distogram=compute_distogram,
+            compute_intermediate_distograms=compute_intermediate_distograms,
+        )
 
     @torch.no_grad()
     def self_condition(self, inputs: DenoiserInput) -> Prediction:
         """Cheap first pass for stochastic self-conditioning."""
 
-        return self(inputs, compute_distogram=False)
+        return self(
+            inputs,
+            compute_distogram=False,
+            compute_intermediate_distograms=False,
+        )

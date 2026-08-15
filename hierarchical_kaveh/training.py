@@ -104,10 +104,13 @@ class PallatomTrainingStep:
         inputs = denoiser_input(batch, previous)
 
         with autocast():
-            output = model(
-                inputs,
-                compute_distogram=self.loss_config.distogram_weight > 0.0,
-            )
+            model_kwargs = {"compute_distogram": self.loss_config.distogram_weight > 0.0}
+            if (
+                self.loss_config.intermediate_distogram_weight > 0.0
+                or self.model_config.intermediate_distogram_feedback
+            ):
+                model_kwargs["compute_intermediate_distograms"] = True
+            output = model(inputs, **model_kwargs)
             losses = compute_losses(
                 output,
                 inputs,
@@ -129,6 +132,8 @@ class PallatomTrainingStep:
             "node_slot_count": batch["model_atom_mask"].sum(),
             "supervised_slot_count": batch["coordinate_mask"].sum(),
         }
+        if "intermediate_distogram_loss" in losses:
+            metrics["intermediate_distogram_loss"] = losses["intermediate_distogram_loss"].detach()
         metrics.update({key: batch[key] for key in _BATCH_TELEMETRY if key in batch})
         return metrics
 

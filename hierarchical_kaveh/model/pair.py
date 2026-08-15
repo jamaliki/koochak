@@ -11,12 +11,20 @@ from torch import Tensor, nn
 from ..types import CompactDistogram
 from .attention import _normalize_qkv
 from .backend import fused_failure
-from .layers import FeedForward, GEGLU, RMSNorm, RotaryEmbedding, init_linear, signed_log_separation
+from .layers import (
+    AdaptiveRMSNorm,
+    FeedForward,
+    GEGLU,
+    RMSNorm,
+    RotaryEmbedding,
+    init_linear,
+    signed_log_separation,
+)
 from .patch import PATCH_SIZE, PatchLayout
 
 
 class PairInitializer(nn.Module):
-    """Build the pair state once from static topology and all 16 ordered CA distances."""
+    """Build the compact pair state from static topology and configured geometry."""
 
     def __init__(
         self,
@@ -24,16 +32,68 @@ class PairInitializer(nn.Module):
         rbf_bins: int,
         distance_min: float,
         distance_max: float,
+        geometry_mode: str = "legacy",
+        self_conditioned_geometry: bool = False,
     ):
         super().__init__()
+        if geometry_mode not in {"legacy", "local_center"}:
+            raise ValueError("geometry_mode must be 'legacy' or 'local_center'")
         self.rbf_bins = rbf_bins
         self.distance_min = distance_min
         self.distance_max = distance_max
+        self.geometry_mode = geometry_mode
+        self.self_conditioned_geometry = bool(self_conditioned_geometry)
         self.static_projection = nn.Linear(PATCH_SIZE**2 * 6, pair_dim, bias=False)
         self.geometry_projection = init_linear(
             nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False)
         )
         self.geometry_scale = nn.Parameter(torch.tensor(0.1))
+        if geometry_mode == "local_center":
+            self.local_projection = init_linear(
+                nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False)
+            )
+            self.center_projection = init_linear(nn.Linear(rbf_bins, pair_dim, bias=False))
+            self.local_scale = nn.Parameter(torch.tensor(1.0))
+            self.center_scale = nn.Parameter(torch.tensor(1.0))
+            if self_conditioned_geometry:
+                self.sc_local_projection = init_linear(
+                    nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False), "zero"
+                )
+                self.sc_center_projection = init_linear(
+                    nn.Linear(rbf_bins, pair_dim, bias=False), "zero"
+                )
+
+    def _rbf(self, distance: Tensor) -> Tensor:
+        centers = torch.linspace(
+            self.distance_min, self.distance_max, self.rbf_bins,
+            dtype=distance.dtype, device=distance.device,
+        )
+        width = max(
+            (self.distance_max - self.distance_min) / max(self.rbf_bins - 1, 1),
+            1e-6,
+        )
+        return torch.exp(-0.5 * ((distance[..., None] - centers) / width).square())
+
+    def local_center_features(
+        self, ca_slots: Tensor, layout: PatchLayout,
+    ) -> tuple[Tensor, Tensor]:
+        """Return all local 4x4 RBFs and masked patch-center-pair RBFs."""
+
+        slot_mask = layout.slot_mask.to(ca_slots.dtype)
+        local_displacement = ca_slots[:, :, :, None, :] - ca_slots[:, :, None, :, :]
+        local_distance = torch.linalg.vector_norm(local_displacement.float(), dim=-1)
+        local_rbf = self._rbf(local_distance)
+        local_mask = slot_mask[:, :, :, None] * slot_mask[:, :, None, :]
+        local_rbf = local_rbf * local_mask[..., None]
+
+        counts = slot_mask.sum(-1, keepdim=True).clamp_min(1.0)
+        centers = (ca_slots * slot_mask[..., None]).sum(-2) / counts
+        center_displacement = centers[:, :, None, :] - centers[:, None, :, :]
+        center_distance = torch.linalg.vector_norm(center_displacement.float(), dim=-1)
+        center_rbf = self._rbf(center_distance)
+        center_mask = layout.patch_mask[:, :, None] & layout.patch_mask[:, None, :]
+        center_rbf = center_rbf * center_mask[..., None].to(center_rbf.dtype)
+        return local_rbf, center_rbf
 
     def geometry_features(self, ca_slots: Tensor, layout: PatchLayout) -> Tensor:
         """Return ordered `[B,M,M,4,4,R]` distance RBFs (a useful test seam)."""
@@ -50,6 +110,19 @@ class PairInitializer(nn.Module):
         return rbf * slot_pair_mask[..., None].to(rbf.dtype)
 
     def _geometry(self, ca_slots: Tensor, layout: PatchLayout) -> Tensor:
+        if self.geometry_mode == "local_center":
+            local, center = self.local_center_features(ca_slots, layout)
+            local_embedding = self.local_projection(
+                local.flatten(2).to(self.local_projection.weight.dtype)
+            )
+            center_embedding = self.center_projection(
+                center.to(self.center_projection.weight.dtype)
+            )
+            return (
+                self.local_scale.to(local_embedding.dtype)
+                * (local_embedding[:, :, None, :] + local_embedding[:, None, :, :])
+                + self.center_scale.to(center_embedding.dtype) * center_embedding
+            )
         if ca_slots.is_cuda and ca_slots.shape[1] >= 96:
             try:
                 from .kernels.patch_pair import project_patch_distances
@@ -74,9 +147,29 @@ class PairInitializer(nn.Module):
         features = features * valid[..., None]
         return self.static_projection(features.flatten(3).to(self.static_projection.weight.dtype))
 
-    def forward(self, ca_slots: Tensor, layout: PatchLayout, dtype: torch.dtype) -> Tensor:
+    def forward(
+        self,
+        ca_slots: Tensor,
+        layout: PatchLayout,
+        dtype: torch.dtype,
+        self_conditioned_ca_slots: Tensor | None = None,
+    ) -> Tensor:
         pair = self._static(layout).to(dtype)
         pair = pair + self.geometry_scale.to(dtype) * self._geometry(ca_slots, layout).to(dtype)
+        if self.geometry_mode == "local_center" and self.self_conditioned_geometry:
+            if self_conditioned_ca_slots is not None:
+                local, center = self.local_center_features(self_conditioned_ca_slots, layout)
+                local_embedding = self.sc_local_projection(
+                    local.flatten(2).to(self.sc_local_projection.weight.dtype)
+                )
+                center_embedding = self.sc_center_projection(
+                    center.to(self.sc_center_projection.weight.dtype)
+                )
+                pair = pair + (
+                    local_embedding[:, :, None, :]
+                    + local_embedding[:, None, :, :]
+                    + center_embedding
+                ).to(dtype)
         return pair * layout.pair_mask[..., None].to(dtype)
 
 
@@ -316,6 +409,43 @@ class CoarseBlock(nn.Module):
         x = x + self.attention(x, condition, pair, mask, positions)
         x = self.ffn(x, condition) * mask[..., None].to(x.dtype)
         return x, self.pair_multiplication(pair, pair_mask)
+
+
+class IntermediateDistogramHead(nn.Module):
+    """Shared time-conditioned head for non-terminal coarse pair states."""
+
+    def __init__(self, pair_dim: int, condition_dim: int, bins: int):
+        super().__init__()
+        self.norm = AdaptiveRMSNorm(pair_dim, condition_dim)
+        self.output = init_linear(nn.Linear(pair_dim, bins))
+        self.slot_bias = nn.Parameter(torch.zeros(PATCH_SIZE, PATCH_SIZE, bins))
+
+    def forward(
+        self, pair: Tensor, layout: PatchLayout, condition: Tensor,
+    ) -> CompactDistogram:
+        logits = self.output(self.norm(pair, condition[:, None, None]))
+        return CompactDistogram(
+            coarse_logits=logits,
+            slot_bias=self.slot_bias,
+            residue_to_patch=layout.residue_to_patch,
+            residue_slot=layout.residue_slot,
+            patch_residue_index=layout.patch_residue_index,
+            residue_mask=layout.residue_to_patch >= 0,
+            symmetrize=True,
+        )
+
+
+class DistogramPairFeedback(nn.Module):
+    """Project an intermediate coarse distogram back into the pair state."""
+
+    def __init__(self, bins: int, pair_dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(bins, elementwise_affine=False)
+        self.projection = init_linear(nn.Linear(bins, pair_dim, bias=False), "zero")
+
+    def forward(self, pair: Tensor, logits: Tensor, pair_mask: Tensor) -> Tensor:
+        update = self.projection(self.norm(logits))
+        return (pair + update) * pair_mask[..., None].to(pair.dtype)
 
 
 class DistogramHead(nn.Module):
