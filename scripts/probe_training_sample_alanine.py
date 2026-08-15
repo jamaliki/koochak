@@ -30,6 +30,39 @@ def _metrics(logits: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
     }
 
 
+def _corr(left: torch.Tensor, right: torch.Tensor) -> float:
+    left, right = left.float(), right.float()
+    left, right = left - left.mean(), right - right.mean()
+    denominator = left.square().mean().sqrt() * right.square().mean().sqrt()
+    return float((left * right).mean().div(denominator.clamp_min(1e-8)))
+
+
+def _coordinate_metrics(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    resolved_mask: torch.Tensor,
+    logits: torch.Tensor,
+) -> dict[str, float]:
+    error = (predicted.float() - target.float()).square().sum(-1).sqrt()
+    backbone = resolved_mask[:, :4]
+    sidechain = resolved_mask[:, 4:]
+    probabilities = logits.float().softmax(-1)[..., 0]
+    sidechain_residue_error = error[:, 4:].masked_fill(~sidechain, 0).sum(-1) / sidechain.sum(-1).clamp_min(1)
+    ca_cb_mask = resolved_mask[:, 4]
+    predicted_cb = torch.linalg.vector_norm(predicted[:, 4] - predicted[:, 1], dim=-1)
+    target_cb = torch.linalg.vector_norm(target[:, 4] - target[:, 1], dim=-1)
+    return {
+        "backbone_atom_rms": float(error[:, :4][backbone].square().mean().sqrt()),
+        "sidechain_atom_rms": float(error[:, 4:][sidechain].square().mean().sqrt()) if bool(sidechain.any()) else 0.0,
+        "sidechain_residue_error_rms": float(sidechain_residue_error.square().mean().sqrt()),
+        "ca_cb_length_abs_error": float((predicted_cb[ca_cb_mask] - target_cb[ca_cb_mask]).abs().mean()) if bool(ca_cb_mask.any()) else 0.0,
+        "predicted_ca_cb_length": float(predicted_cb[ca_cb_mask].mean()) if bool(ca_cb_mask.any()) else 0.0,
+        "target_ca_cb_length": float(target_cb[ca_cb_mask].mean()) if bool(ca_cb_mask.any()) else 0.0,
+        "ala_sidechain_error_corr": _corr(probabilities, sidechain_residue_error),
+        "ala_backbone_error_corr": _corr(probabilities, error[:, :4].masked_fill(~backbone, 0).mean(-1)),
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True)
@@ -67,6 +100,7 @@ def main() -> None:
     residue_mask = atom_mask[:, 1]
     n = len(clean["aatype"])
     target_aatype = clean["aatype"].to(device)
+    resolved_mask = clean["resolved_atom_mask"].to(device)
     unknown = torch.full((1, n), 20, dtype=torch.long, device=device)
     residue_index = clean["res_idx"].to(device)[None]
     chain_index = clean["chain_idx"].to(device)[None]
@@ -94,7 +128,14 @@ def main() -> None:
                 )
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                     prediction = model(inputs, compute_distogram=False, compute_intermediate_distograms=True)
-                rows.append({"step": step, "sigma": float(sigma), **_metrics(prediction.aatype_logits[0, residue_mask], target_aatype[residue_mask])})
+                rows.append({
+                    "step": step, "sigma": float(sigma),
+                    **_metrics(prediction.aatype_logits[0, residue_mask], target_aatype[residue_mask]),
+                    **_coordinate_metrics(
+                        prediction.coordinates[0], target, resolved_mask,
+                        prediction.aatype_logits[0],
+                    ),
+                })
                 score = (coordinates - prediction.coordinates) / sigma.clamp_min(1e-6)
                 coordinates = coordinates + 2.25 * (sigma_next - sigma) * score[0]
                 previous = prediction.coordinates.detach()
