@@ -61,24 +61,35 @@ only after the cross-patch feature has been evaluated.
 ## Cross-patch run status and continuation
 
 The cross-patch arms were configured correctly (`max_steps: 100000`,
-`ckpt_every: 5000`, explicit output directories, and no intermediate feedback),
-but the first workflow stopped after writing only the 5k checkpoint. There was
-no 25k/100k checkpoint or sampling manifest, so those arms were not completed
-and were not included in the comparison above. A first resume attempt then
-hit a Slurm OOM kill in a DataLoader worker at about 10k: it requested 128 GB
-while the 16-worker resident-shard configuration requires the production
-240 GB train request.
+`ckpt_every: 5000`, explicit output directories, and no intermediate feedback).
+The first workflow stopped after writing only the 5k checkpoint, and a 128 GB
+resume hit a Slurm OOM kill in a DataLoader worker at about 10k. The 240 GB
+resume subsequently wrote matched 25k checkpoints and continued producing
+training log entries; the Scruffy terminal records are stale relative to the
+remote run directory, so the checkpoint/log files are the authoritative status.
 
-Both arms are now resumed from their latest valid checkpoints with the
-production memory request:
+Verified 25k artifacts:
+
+- `cross_patch/step000025000.pt`
+- `cross_patch_extrema/step000025000.pt`
+- 96 samples per arm under `samples/step025000/*_corrected` (32 each at
+  lengths 64, 96, and 128)
+
+The matched 25k sample manifests report compiled sampling. These arms do not
+use intermediate prediction feedback, so compilation cannot disable recycling
+in them. For the intermediate arm, the original compiled panel is not treated
+as authoritative: a corrected non-compiled 100k panel was generated with
+intermediate feedback enabled from the model config.
+
+The resumed cross arms are:
 
 - `cross_patch`: Scruffy job `job-c35f590fecdb2f9844d8`
 - `cross_patch_extrema`: Scruffy job `job-ce87a4af8f09271c67b7`
 
 They are running from
 `/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-cross-100k/c248673`
-with `--resume latest`, 240 GB per GPU, and the existing 100k configs. At the
-restart check both were active and had advanced beyond step 10k without a new
-OOM. The next gate is
-the matched 25k sample panel; only a cross-patch arm that preserves sequence
-diversity there should be allowed to run to and be promoted from 100k.
+with `--resume latest`, 240 GB per GPU, and the existing 100k configs. The
+latest remote log check reached step 28,950 in both arms with approximately
+0.123 s/step from the 25k-to-28.95k interval, implying roughly 2 h 25 min to
+100k if that rate holds. Only a cross-patch arm that preserves sequence
+diversity at the matched 25k panel should be promoted from 100k.
