@@ -147,7 +147,10 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if args.precision == "bf16" else torch.float32
     model = HierarchicalKaveh(config.model).to(device)
-    checkpoint = load_checkpoint(model, args.checkpoint, config=config, use_ema=True)
+    # The 25k rescue checkpoint predates newly added default ModelConfig fields.
+    # The strict state-dict load still validates tensor names and shapes; omit
+    # only the serialized-config equality check for this read-only probe.
+    checkpoint = load_checkpoint(model, args.checkpoint, config=None, use_ema=True)
     model.eval()
     conditions = {
         "feedback_off": (False, 0.0),
