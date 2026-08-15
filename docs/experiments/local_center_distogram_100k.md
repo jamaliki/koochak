@@ -64,17 +64,21 @@ The cross-patch arms were configured correctly (`max_steps: 100000`,
 `ckpt_every: 5000`, explicit output directories, and no intermediate feedback),
 but the first workflow stopped after writing only the 5k checkpoint. There was
 no 25k/100k checkpoint or sampling manifest, so those arms were not completed
-and were not included in the comparison above. The interruption was a workflow
-termination rather than an intentional 5k limit.
+and were not included in the comparison above. A first resume attempt then
+hit a Slurm OOM kill in a DataLoader worker at about 10k: it requested 128 GB
+while the 16-worker resident-shard configuration requires the production
+240 GB train request.
 
-Both arms have now been resumed from their valid 5k checkpoints:
+Both arms are now resumed from their latest valid checkpoints with the
+production memory request:
 
-- `cross_patch`: Scruffy job `job-93c1bce7db16bd311503`
-- `cross_patch_extrema`: Scruffy job `job-e8357eb8b653a514e645`
+- `cross_patch`: Scruffy job `job-c35f590fecdb2f9844d8`
+- `cross_patch_extrema`: Scruffy job `job-ce87a4af8f09271c67b7`
 
 They are running from
 `/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-cross-100k/c248673`
-with `--resume latest` and the existing 100k configs. At the restart check
-both were active and had advanced to approximately step 8k. The next gate is
+with `--resume latest`, 240 GB per GPU, and the existing 100k configs. At the
+restart check both were active and had advanced beyond step 10k without a new
+OOM. The next gate is
 the matched 25k sample panel; only a cross-patch arm that preserves sequence
 diversity there should be allowed to run to and be promoted from 100k.
