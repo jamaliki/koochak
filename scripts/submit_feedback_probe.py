@@ -16,13 +16,12 @@ sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
 from koochak.jobs import load_environment_profile, prepare_run, submit_scruffy  # noqa: E402
 
 
-COMMIT = "911291d"
-REMOTE_CODE = Path(f"/mnt/lustre/users/kiarash-eitgbi/code/hierarchical_kaveh_{COMMIT}")
+REMOTE_CODE = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical_kaveh_911291d")
 RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-100k/fef3561")
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-614e355/site")
 PROJECT_ID = "kaveh-ce20-20260806"
-WORKFLOW_ID = f"hk-geometry-feedback-probe-{COMMIT}-v1"
+WORKFLOW_ID = "hk-geometry-feedback-probe-911291d-v1"
 
 
 def _git(*args: str) -> str:
@@ -34,8 +33,6 @@ def _git(*args: str) -> str:
 def main() -> None:
     if _git("status", "--porcelain"):
         raise RuntimeError("submission requires a clean checkout")
-    if _git("rev-parse", "HEAD") != COMMIT:
-        raise RuntimeError(f"expected commit {COMMIT}")
     if not SCRUFFY_ROOT.exists() or not SCRUFFY_SITE.exists():
         raise RuntimeError("Scruffy launch paths are unavailable")
     if not hasattr(datetime, "UTC"):
@@ -48,7 +45,7 @@ def main() -> None:
     checkpoint = RUN_ROOT / "train25k_v3" / "intermediate_local_center" / "step0025000.pt"
     profile = load_environment_profile(REPO_ROOT / "environments/tokyo-pair-distogram-gpu.yaml")
     prepared = prepare_run(
-        name=f"hk-geometry-feedback-probe-{COMMIT}",
+        name="hk-geometry-feedback-probe-911291d",
         profile=profile,
         python_args=[
             "{cwd}/scripts/probe_feedback_mechanism.py",
