@@ -189,10 +189,8 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
         ))
 
     for step in MILESTONES:
-        sample_ids = []
         for arm in TRAIN_ARMS:
             task_id = f"sample-{step}-{arm}"
-            sample_ids.append(task_id)
             run_dir = output_root / "samples" / f"step{step:06d}" / arm
             prepared = prepare_run(
                 name=f"hk-geometry-dist-sample-{step}-{arm}-{short}",
@@ -215,23 +213,6 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
                 task_id=task_id, run=prepared, resource="sample",
                 needs=[{"task_id": f"train-{arm}", "condition": "succeeded"}],
             ))
-        analysis_dir = output_root / "analysis" / f"step{step:06d}"
-        prepared = prepare_run(
-            name=f"hk-geometry-dist-analyze-{step}-{short}",
-            profile=cpu_profile,
-            python_args=[
-                "{cwd}/scripts/analyze_pair_distogram_samples.py",
-                str(output_root / "samples" / f"step{step:06d}"),
-                "--checkpoint-step", str(step),
-                "--samples-per-length", "32",
-                "--output", str(analysis_dir / "comparison.json"),
-            ],
-            cwd=str(remote_cwd), run_dir=str(analysis_dir), base_config=None,
-        )
-        tasks.append(dict(
-            task_id=f"analyze-{step}", run=prepared, resource="cpu",
-            needs=[{"task_id": item, "condition": "succeeded"} for item in sample_ids],
-        ))
     return workflow_id, tasks
 
 

@@ -20,7 +20,6 @@ requirements:
   files:
     - "{cwd}/pyproject.toml"
     - "{cwd}/scripts/check_throughput_guard.py"
-    - "{cwd}/scripts/analyze_pair_distogram_samples.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
   packages:
     koochak: "*"
