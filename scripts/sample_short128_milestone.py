@@ -28,6 +28,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--raw", action="store_true", help="Use raw rather than EMA weights.")
+    parser.add_argument(
+        "--allow-checkpoint-config-mismatch",
+        action="store_true",
+        help="Load weights strictly while allowing additive checkpoint/config schema differences.",
+    )
     parser.add_argument("--compile", action="store_true", help="Compile the inference model.")
     return parser
 
@@ -54,7 +59,12 @@ def main(argv: list[str] | None = None) -> None:
     dtype = torch.bfloat16 if args.precision == "bf16" else torch.float32
     config = load_config(args.config)
     model = HierarchicalKaveh(config.model).to(device)
-    checkpoint = load_checkpoint(model, args.checkpoint, config=config, use_ema=not args.raw)
+    checkpoint = load_checkpoint(
+        model,
+        args.checkpoint,
+        config=None if args.allow_checkpoint_config_mismatch else config,
+        use_ema=not args.raw,
+    )
     if args.compile:
         model = torch.compile(model, mode=config.train.compile.mode, dynamic=False)
 
