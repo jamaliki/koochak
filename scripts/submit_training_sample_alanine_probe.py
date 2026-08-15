@@ -7,6 +7,7 @@ import datetime
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/g
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-614e355/site")
 PROJECT_ID = "kaveh-ce20-20260806"
-WORKFLOW_ID = "hk-geometry-alanine-training-sample-probe-a571c01-v1"
+WORKFLOW_ID = "hk-geometry-alanine-training-sample-probe-a0685fe-v2"
 
 
 def _git(*args: str) -> str:
@@ -36,6 +37,10 @@ def main() -> None:
     config = RUN_ROOT / "train" / "intermediate_local_center" / "config.yaml"
     checkpoint = RUN_ROOT / "train" / "intermediate_local_center" / "step0100000.pt"
     profile = load_environment_profile(REPO_ROOT / "environments/tokyo-pair-distogram-gpu.yaml")
+    profile = replace(
+        profile,
+        variables={**profile.variables, "HIERARCHICAL_KAVEH_REQUIRE_FUSED": "0"},
+    )
     prepared = prepare_run(
         name="hk-geometry-alanine-training-sample-probe-a571c01",
         profile=profile,
