@@ -35,6 +35,7 @@ class PairInitializer(nn.Module):
         geometry_mode: str = "legacy",
         self_conditioned_geometry: bool = False,
         cross_patch_geometry: bool = False,
+        cross_patch_extrema: bool = False,
     ):
         super().__init__()
         if geometry_mode not in {"legacy", "local_center"}:
@@ -44,7 +45,10 @@ class PairInitializer(nn.Module):
         self.distance_max = distance_max
         self.geometry_mode = geometry_mode
         self.cross_patch_geometry = bool(cross_patch_geometry)
+        self.cross_patch_extrema = bool(cross_patch_extrema)
         self.self_conditioned_geometry = bool(self_conditioned_geometry)
+        if self.cross_patch_extrema and not self.cross_patch_geometry:
+            raise ValueError("cross_patch_extrema requires cross_patch_geometry")
         self.static_projection = nn.Linear(PATCH_SIZE**2 * 6, pair_dim, bias=False)
         self.geometry_projection = init_linear(
             nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False)
@@ -62,6 +66,11 @@ class PairInitializer(nn.Module):
                     nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False)
                 )
                 self.cross_scale = nn.Parameter(torch.tensor(1.0))
+                if self.cross_patch_extrema:
+                    self.cross_extrema_projection = init_linear(
+                        nn.Linear(2 * rbf_bins, pair_dim, bias=False)
+                    )
+                    self.cross_extrema_scale = nn.Parameter(torch.tensor(1.0))
             if self_conditioned_geometry:
                 self.sc_local_projection = init_linear(
                     nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False), "zero"
@@ -73,6 +82,10 @@ class PairInitializer(nn.Module):
                     self.sc_cross_projection = init_linear(
                         nn.Linear(PATCH_SIZE**2 * rbf_bins, pair_dim, bias=False), "zero"
                     )
+                    if self.cross_patch_extrema:
+                        self.sc_cross_extrema_projection = init_linear(
+                            nn.Linear(2 * rbf_bins, pair_dim, bias=False), "zero"
+                        )
 
     def _rbf(self, distance: Tensor) -> Tensor:
         centers = torch.linspace(
@@ -139,6 +152,14 @@ class PairInitializer(nn.Module):
                     ca_slots, layout, self.cross_projection
                 )
                 geometry = geometry + self.cross_scale.to(cross_embedding.dtype) * cross_embedding
+                if self.cross_patch_extrema:
+                    extrema = self.cross_patch_extrema_features(ca_slots, layout)
+                    extrema_embedding = self.cross_extrema_projection(
+                        extrema.flatten(3).to(self.cross_extrema_projection.weight.dtype)
+                    )
+                    geometry = geometry + (
+                        self.cross_extrema_scale.to(extrema_embedding.dtype) * extrema_embedding
+                    )
             return geometry
         if ca_slots.is_cuda and ca_slots.shape[1] >= 96:
             try:
@@ -168,6 +189,21 @@ class PairInitializer(nn.Module):
                 fused_failure("p=4 cross-patch RBF geometry projection", error)
         rbf = self.geometry_features(ca_slots, layout)
         return projection(rbf.flatten(3).to(projection.weight.dtype))
+
+    def cross_patch_extrema_features(
+        self, ca_slots: Tensor, layout: PatchLayout,
+    ) -> Tensor:
+        """Return masked RBFs for minimum and maximum cross-patch distances."""
+
+        displacement = ca_slots[:, :, None, :, None, :] - ca_slots[:, None, :, None, :, :]
+        distance = torch.linalg.vector_norm(displacement.float(), dim=-1)
+        slot_pair_mask = layout.slot_mask[:, :, None, :, None] & layout.slot_mask[:, None, :, None]
+        pair_mask = layout.patch_mask[:, :, None] & layout.patch_mask[:, None, :]
+        min_distance = distance.masked_fill(~slot_pair_mask, float("inf")).amin((-1, -2))
+        max_distance = distance.masked_fill(~slot_pair_mask, float("-inf")).amax((-1, -2))
+        extrema = torch.stack((min_distance, max_distance), dim=-1)
+        extrema = torch.where(pair_mask[..., None], extrema, torch.zeros_like(extrema))
+        return self._rbf(extrema) * pair_mask[..., None, None].to(extrema.dtype)
 
     def _static(self, layout: PatchLayout) -> Tensor:
         delta = layout.slot_residue_index[:, :, None, :, None] - layout.slot_residue_index[:, None, :, None]
@@ -207,6 +243,13 @@ class PairInitializer(nn.Module):
                     pair = pair + self._cross_patch_geometry(
                         self_conditioned_ca_slots, layout, self.sc_cross_projection
                     ).to(dtype)
+                    if self.cross_patch_extrema:
+                        extrema = self.cross_patch_extrema_features(
+                            self_conditioned_ca_slots, layout
+                        )
+                        pair = pair + self.sc_cross_extrema_projection(
+                            extrema.flatten(3).to(self.sc_cross_extrema_projection.weight.dtype)
+                        ).to(dtype)
         return pair * layout.pair_mask[..., None].to(dtype)
 
 

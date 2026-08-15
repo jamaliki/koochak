@@ -68,12 +68,15 @@ def test_local_center_can_add_all_cross_patch_distances():
         distance_max=16.0,
         geometry_mode="local_center",
         cross_patch_geometry=True,
+        cross_patch_extrema=True,
     )
 
     cross = initializer.geometry_features(ca, layout)
+    extrema = initializer.cross_patch_extrema_features(ca, layout)
     pair = initializer(ca, layout, torch.float32)
 
     assert cross.shape == (1, 2, 2, 4, 4, 5)
+    assert extrema.shape == (1, 2, 2, 2, 5)
     assert pair.shape == (1, 2, 2, 4)
     assert torch.isfinite(pair).all()
 

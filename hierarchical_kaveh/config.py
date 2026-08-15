@@ -39,6 +39,7 @@ class ModelConfig:
     pair_distance_max: float = 22.0
     pair_geometry_mode: str = "legacy"
     pair_cross_patch_geometry: bool = False
+    pair_cross_patch_extrema: bool = False
     pair_self_conditioned_geometry: bool = False
     distogram_bins: int = 64
     distogram_min: float = 2.3125
@@ -89,6 +90,8 @@ class ModelConfig:
             raise ValueError("pair_geometry_mode must be 'legacy' or 'local_center'")
         if self.pair_cross_patch_geometry and self.pair_geometry_mode != "local_center":
             raise ValueError("pair_cross_patch_geometry requires local_center geometry")
+        if self.pair_cross_patch_extrema and not self.pair_cross_patch_geometry:
+            raise ValueError("pair_cross_patch_extrema requires pair_cross_patch_geometry")
         if self.pair_self_conditioned_geometry and self.pair_geometry_mode != "local_center":
             raise ValueError("pair_self_conditioned_geometry requires local_center geometry")
         if self.intermediate_distogram_feedback and not self.intermediate_distograms:
