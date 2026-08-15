@@ -58,6 +58,35 @@ promote the current intermediate configuration. A follow-up recycling test
 should reduce or anneal `loss.intermediate_distogram_weight` (currently 0.25)
 only after the cross-patch feature has been evaluated.
 
+## Corrected cross-patch analysis at 25k
+
+The two cross-patch arms were analyzed from the corrected 25k sample
+directories only (96 samples per arm, 32 each at lengths 64/96/128). The older
+non-suffixed sample directories are retained for provenance but are not used in
+this comparison.
+
+| Metric | `local_center` 25k | `cross_patch` 25k | `cross_patch_extrema` 25k |
+| --- | ---: | ---: | ---: |
+| Effective alphabet | 4.825 | **5.558** | 4.552 |
+| Entropy (bits) | 2.205 | **2.390** | 2.098 |
+| Maximum residue fraction | 0.550 | **0.506** | 0.534 |
+| Maximum homopolymer run | 8.67 | 8.33 | **7.95** |
+| C-alpha step bad fraction | 0.000 | 0.000 | 0.000 |
+| C-alpha clashes per residue | 0.01492 | 0.01131 | **0.01004** |
+
+At 25k, adding all cross-patch distances improves both diversity and geometry
+relative to `local_center`: effective alphabet is 15% higher and clashes are
+24% lower. Adding the max/min extrema feature lowers clashes by a further 11%
+relative to `cross_patch`, but loses 18% of effective alphabet and 12% of
+entropy. The plain `cross_patch` arm is therefore the better promotion
+candidate unless the primary objective is geometry alone.
+
+The old intermediate 25k sample panel is excluded from this table because it
+was generated before the sampler recycling fix. The corrected intermediate
+100k panel (non-compiled, with model-configured feedback active) measures
+effective alphabet 4.190, entropy 1.995 bits, maximum residue fraction 0.611,
+maximum homopolymer run 10.03, and C-alpha clashes per residue 0.00274.
+
 ## Cross-patch run status and continuation
 
 The cross-patch arms were configured correctly (`max_steps: 100000`,
