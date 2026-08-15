@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> None:
     dtype = torch.bfloat16 if args.precision == "bf16" else torch.float32
     config = load_config(args.config)
     model = HierarchicalKaveh(config.model).to(device)
+    use_intermediate_feedback = bool(config.model.intermediate_distogram_feedback)
     checkpoint = load_checkpoint(
         model,
         args.checkpoint,
@@ -84,6 +85,7 @@ def main(argv: list[str] | None = None) -> None:
                 device=device,
                 dtype=dtype,
                 generator=generator,
+                use_intermediate_feedback=use_intermediate_feedback,
             )
             write_sample_batch(
                 length_dir,
@@ -104,6 +106,7 @@ def main(argv: list[str] | None = None) -> None:
         "seed": args.seed,
         "precision": args.precision,
         "compiled": args.compile,
+        "intermediate_feedback": use_intermediate_feedback,
         "sampling": asdict(config.sampling),
     }
     (output_root / "manifest.json").write_text(

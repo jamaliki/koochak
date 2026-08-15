@@ -186,8 +186,13 @@ def sample(
 
     device = torch.device(device)
     if use_intermediate_feedback is None:
+        model_config = getattr(model, "config", None)
+        if model_config is None:
+            # torch.compile wraps the model in an OptimizedModule and does
+            # not guarantee forwarding arbitrary attributes such as config.
+            model_config = getattr(getattr(model, "_orig_mod", None), "config", None)
         use_intermediate_feedback = bool(
-            getattr(getattr(model, "config", None), "intermediate_distogram_feedback", False)
+            getattr(model_config, "intermediate_distogram_feedback", False)
         )
     topology = build_topology(chain_lengths, batch_size, device)
     sigma_data = float(getattr(getattr(model, "config", None), "sigma_data", ModelConfig().sigma_data))
