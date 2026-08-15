@@ -36,8 +36,19 @@ GPU_PROFILE = REPO_ROOT / "environments/tokyo-pair-distogram-gpu.yaml"
 CPU_PROFILE = REPO_ROOT / "environments/tokyo-pair-distogram-cpu.yaml"
 MILESTONES = (10_000, 25_000, 50_000, 100_000)
 EARLY_SAMPLE_MILESTONES = frozenset({25_000})
-CANARY_ARMS = ("baseline", "local_center", "intermediate_local_center")
-TRAIN_ARMS = ("local_center", "intermediate_local_center")
+CANARY_ARMS = (
+    "baseline",
+    "local_center",
+    "intermediate_local_center",
+    "cross_patch",
+    "cross_patch_extrema",
+)
+TRAIN_ARMS = (
+    "local_center",
+    "intermediate_local_center",
+    "cross_patch",
+    "cross_patch_extrema",
+)
 
 
 def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
@@ -73,11 +84,25 @@ def _validate_checkout() -> str:
 
 def _arm_patches(arm: str, run_dir: Path, *, production: bool) -> list[ConfigPatch]:
     if arm == "baseline":
-        geometry_mode, sc_geometry, intermediate, feedback, weight = "legacy", False, False, False, 0.0
+        geometry_mode, sc_geometry, cross, extrema, intermediate, feedback, weight = (
+            "legacy", False, False, False, False, False, 0.0
+        )
     elif arm == "local_center":
-        geometry_mode, sc_geometry, intermediate, feedback, weight = "local_center", True, False, False, 0.0
+        geometry_mode, sc_geometry, cross, extrema, intermediate, feedback, weight = (
+            "local_center", True, False, False, False, False, 0.0
+        )
     elif arm == "intermediate_local_center":
-        geometry_mode, sc_geometry, intermediate, feedback, weight = "local_center", True, True, True, 0.25
+        geometry_mode, sc_geometry, cross, extrema, intermediate, feedback, weight = (
+            "local_center", True, False, False, True, True, 0.25
+        )
+    elif arm == "cross_patch":
+        geometry_mode, sc_geometry, cross, extrema, intermediate, feedback, weight = (
+            "local_center", True, True, False, False, False, 0.0
+        )
+    elif arm == "cross_patch_extrema":
+        geometry_mode, sc_geometry, cross, extrema, intermediate, feedback, weight = (
+            "local_center", True, True, True, False, False, 0.0
+        )
     else:
         raise ValueError(f"unknown arm {arm}")
     tags = [
@@ -90,15 +115,20 @@ def _arm_patches(arm: str, run_dir: Path, *, production: bool) -> list[ConfigPat
         f"intermediate-distogram={weight:g}",
         f"geometry={geometry_mode}",
         f"sc-geometry={str(sc_geometry).lower()}",
+        f"cross-patch={str(cross).lower()}",
+        f"cross-extrema={str(extrema).lower()}",
     ]
     patches = [
         ConfigPatch("model.pair_geometry_mode", geometry_mode),
         ConfigPatch("model.pair_self_conditioned_geometry", sc_geometry),
+        ConfigPatch("model.pair_cross_patch_geometry", cross),
+        ConfigPatch("model.pair_cross_patch_extrema", extrema),
         ConfigPatch("model.intermediate_distograms", intermediate),
         ConfigPatch("model.intermediate_distogram_feedback", feedback),
         ConfigPatch("loss.intermediate_distogram_weight", weight),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
+        ConfigPatch("train.ckpt_every", 5_000),
         ConfigPatch("wandb.name", f"geometry-distogram-100k-{arm}"),
         ConfigPatch("wandb.tags", tags),
     ]
