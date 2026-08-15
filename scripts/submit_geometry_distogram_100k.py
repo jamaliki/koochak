@@ -35,6 +35,7 @@ BASE_CONFIG = REPO_ROOT / "configs/experiments/local_center_distogram_100k.yaml"
 GPU_PROFILE = REPO_ROOT / "environments/tokyo-pair-distogram-gpu.yaml"
 CPU_PROFILE = REPO_ROOT / "environments/tokyo-pair-distogram-cpu.yaml"
 MILESTONES = (10_000, 25_000, 50_000, 100_000)
+EARLY_SAMPLE_MILESTONES = frozenset({25_000})
 CANARY_ARMS = ("baseline", "local_center", "intermediate_local_center")
 TRAIN_ARMS = ("local_center", "intermediate_local_center")
 
@@ -196,7 +197,11 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
                 name=f"hk-geometry-dist-sample-{step}-{arm}-{short}",
                 profile=gpu_profile,
                 python_args=[
-                    "{cwd}/scripts/sample_short128_milestone.py",
+                    *(["{cwd}/scripts/wait_for_checkpoint_and_sample.py", "--checkpoint",
+                       str(train_dirs[arm] / f"step{step:09d}.pt"), "--timeout-seconds", "172800",
+                       "{cwd}/scripts/sample_short128_milestone.py"]
+                      if step in EARLY_SAMPLE_MILESTONES else
+                      ["{cwd}/scripts/sample_short128_milestone.py"]),
                     "--config", str(train_dirs[arm] / "config.yaml"),
                     "--checkpoint", str(train_dirs[arm] / f"step{step:09d}.pt"),
                     "--output-dir", str(run_dir),
@@ -211,7 +216,8 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
             )
             tasks.append(dict(
                 task_id=task_id, run=prepared, resource="sample",
-                needs=[{"task_id": f"train-{arm}", "condition": "succeeded"}],
+                needs=[] if step in EARLY_SAMPLE_MILESTONES else
+                [{"task_id": f"train-{arm}", "condition": "succeeded"}],
             ))
     return workflow_id, tasks
 

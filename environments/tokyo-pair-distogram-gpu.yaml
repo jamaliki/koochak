@@ -31,6 +31,7 @@ requirements:
     - "{cwd}/hierarchical_kaveh/train.py"
     - "{cwd}/scripts/profile_short128_latency.py"
     - "{cwd}/scripts/sample_short128_milestone.py"
+    - "{cwd}/scripts/wait_for_checkpoint_and_sample.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
     - /mnt/lustre/users/kiarash-eitgbi/code/fa3_pair_bias_20260702/flash-attention/hopper/flash_attn_interface.py
   packages:
