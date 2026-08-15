@@ -25,7 +25,7 @@ import koochak  # noqa: E402
 
 
 BASE_MAIN_COMMIT = "114094b"
-KOOCHAK_COMMIT = "74481b910a6d142d7cc5fa9da1937e7448c992f5"
+KOOCHAK_COMMIT = "48384ceae5e986b849eaa8b5b0ed1012b2f65a7c"
 REMOTE_CODE_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code")
 REMOTE_RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs")
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263106")
