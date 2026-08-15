@@ -180,10 +180,15 @@ def sample(
     device: torch.device | str,
     dtype: torch.dtype = torch.bfloat16,
     generator: torch.Generator | None = None,
+    use_intermediate_feedback: bool | None = None,
 ) -> SampleBatch:
     """Run a stochastic Euler sampler on one coherent EDM time grid."""
 
     device = torch.device(device)
+    if use_intermediate_feedback is None:
+        use_intermediate_feedback = bool(
+            getattr(getattr(model, "config", None), "intermediate_distogram_feedback", False)
+        )
     topology = build_topology(chain_lengths, batch_size, device)
     sigma_data = float(getattr(getattr(model, "config", None), "sigma_data", ModelConfig().sigma_data))
     time_grid = _sample_time_grid(
@@ -275,7 +280,11 @@ def sample(
                 self_conditioned_coordinates=aligned_self_conditioning,
             )
             with autocast():
-                last_prediction = model(inputs, compute_distogram=False)
+                last_prediction = model(
+                    inputs,
+                    compute_distogram=False,
+                    compute_intermediate_distograms=use_intermediate_feedback,
+                )
             denoised = last_prediction.coordinates.float()
             score = (coordinates_hat - denoised) / sigma_hat.clamp_min(1.0e-12)
             coordinates = coordinates_hat + config.step_scale * (sigma_next - sigma_hat) * score

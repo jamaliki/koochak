@@ -92,7 +92,10 @@ def test_sampler_carries_previous_prediction_as_self_conditioning() -> None:
     assert third.self_conditioned_coordinates is not None
     assert torch.isfinite(second.self_conditioned_coordinates).all()
     assert torch.isfinite(third.self_conditioned_coordinates).all()
-    assert first_kwargs == second_kwargs == third_kwargs == {"compute_distogram": False}
+    assert first_kwargs == second_kwargs == third_kwargs == {
+        "compute_distogram": False,
+        "compute_intermediate_distograms": False,
+    }
     assert len(model.inputs) == config.num_steps
     assert torch.all(result.aatype == 3)
     assert result.coordinates.shape == (1, 4, 14, 3)
