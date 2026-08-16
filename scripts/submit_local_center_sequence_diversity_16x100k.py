@@ -187,7 +187,11 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
                   str(guard_dir / "report.json"), "--minimum-rows", "100", "--max-p50-regression", "0.08",
                   "--max-p95-regression", "0.12"]
     guard_args.extend(["--candidate", str(output_root / "canary" / VARIANTS[-1].name / "latency.json")])
-    guard = prepare_run(name=f"hk-seq-throughput-guard-{short}", profile=cpu_profile,
+    # The guard is short-lived but still needs a reconciled Slurm step.  The
+    # GPU profile is the validated Koochak launch path for this Scruffy queue;
+    # keep the explicit one-GPU guard reservation below rather than allowing a
+    # CPU-profile process to exit before Scruffy can reconcile placement.
+    guard = prepare_run(name=f"hk-seq-throughput-guard-{short}", profile=gpu_profile,
                         python_args=guard_args, cwd=str(remote_cwd), run_dir=str(guard_dir), base_config=None)
     tasks.append(_task("throughput-guard", guard, "cpu", [{"task_id": item, "condition": "succeeded"} for item in canary_ids]))
 
