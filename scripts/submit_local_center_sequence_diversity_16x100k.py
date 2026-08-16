@@ -264,12 +264,18 @@ def main() -> None:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--stage-only", action="store_true")
     mode.add_argument("--train-only", action="store_true")
+    parser.add_argument("--exclude-variant", action="append", choices=[item.name for item in VARIANTS], default=[])
     args = parser.parse_args()
+    if args.exclude_variant and not args.train_only:
+        parser.error("--exclude-variant requires --train-only")
     commit = _validate_checkout()
     workflow_id, tasks = _prepare_tasks(commit)
     if args.train_only:
-        workflow_id = f"hk-local-center-seq-16x100k-{commit[:7]}-train-only-v1"
-        tasks = [{**item, "needs": []} for item in tasks if item["resource"] == "train"]
+        excluded = set(args.exclude_variant)
+        suffix = "-".join(sorted(excluded)) or "all"
+        workflow_id = f"hk-local-center-seq-16x100k-{commit[:7]}-train-only-{suffix}-v1"
+        tasks = [{**item, "needs": []} for item in tasks
+                 if item["resource"] == "train" and item["task_id"][len("train-"):] not in excluded]
     if args.dry_run:
         result = [{"task_id": item["task_id"], "name": item["run"].name,
                    "run_dir": item["run"].run_dir, "resource": item["resource"], "needs": item["needs"]} for item in tasks]
