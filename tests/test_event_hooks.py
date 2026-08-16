@@ -202,6 +202,35 @@ def test_scruffy_adapter_omits_an_unset_optional_node(monkeypatch) -> None:
     assert publish_event.call_args.kwargs["source"] == {"name": "koochak"}
 
 
+def test_checkpoint_publication_uses_a_stable_scruffy_event_id(
+    monkeypatch, tmp_path
+) -> None:
+    checkpoint_path = tmp_path / "step000000007.pt"
+    ckpt = {"step": 7, "model": {}}
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    checkpoint_lib.save(ckpt, str(checkpoint_path))
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    publish_event = mock.Mock(return_value={"event_id": "evt-1"})
+    module = types.ModuleType("scruffy")
+    module.publish_event = publish_event
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    hooks = make_scruffy_hooks()
+    ctx = {"rank": 0, "world_size": 1, "step": 7}
+    _call(hooks, "on_checkpoint", str(checkpoint_path), ckpt, ctx)
+    first = publish_event.call_args.kwargs
+    _call(hooks, "on_checkpoint", str(checkpoint_path), ckpt, ctx)
+    second = publish_event.call_args.kwargs
+
+    assert first["event_id"] == second["event_id"]
+    assert first["event_id"].startswith("koochak-checkpoint-")
+    assert first["data"]["publication"] == checkpoint_lib.publication(
+        str(checkpoint_path)
+    )
+
+
 def test_setup_failure_publishes_failed_phase(monkeypatch, tmp_path) -> None:
     from koochak import loop as loop_mod
     from koochak.loop import training_loop

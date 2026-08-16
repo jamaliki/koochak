@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Optional
+
+
+def _fsync_directory(directory: str) -> None:
+    """Persist a same-directory rename before reporting publication complete."""
+
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write(path: str, data: bytes, tmp_suffix: str = ".tmp") -> None:
@@ -16,10 +25,10 @@ def atomic_write(path: str, data: bytes, tmp_suffix: str = ".tmp") -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _fsync_directory(directory)
     finally:
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except OSError:
             pass
-
