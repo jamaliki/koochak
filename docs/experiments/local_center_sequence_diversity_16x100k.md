@@ -1,5 +1,8 @@
 # Local-center sequence-diversity 16-arm 100k implementation plan
 
+Completed results are recorded in
+[local_center_sequence_diversity_16x100k_results.md](local_center_sequence_diversity_16x100k_results.md).
+
 ## Status and objective
 
 This document is an implementation handoff for a fresh agent. Implement and
