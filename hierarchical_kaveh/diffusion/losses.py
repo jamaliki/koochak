@@ -74,12 +74,33 @@ def aligned_edm_loss(
     return torch.where(count > 0, per_sample, torch.zeros_like(per_sample)).mean()
 
 
+def aatype_sigma_weights(
+    sigma: Tensor,
+    *,
+    full_max: float,
+    ramp_max: float | None = None,
+) -> Tensor:
+    """Return one FP32 sequence-supervision weight for each sample."""
+
+    if sigma.ndim != 1:
+        raise ValueError("sigma must have shape [batch]")
+    if full_max <= 0:
+        raise ValueError("full_max must be positive")
+    if ramp_max is not None and ramp_max <= full_max:
+        raise ValueError("ramp_max must exceed full_max")
+    sigma = sigma.float()
+    if ramp_max is None:
+        return (sigma <= float(full_max)).to(torch.float32)
+    return ((float(ramp_max) - sigma) / (float(ramp_max) - float(full_max))).clamp(0.0, 1.0)
+
+
 def aatype_cross_entropy(
     logits: Tensor,
     target: Tensor,
     residue_mask: Tensor,
     *,
     sample_mask: Tensor | None = None,
+    sample_weights: Tensor | None = None,
     polar_aatypes: str = "RNDCEQHKSTY",
     polar_weight: float = 2.0,
 ) -> Tensor:
@@ -87,13 +108,25 @@ def aatype_cross_entropy(
 
     if logits.shape[-1] != len(AA_ALPHABET):
         raise ValueError("Pallatom sequence logits must contain exactly 20 classes")
-    if sample_mask is None:
-        sample_mask = torch.ones(logits.shape[0], device=logits.device, dtype=torch.bool)
-    if sample_mask.shape != (logits.shape[0],):
-        raise ValueError("sample_mask must have shape [batch]")
-    sample_mask = sample_mask.to(device=logits.device, dtype=torch.bool)
+    if sample_mask is not None and sample_weights is not None:
+        raise ValueError("pass either sample_mask or sample_weights, not both")
+    if sample_weights is None:
+        if sample_mask is None:
+            sample_weights = torch.ones(
+                logits.shape[0], device=logits.device, dtype=torch.float32
+            )
+        else:
+            if sample_mask.shape != (logits.shape[0],):
+                raise ValueError("sample_mask must have shape [batch]")
+            sample_weights = sample_mask.to(device=logits.device, dtype=torch.float32)
+    else:
+        if sample_weights.shape != (logits.shape[0],):
+            raise ValueError("sample_weights must have shape [batch]")
+        sample_weights = sample_weights.to(device=logits.device, dtype=torch.float32)
+        if not torch.isfinite(sample_weights).all() or (sample_weights < 0).any():
+            raise ValueError("sample_weights must be finite and non-negative")
     selected = residue_mask.bool() & target.ge(0) & target.lt(len(AA_ALPHABET))
-    selected &= sample_mask[:, None]
+    selected &= sample_weights.gt(0)[:, None]
     safe_target = target.clamp(0, len(AA_ALPHABET) - 1)
     errors = F.cross_entropy(
         logits.float().movedim(-1, 1),
@@ -106,7 +139,41 @@ def aatype_cross_entropy(
     weights = class_weights[safe_target] * selected
     per_sample = (errors * weights).sum(-1) / weights.sum(-1).clamp_min(1.0)
     active = selected.any(-1)
-    return (per_sample * active).sum() / active.sum().clamp_min(1)
+    effective_weights = sample_weights * active.to(sample_weights.dtype)
+    return (per_sample * effective_weights).sum() / effective_weights.sum().clamp_min(1.0)
+
+
+def aatype_marginal_js(
+    logits: Tensor,
+    target: Tensor,
+    residue_mask: Tensor,
+    *,
+    sample_weights: Tensor,
+) -> Tensor:
+    """Return the Jensen-Shannon divergence of weighted batch marginals."""
+
+    if logits.shape[:-1] != target.shape or target.shape != residue_mask.shape:
+        raise ValueError("sequence logits, target, and residue mask shapes do not match")
+    if sample_weights.shape != (logits.shape[0],):
+        raise ValueError("sample_weights must have shape [batch]")
+    valid = residue_mask.bool() & target.ge(0) & target.lt(len(AA_ALPHABET))
+    weights = sample_weights.to(device=logits.device, dtype=torch.float32)[:, None]
+    weights = weights * valid
+    denominator = weights.sum()
+    safe_target = target.clamp(0, len(AA_ALPHABET) - 1)
+    probabilities = logits.float().softmax(dim=-1)
+    q = (probabilities * weights[..., None]).sum(dim=(0, 1)) / denominator.clamp_min(1.0)
+    p = (
+        F.one_hot(safe_target, num_classes=len(AA_ALPHABET)).float() * weights[..., None]
+    ).sum(dim=(0, 1)) / denominator.clamp_min(1.0)
+    mixture = 0.5 * (p + q)
+    epsilon = torch.finfo(mixture.dtype).tiny
+    js = 0.5 * (
+        p * (p.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
+    ).sum() + 0.5 * (
+        q * (q.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
+    ).sum()
+    return torch.where(denominator > 0, js, logits.sum() * 0.0)
 
 
 def smooth_lddt_loss(
@@ -237,15 +304,28 @@ def compute_losses(
     aatype_sigma = batch["sigma"].to(prediction.aatype_logits.device)
     if aatype_sigma.shape != (prediction.aatype_logits.shape[0],):
         raise ValueError("batch sigma must have shape [batch]")
-    aatype_active = aatype_sigma <= float(loss_config.aatype_sigma_max)
+    aatype_weights = aatype_sigma_weights(
+        aatype_sigma,
+        full_max=loss_config.aatype_sigma_max,
+        ramp_max=loss_config.aatype_sigma_ramp_max,
+    )
     aatype = aatype_cross_entropy(
         prediction.aatype_logits,
         batch["aatype"],
         batch["residue_mask"],
-        sample_mask=aatype_active,
+        sample_weights=aatype_weights,
         polar_aatypes=loss_config.polar_aatypes,
         polar_weight=loss_config.polar_weight,
     )
+    if loss_config.aatype_marginal_js_weight == 0.0:
+        aatype_marginal_js_loss = coordinate.new_zeros(())
+    else:
+        aatype_marginal_js_loss = aatype_marginal_js(
+            prediction.aatype_logits,
+            batch["aatype"],
+            batch["residue_mask"],
+            sample_weights=aatype_weights,
+        )
     smooth_lddt = smooth_lddt_loss(
         prediction.coordinates,
         batch["x0"],
@@ -297,7 +377,9 @@ def compute_losses(
     )
     total = (
         loss_config.coordinate_weight * coordinate
-        + loss_config.aatype_weight * aatype
+        + loss_config.aatype_weight * (
+            aatype + loss_config.aatype_marginal_js_weight * aatype_marginal_js_loss
+        )
         + loss_config.smooth_lddt_weight * smooth_lddt
         + loss_config.distogram_weight * distogram
         + loss_config.intermediate_distogram_weight * intermediate_distogram
@@ -306,7 +388,9 @@ def compute_losses(
         "loss": total,
         "coordinate_loss": coordinate,
         "aatype_loss": aatype,
-        "aatype_active_fraction": aatype_active.float().mean(),
+        "aatype_marginal_js_loss": aatype_marginal_js_loss,
+        "aatype_active_fraction": aatype_weights.gt(0).float().mean(),
+        "aatype_sigma_weight_mean": aatype_weights.mean(),
         "smooth_lddt_loss": smooth_lddt,
         "distogram_loss": distogram,
     }
@@ -324,6 +408,8 @@ __all__ = [
     "align_target_to_prediction",
     "aligned_edm_loss",
     "aatype_cross_entropy",
+    "aatype_marginal_js",
+    "aatype_sigma_weights",
     "compute_losses",
     "distogram_cross_entropy",
     "smooth_lddt_loss",

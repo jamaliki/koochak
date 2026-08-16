@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> None:
         "seed": args.seed,
         "precision": args.precision,
         "compiled": args.compile,
+        "recurrent_self_conditioning": True,
         "intermediate_feedback": use_intermediate_feedback,
         "sampling": asdict(config.sampling),
     }

@@ -154,6 +154,8 @@ class LossConfig:
     coordinate_weight: float = 1.0
     aatype_weight: float = 0.25
     aatype_sigma_max: float = 0.5
+    aatype_sigma_ramp_max: float | None = None
+    aatype_marginal_js_weight: float = 0.0
     smooth_lddt_weight: float = 1.0
     distogram_weight: float = 0.5
     intermediate_distogram_weight: float = 0.0
@@ -171,6 +173,15 @@ class LossConfig:
             raise ValueError("loss.polar_aatypes contains an unknown residue code")
         if self.aatype_sigma_max <= 0:
             raise ValueError("loss.aatype_sigma_max must be positive")
+        if (
+            self.aatype_sigma_ramp_max is not None
+            and self.aatype_sigma_ramp_max <= self.aatype_sigma_max
+        ):
+            raise ValueError(
+                "loss.aatype_sigma_ramp_max must exceed aatype_sigma_max"
+            )
+        if self.aatype_marginal_js_weight < 0:
+            raise ValueError("loss.aatype_marginal_js_weight must be non-negative")
         if self.polar_weight <= 0 or self.smooth_lddt_cutoff <= 0:
             raise ValueError("loss polar weight and lDDT cutoff must be positive")
         if self.smooth_lddt_chunk_size <= 0:

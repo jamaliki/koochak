@@ -4,6 +4,8 @@ from hierarchical_kaveh.config import LossConfig, ModelConfig
 from hierarchical_kaveh.diffusion import (
     aligned_edm_loss,
     aatype_cross_entropy,
+    aatype_marginal_js,
+    aatype_sigma_weights,
     compute_losses,
     distogram_cross_entropy,
     smooth_lddt_loss,
@@ -73,6 +75,60 @@ def test_aatype_loss_all_inactive_is_differentiable_zero() -> None:
     loss.backward()
     assert logits.grad is not None
     assert torch.count_nonzero(logits.grad) == 0
+
+
+def test_aatype_sigma_weights_support_hard_and_linear_gates() -> None:
+    sigma = torch.tensor([0.25, 0.5, 0.75, 1.0, 2.0])
+    torch.testing.assert_close(
+        aatype_sigma_weights(sigma, full_max=0.5),
+        torch.tensor([1.0, 1.0, 0.0, 0.0, 0.0]),
+    )
+    torch.testing.assert_close(
+        aatype_sigma_weights(sigma, full_max=0.5, ramp_max=1.0),
+        torch.tensor([1.0, 1.0, 0.5, 0.0, 0.0]),
+    )
+    torch.testing.assert_close(
+        aatype_sigma_weights(sigma, full_max=0.5, ramp_max=2.0),
+        torch.tensor([1.0, 1.0, 5.0 / 6.0, 2.0 / 3.0, 0.0]),
+    )
+
+
+def test_aatype_fractional_weights_scale_gradients_and_keep_zero_samples_zero() -> None:
+    logits = torch.zeros(2, 1, 20, requires_grad=True)
+    target = torch.tensor([[0], [1]])
+    mask = torch.ones(2, 1, dtype=torch.bool)
+    loss = aatype_cross_entropy(
+        logits,
+        target,
+        mask,
+        sample_weights=torch.tensor([0.25, 0.0]),
+        polar_aatypes="",
+        polar_weight=1.0,
+    )
+    loss.backward()
+    assert torch.count_nonzero(logits.grad[0]) > 0
+    assert torch.count_nonzero(logits.grad[1]) == 0
+
+
+def test_aatype_marginal_js_is_mask_correct_and_differentiable() -> None:
+    logits = torch.full((2, 2, 20), -20.0, requires_grad=True)
+    logits.data[..., :2] = 0.0
+    target = torch.tensor([[0, 1], [0, 1]])
+    mask = torch.tensor([[True, True], [True, False]])
+    matched = aatype_marginal_js(
+        logits, target, mask, sample_weights=torch.tensor([1.0, 0.0])
+    )
+    assert matched < 1.0e-5
+    matched.backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert torch.count_nonzero(logits.grad[1]) == 0
+
+    collapsed = torch.full((2, 2, 20), -20.0)
+    collapsed[..., 0] = 20.0
+    assert aatype_marginal_js(
+        collapsed, target, mask, sample_weights=torch.tensor([1.0, 0.0])
+    ) > matched.detach()
 
 
 def test_smooth_lddt_is_rigid_invariant_and_penalizes_distortion() -> None:
@@ -160,6 +216,8 @@ def test_compute_losses_has_only_supported_final_objectives() -> None:
         "coordinate_loss",
         "aatype_loss",
         "aatype_active_fraction",
+        "aatype_marginal_js_loss",
+        "aatype_sigma_weight_mean",
         "smooth_lddt_loss",
         "distogram_loss",
     }

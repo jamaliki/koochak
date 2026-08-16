@@ -124,7 +124,13 @@ class PallatomTrainingStep:
             "loss": losses["loss"],
             "coordinate_loss": losses["coordinate_loss"].detach(),
             "aatype_loss": losses["aatype_loss"].detach(),
+            "aatype_marginal_js_loss": losses.get(
+                "aatype_marginal_js_loss", losses["loss"].new_zeros(())
+            ).detach(),
             "aatype_active_fraction": losses["aatype_active_fraction"].detach(),
+            "aatype_sigma_weight_mean": losses.get(
+                "aatype_sigma_weight_mean", losses["aatype_active_fraction"]
+            ).detach(),
             "smooth_lddt_loss": losses["smooth_lddt_loss"].detach(),
             "distogram_loss": losses["distogram_loss"].detach(),
             "self_conditioned": losses["loss"].new_tensor(float(use_self_conditioning)),

@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from hierarchical_kaveh.config import DataConfig, ModelConfig, TrainingConfig, load_config
+from hierarchical_kaveh.config import (
+    DataConfig,
+    LossConfig,
+    ModelConfig,
+    TrainingConfig,
+    load_config,
+)
 from scripts.materialize_resident_resume import materialize as materialize_resident_resume
 from scripts.materialize_short128_screen import materialize
 
@@ -66,6 +72,15 @@ def test_training_and_quality_filter_probabilities_are_bounded() -> None:
         DataConfig(mean_plddt_min=101.0)
     with pytest.raises(ValueError, match="loop_content_max"):
         DataConfig(loop_content_max=-0.1)
+
+
+def test_sequence_loss_schedule_validation_and_defaults() -> None:
+    assert LossConfig().aatype_sigma_ramp_max is None
+    assert LossConfig().aatype_marginal_js_weight == 0.0
+    with pytest.raises(ValueError, match="ramp_max"):
+        LossConfig(aatype_sigma_max=1.0, aatype_sigma_ramp_max=1.0)
+    with pytest.raises(ValueError, match="marginal_js_weight"):
+        LossConfig(aatype_marginal_js_weight=-0.01)
 
 
 def test_short128_preflight_keeps_bounded_main_process_cache(tmp_path) -> None:
