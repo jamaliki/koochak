@@ -10,24 +10,25 @@ time EDM grid and the recurrent self-conditioning frame expected by the
 denoiser. It removes a sampling-time artifact that had made some pair-route
 and sequence outputs collapse.
 
-The provisional ranking is:
+The current ranking, after the matched 100k continuations, is:
 
-1. **Position/element features, 50k**: best balanced candidate and the safest
-   promotion choice.
-2. **Alanine-reference features, 25k**: highest sequence diversity, but not a
-   fair winner yet because it has half as many updates as the 50k candidate.
-3. **Low-noise sequence gate, 25k**: sequence diversity is competitive, but
-   clashes remain high.
-4. **Window16 index features, 25k**: substantially improved after the sampler
-   fix, but still behind the two feature candidates above.
-5. **Information-flow variants, 50k**: little evidence of a useful gain over
-   the corresponding baseline.
+1. **Position/element + `sig05_uniform_atomsc`, 100k**: best balanced
+   promotion candidate under the mature-checkpoint screen.
+2. **Position/element + `sig10_polar2_atomsc`, 100k**: best raw sequence
+   diversity, but with a higher clash rate.
+3. **Alanine-reference features, 100k**: competitive and geometrically clean,
+   but slightly behind the best position/element cells on sequence diversity.
+4. **Window16 low-noise sequence-gate family, 25k**: sequence diversity is
+   competitive, but clashes remain high.
+5. **Window16 index and information-flow families**: no evidence of a better
+   overall trade-off under the shared sampling contract.
 
-This ranking is deliberately provisional. The 25k and 50k results are not
-matched training durations, and total training loss is not comparable between
-objective variants. The next decisive experiment is to train the top two
-families to the same checkpoint schedule and evaluate them with the same fixed
-sampler and diagnostics.
+The best-balanced recommendation is **position/element features with the
+`sig05_uniform_atomsc` cell at 100k**. This is a 0.5 A sequence-loss gate with
+uniform amino-acid class weighting and atom-coordinate self-conditioning. The
+`sig10_polar2_atomsc` cell is the sequence-diversity leader, but its clash rate
+is more than twice that of the recommended cell. The old standalone
+low-noise-gate family is not the winner; its geometry remains unsafe.
 
 ## Scope and provenance
 
@@ -41,6 +42,7 @@ for the earlier feature/architecture checkpoints:
 | Window16 index features | 25k | 8 | 8/8 sampling; corrected analysis succeeded |
 | Information-flow variants | 50k | 8 | 8/8 sampling; analysis succeeded |
 | Low-noise sequence gate | 25k | 8 | 8/8 sampling; corrected analysis succeeded |
+| Selected 100k continuations | 100k | 8 | 8/8 sampling; analysis succeeded |
 
 The fixed sampler was prepared from the sampler-fix line based on commit
 `e79921b`, with the coherent perturbed-time grid. The wrapper commits used for
@@ -64,12 +66,22 @@ campaign roots, for example:
   low-noise-seq-25k-factorial/e7fbaa1/samples/step025000/analysis_fixed.json
 ```
 
+The selected 100k continuation panel was sampled from commit `890cbc2` under:
+
+```text
+/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/
+  top8-reference-sampling/890cbc2/step100000/
+```
+
 Each sampling panel used EMA weights, BF16, compile/fused execution, lengths
 64/96/128, 32 samples per length, batch size 32, seed `20260813`, 200
 perturbed-time Euler steps, the matching recurrent self-conditioning route,
-`gamma=0.2`, noise scale `1.003`, step scale `2.25`, and sequence temperature
-`0.1`. The trained model, optimizer, data, and scientific settings were not
-changed for these reruns.
+`gamma=0.2`, churn interval `0.01 <= t <= 1.0` evaluated on the perturbed
+normalized time, noise scale `1.003`, step scale `2.25`, and sequence
+temperature `0.1`. Churn therefore remains active through the low-noise gate
+until the perturbed time falls below `0.01`; the final Euler endpoint is not
+passed through the denoiser. The trained model, optimizer, data, and
+scientific settings were not changed for these reruns.
 
 ## Why the sampler fix matters
 
@@ -128,6 +140,53 @@ low-noise gate is the clear geometry warning: its sequence statistics are
 competitive, but its clash rate is an order of magnitude above the other
 families.
 
+## 100k continuation results
+
+The table below reports the eight selected 100k checkpoints. Values are means
+over lengths 64/96/128 and 32 samples per length. These are the first mature
+results at a matched 100k horizon for the two continued families; the other
+families remain represented by their earlier 25k or 50k screens above.
+
+| Family / variant | Effective alphabet | Entropy | Max residue fraction | Max run | CA-step bad | Peptide bad | CA clashes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Alanine / `baseline` | 5.729369 | 0.571873 | 0.488824 | 6.927083 | 0.000495 | 0.000000 | 0.166667 |
+| Alanine / `element` | 5.350766 | 0.540211 | 0.535265 | 8.468750 | 0.000000 | 0.000000 | 0.177083 |
+| Alanine / `position` | 5.377835 | 0.546705 | 0.516222 | 7.656250 | 0.000110 | 0.000000 | 0.114583 |
+| Alanine / `position_element` | 4.490817 | 0.483629 | 0.594455 | 9.395833 | 0.000000 | 0.000000 | 0.208333 |
+| Position/element / `sig05_uniform_atomsc` | 5.555960 | 0.551250 | 0.470486 | 7.062500 | 0.000411 | 0.000520 | 0.114583 |
+| Position/element / `sig05_uniform_pairsc` | 5.067879 | 0.523159 | 0.547173 | 8.729167 | 0.000000 | 0.000000 | 0.135417 |
+| Position/element / `sig10_polar2_atomsc` | **5.887323** | **0.576669** | **0.454102** | **6.322917** | **0.000082** | 0.000629 | 0.270833 |
+| Position/element / `sig10_polar2_pairsc` | 4.740093 | 0.498230 | 0.581950 | 9.687500 | 0.000000 | 0.000000 | 0.197917 |
+
+The selected-family means at 100k are:
+
+| Family | Variants | Effective alphabet | Entropy | Max residue fraction | Max run | CA-step bad | Peptide bad | CA clashes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Alanine-reference | 4 | 5.2372 | 0.535604 | 0.533691 | 8.11198 | 0.000151 | 0.000000 | 0.166667 |
+| Position/element | 4 | 5.3128 | 0.537327 | 0.513428 | 7.95052 | 0.000123 | 0.000287 | 0.179688 |
+
+At 100k, position/element is still the best **architecture family**: its
+selected arms have slightly higher mean effective alphabet and entropy than
+the selected alanine-reference arms, with lower residue concentration and
+shorter runs. The difference is not large, so alanine-reference remains a
+credible challenger rather than a discarded family.
+
+The best **balanced individual configuration** is
+`position_element/sig05_uniform_atomsc`: it retains high sequence diversity
+while matching the lowest clash rate in the 100k panel (`0.114583`). The best
+**sequence-only configuration** is
+`position_element/sig10_polar2_atomsc`, which leads all 100k variants in
+effective alphabet, entropy, residue concentration, and run length, but has
+`0.270833` clashes. Therefore the raw-diversity winner should be treated as a
+follow-up candidate, not the default promotion.
+
+The names in this 100k factorial are sequence-objective factors:
+`sig05`/`sig10` means `aatype_sigma_max=0.5`/`1.0 A`, `uniform`/`polar2`
+means polar-class weight `1`/`2`, and `atomsc`/`pairsc` means atom-coordinate/
+pair-distance self-conditioning. This is distinct from the older standalone
+**Window16 low-noise sequence-gate family**, whose 25k aggregate clash rate
+was `5.529` and which remains a diagnostic-only result.
+
 Secondary-structure proxies are broadly stable rather than decisive. Mean
 helix fractions are approximately 0.75--0.80 and sheet fractions approximately
 0.08--0.11 across these screens. Small shifts should not be treated as an
@@ -135,17 +194,16 @@ architectural win without matched checkpoints and chemistry-aware diagnostics.
 
 ## Campaign-by-campaign interpretation
 
-### 1. Position/element features: current promotion candidate
+### 1. Position/element features: mature promotion candidate
 
-This 50k campaign is the strongest all-around result. It combines high sequence
-diversity with the cleanest geometry among the candidates that have run to 50k.
-The fixed sampler also removed the concern that its pair or feature route was
-being unfairly penalized by accumulated sampling error.
+This family remains the strongest all-around result after the 100k continuation.
+Its `sig05_uniform_atomsc` arm is the current promotion candidate: it combines
+high sequence diversity with the lowest clash rate among the leading 100k arms.
+The `sig10_polar2_atomsc` arm is better for sequence diversity alone, but does
+not have the same geometry margin.
 
-The remaining question is whether its diversity is retained at 100k or whether
-it converges toward the lower-entropy behavior seen in some other families.
-This family should be the first candidate for a matched 100k continuation and
-for the full stereochemical/sequence-topology diagnostic panel.
+This recommendation is still based on proxy geometry. The promoted candidate
+should next receive the full stereochemical/sequence-topology diagnostic panel.
 
 ### 2. Alanine-reference features: highest upside, insufficient duration
 
@@ -161,12 +219,15 @@ not a conclusion from the current 25k snapshot.
 
 ### 3. Low-noise sequence gate: diversity without geometry
 
-The gate produces good sequence statistics after the fixed sampler is applied,
-but the high clash rate makes the result unsafe to promote. This pattern is
-consistent with a gate that improves logits or sequence concentration without
-adequately constraining coordinate denoising. It should only return to the
-promotion pool if a chemistry-aware loss or a matched geometry intervention
-reduces clashes without sacrificing entropy.
+The standalone Window16 gate produces good sequence statistics after the fixed
+sampler is applied, but the high clash rate makes the result unsafe to promote.
+This pattern is consistent with a gate that improves logits or sequence
+concentration without adequately constraining coordinate denoising. It should
+only return to the promotion pool if a chemistry-aware loss or a matched
+geometry intervention reduces clashes without sacrificing entropy. The 100k
+`sig05_uniform_atomsc` result should not be interpreted as evidence that this
+older family was rescued: it is a different feature family and a different
+matched continuation.
 
 ### 4. Window16 index features: sampler-sensitive but not yet leading
 
@@ -221,8 +282,10 @@ and the low-noise gate retains a real geometry problem.
 
 ## Limitations
 
-1. **Unequal training duration.** Three families are at 25k and two at 50k.
-   Sequence diversity can change materially with further optimization.
+1. **Unequal training duration across families.** The two leading families
+   now have selected 100k results, while Window16 index, information-flow, and
+   the standalone low-noise-gate family remain at 25k/50k. Those older family
+   means are useful context, not matched mature-checkpoint controls.
 2. **Aggregate rather than per-variant reporting.** The means identify family
    behavior but can hide a strong or weak individual arm. Promotion should use
    the full per-variant manifests and factorial contrasts.
@@ -239,13 +302,12 @@ and the low-noise gate retains a real geometry problem.
 
 ## Recommended next steps
 
-1. Continue **position/element** and **alanine-reference** under the same
-   training contract to at least 50k, then 100k if both remain finite.
-2. Run the exact same fixed sampling and one-step diagnostic panel at matched
-   checkpoints, including the full stereochemical energy and sequence-topology
-   agreement metrics.
-3. Keep **low-noise sequence gate** as a diagnostic candidate only; require a
-   substantial clash reduction before promotion.
+1. Promote **position/element + `sig05_uniform_atomsc`** as the default
+   candidate for the full stereochemical and sequence-topology evaluation.
+2. Keep **position/element + `sig10_polar2_atomsc`** as a diversity-oriented
+   challenger, with clash reduction as its decisive gate.
+3. Keep the standalone **low-noise sequence-gate family** diagnostic-only;
+   require a substantial clash reduction before promotion.
 4. Do not spend another long run on the information-flow family unless a new
    mechanistic hypothesis predicts a specific geometry or sequence benefit.
 5. Report main effects and interactions only after matching checkpoint,
@@ -253,10 +315,13 @@ and the low-noise gate retains a real geometry problem.
 
 ## Bottom line
 
-The best current bet is **position/element features at 50k** because they offer
-the strongest compromise between sequence diversity and geometric validity at
-the longest available duration. **Alanine-reference features at 25k** are the
-most interesting challenger and may overtake it after a matched continuation.
-The fixed sampler changes the interpretation substantially: Window16 and some
-pair-route failures were sampling artifacts, while the information-flow and
+The best current configuration is **position/element features +
+`sig05_uniform_atomsc` at 100k**. It is not the old standalone low-noise-gate
+family; it is a position/element architecture arm using the 0.5 A sequence-loss
+gate, uniform class weighting, and atom-coordinate self-conditioning. If
+sequence diversity is prioritized over geometry, `sig10_polar2_atomsc` is the
+leader, but its higher clash rate prevents it from being the default promotion.
+Alanine-reference remains the closest competing architecture family. The fixed
+sampler changes the interpretation substantially: Window16 and some pair-route
+failures were sampling artifacts, while the information-flow and standalone
 low-noise geometry weaknesses remain credible model-level signals.
