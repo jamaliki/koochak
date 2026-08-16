@@ -48,7 +48,7 @@ standalone Slurm transport"]
 verify digests · preflight · exec"]
     loop(["training_loop()
 iterables · DDP · AMP · hooks"])
-    outputs[("checkpoints
+    outputs[("checkpoints · ready manifests
 metrics · logs · events")]
 
     config --> prepare
@@ -113,6 +113,8 @@ metrics · rank timing · hooks"]
 GPU health watchdog"]
     periodic["Persist
 evaluation · atomic checkpoint"]
+    publication["When checkpointed
+fsync .pt → .ready.json → typed artifact event"]
     done{"max_steps reached
 or data exhausted?"}
     result[["Resume-ready checkpoint
@@ -122,7 +124,7 @@ model · optimizer · RNG · EMA · config"]]
     data --> setup
     extensions --> setup
     setup --> batch --> micro --> gradients --> update
-    update --> hooks --> health --> periodic --> done
+    update --> hooks --> health --> periodic --> publication --> done
     done -->|next step| batch
     done -->|finished| result
 
@@ -140,7 +142,7 @@ model · optimizer · RNG · EMA · config"]]
     class batch dataNode;
     class micro,gradients compute;
     class update updateNode;
-    class hooks,health,periodic boundary;
+    class hooks,health,periodic,publication boundary;
     class done choice;
     class result resultNode;
     linkStyle default stroke:#88859A,stroke-width:1.5px;
