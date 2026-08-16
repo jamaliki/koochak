@@ -201,7 +201,11 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
     """Implementation kept separate so performance policy spans the full runtime."""
 
     plain_config = config.to_dict()
-    launch_context = launch.initialize(plain_config)
+    launch_context = (
+        launch.initialize(plain_config)
+        if config.train.ddp
+        else {"rank": 0, "world_size": 1, "is_rank0": True, "device": None}
+    )
     set_all_seeds(config.train.seed + int(launch_context["rank"]))
 
     model = HierarchicalKaveh(config.model)
