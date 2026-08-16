@@ -277,7 +277,10 @@ def main() -> None:
 
         resource_values = {
             "preflight": (1, 14, 240, 7_200), "canary": (1, 14, 240, 14_400),
-            "train": (1, 14, 240, 172_800), "sample": (1, 14, 128, 43_200), "cpu": (0, 2, 16, 3_600),
+            "train": (1, 14, 240, 172_800), "sample": (1, 14, 128, 43_200),
+            # Scruffy requires a reconciled Slurm step for runtime placement;
+            # reserve one GPU even though these short checks are CPU-bound.
+            "cpu": (1, 2, 16, 3_600),
         }
         result = []
         for item in tasks:
