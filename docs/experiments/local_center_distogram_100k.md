@@ -159,3 +159,48 @@ latest remote log check reached step 28,950 in both arms with approximately
 0.123 s/step from the 25k-to-28.95k interval, implying roughly 2 h 25 min to
 100k if that rate holds. Only a cross-patch arm that preserves sequence
 diversity at the matched 25k panel should be promoted from 100k.
+
+## Intermediate feedback with a 2-sigma sequence-loss gate
+
+This follow-up trained the `intermediate_local_center` arm to 100k with the
+single change `loss.aatype_sigma_max: 2.0` (the control is `0.5`). Intermediate
+distogram feedback, the 0.25 intermediate loss, geometry features, optimizer,
+and sampling settings were unchanged. The run used current-main commit
+`f298087` and produced checkpoints through `step0100000.pt`.
+
+The 100k sampler completed successfully as Scruffy job
+`job-b4b584ba342ec5aad139`, producing 96 EMA samples per arm (32 each at
+lengths 64/96/128) with the fixed 200-step compiled sampler. The authoritative
+artifacts are:
+
+- checkpoint:
+  `/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-100k-sigma2/f298087/train/intermediate_local_center_sigma2/step0100000.pt`
+- samples:
+  `/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-100k-sigma2/f298087/samples/step100000/intermediate_local_center_sigma2`
+- analysis:
+  `/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/geometry-distogram-100k-sigma2/f298087/analysis/sigma2_vs_sigma05_100k.json`
+
+The corrected 100k comparison against the fixed-recycling 0.5-sigma panel is:
+
+| Metric | 0.5-sigma gate | 2.0-sigma gate |
+| --- | ---: | ---: |
+| Effective alphabet | **6.222** | 4.865 |
+| Entropy (bits) | **2.586** | 2.230 |
+| Maximum residue fraction | **0.444** | 0.517 |
+| Maximum homopolymer run | **6.32** | 7.81 |
+| C-alpha step bad fraction | 0.000 | 0.000 |
+| C-alpha clashes per residue | **0.00065** | 0.00182 |
+
+At 100k, the 2-sigma gate lowers effective alphabet by 22%, lowers entropy by
+14%, raises the maximum residue fraction by 16%, lengthens the maximum
+homopolymer by 24%, and increases C-alpha clashes by 179%. The 25k screen
+already showed the same direction (clashes 0.00345 to 0.01115 and effective
+alphabet 4.51 to 4.24), although that early comparison used the historical
+baseline sample panel and is not a pure threshold-only comparison.
+
+**Conclusion:** do not promote the 2-sigma sequence-loss gate. The extra
+high-noise CE supervision does not correct the alanine/concentration bias; it
+amplifies sequence concentration and also degrades the coarse geometry metrics.
+Keep `aatype_sigma_max: 0.5` for the intermediate-feedback model. Any further
+sequence-loss experiment should use a soft, down-weighted ramp above 0.5 sigma
+rather than a hard 2.0-sigma gate.
