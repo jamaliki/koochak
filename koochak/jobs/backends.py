@@ -95,6 +95,7 @@ def submit_scruffy(
     workflow_id: str | None = None,
     task_id: str | None = None,
     needs: list[dict[str, str]] | None = None,
+    wait_for: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Stage and enqueue a prepared run through Scruffy's Python API."""
 
@@ -116,4 +117,5 @@ def submit_scruffy(
         workflow_id=workflow_id,
         task_id=task_id,
         needs=needs,
+        wait_for=wait_for,
     )

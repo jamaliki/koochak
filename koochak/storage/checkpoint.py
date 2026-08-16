@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -10,24 +12,58 @@ from typing import Any, Dict, Optional
 import torch
 
 __all__ = [
-    "save",
-    "load",
-    "latest",
-    "best",
-    "strip_module_prefix",
     "add_module_prefix",
+    "best",
+    "latest",
+    "load",
     "match_state_dict_to_model",
+    "publication",
+    "publication_path",
+    "save",
+    "strip_module_prefix",
 ]
 
 from . import fs as fs_utils
 from .atomic import atomic_write
 from .pruning import prune_keep_last_k
 
+PUBLICATION_SUFFIX = ".ready.json"
+
 
 def _torch_save_to_bytes(obj: Any) -> bytes:
     buffer = io.BytesIO()
     torch.save(obj, buffer)
     return buffer.getvalue()
+
+
+def publication_path(path: str) -> str:
+    """Return the sidecar written only after an immutable checkpoint is ready."""
+
+    return os.path.abspath(path) + PUBLICATION_SUFFIX
+
+
+def _publication(path: str, data: bytes) -> dict[str, Any]:
+    absolute = os.path.abspath(path)
+    return {
+        "v": 1,
+        "artifact_id": f"checkpoint/{os.path.basename(absolute)}",
+        "path": absolute,
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "manifest_path": publication_path(absolute),
+    }
+
+
+def publication(path: str) -> dict[str, Any]:
+    """Read the small immutable publication record for a saved checkpoint."""
+
+    manifest = publication_path(path)
+    with open(manifest, encoding="utf-8") as handle:
+        record = json.load(handle)
+    expected = {"v", "artifact_id", "path", "size_bytes", "sha256", "manifest_path"}
+    if not isinstance(record, dict) or set(record) != expected or record.get("v") != 1:
+        raise ValueError(f"invalid checkpoint publication manifest: {manifest}")
+    return record
 
 
 def _maybe_symlink_latest(step_path: str) -> Optional[str]:
@@ -80,10 +116,21 @@ def save(ckpt: Dict[str, Any], path: str, keep_last_k: int = 3) -> str:
 
     data = _torch_save_to_bytes(ckpt)
     atomic_write(path, data)
+    record = _publication(path, data)
+    encoded = (
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        + "\n"
+    ).encode("utf-8")
+    atomic_write(record["manifest_path"], encoded)
 
     # Best-effort: maintain a latest pointer and prune
     _maybe_symlink_latest(path)
-    prune_keep_last_k(directory, pattern=_STEP_RE.pattern, k=keep_last_k)
+    prune_keep_last_k(
+        directory,
+        pattern=_STEP_RE.pattern,
+        k=keep_last_k,
+        companion_suffixes=(PUBLICATION_SUFFIX,),
+    )
     return path
 
 

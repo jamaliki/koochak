@@ -392,6 +392,27 @@ job = submit_scruffy(
 )
 ```
 
+An intermediate consumer can wait for a numbered Koochak checkpoint without
+reserving resources. Submit the producer in the same workflow with
+`task_id="train"`:
+
+```python
+job = submit_scruffy(
+    prepared_consumer,
+    root="/shared/queues/allocation",
+    resources=resources,
+    request_id="campaign/infer/attempt-1",
+    project_id="project",
+    workflow_id="campaign-1",
+    task_id="infer",
+    wait_for=[{
+        "kind": "artifact",
+        "task_id": "train",
+        "artifact_id": "checkpoint/step000100000.pt",
+    }],
+)
+```
+
 The runner starts under `python -I`, reconstructs the environment from a small
 allowlist, restores scheduler-owned `SLURM_*`, `SCRUFFY_*`, and GPU identity,
 verifies manifest/config digests, performs the declared checks, writes
@@ -454,10 +475,15 @@ def step_fn(model, batch, ctx):
     `workload.artifact` events for an external coordinator. Training progress
     defaults to approximately one event every 30 seconds at completed-step
     boundaries and includes completed/total steps; evaluations and checkpoint
-    references are always attempted. Payloads contain at most 32 finite scalar
-    metrics and never include full resolved configs or checkpoint contents.
+    references are always attempted. Numbered checkpoints include a strict
+    publication record (stable artifact ID, absolute path, size, SHA256, and
+    ready-manifest path) which can satisfy a declared Scruffy artifact
+    condition. Payloads never include full resolved configs or checkpoint
+    contents.
   - `koochak.logging.events.make_scruffy_hooks()` – requires `SCRUFFY_ROOT` and
     `SCRUFFY_JOB_ID`; Scruffy is imported lazily and is not a Koochak dependency.
+    Failed publication never releases a dependent task; Scruffy leaves it
+    blocked rather than inferring readiness from the filesystem.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.
 - Stdout and W&B record the resolved config at `on_train_start`; CSV/JSONL
   remain metric logs.
@@ -497,7 +523,12 @@ W&B artifacts:
 
 ## Checkpointing
 
-- `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` performs atomic writes, keeps only the last `k` step-checkpoints, and maintains `latest.pt`.
+- `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` atomically installs
+  and syncs the numbered checkpoint, then atomically publishes
+  `<path>.ready.json` with its stable artifact ID, byte size, and SHA256. It
+  keeps only the last `k` checkpoint/manifest pairs and maintains `latest.pt`.
+- Bind Scruffy dependencies to the immutable numbered artifact ID, such as
+  `checkpoint/step000100000.pt`, never to the mutable `latest.pt` alias.
 - `koochak.storage.checkpoint.load(path)` loads to CPU.
 - `koochak.storage.checkpoint.latest(dir)` returns `latest.pt` if present or the most recent step checkpoint.
 - `koochak.storage.checkpoint.best(dir, key)` selects the lowest metric across checkpoints.

@@ -16,8 +16,14 @@ def _extract_step(name: str, pattern: re.Pattern[str]) -> int:
     return -1 if step is None else step
 
 
-def prune_keep_last_k(directory: str, pattern: str, k: int) -> None:
-    """Delete older matching files, keeping the last `k` by numeric step."""
+def prune_keep_last_k(
+    directory: str,
+    pattern: str,
+    k: int,
+    *,
+    companion_suffixes: tuple[str, ...] = (),
+) -> None:
+    """Delete older matching files and their named companion records."""
     if k <= 0 or not os.path.isdir(directory):
         return
     rx = re.compile(pattern)
@@ -31,4 +37,13 @@ def prune_keep_last_k(directory: str, pattern: str, k: int) -> None:
         try:
             os.remove(p)
         except OSError:
-            pass
+            continue
+        for suffix in companion_suffixes:
+            try:
+                os.remove(p + suffix)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # Pruning is best-effort. The checkpoint itself is already
+                # absent, so a stale small sidecar cannot be loaded as data.
+                pass

@@ -98,6 +98,15 @@ def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(
         resources=resources,
         request_id="campaign/train/attempt-1",
         project_id="project",
+        workflow_id="campaign",
+        task_id="infer",
+        wait_for=[
+            {
+                "kind": "artifact",
+                "task_id": "train",
+                "artifact_id": "checkpoint/step000000007.pt",
+            }
+        ],
     )
 
     assert result == {"job_id": "job-1"}
@@ -105,3 +114,10 @@ def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(
     assert seen["argv"] == prepared.runner_argv()
     assert seen["environment"] == {}
     assert seen["request"] is resources
+    assert seen["wait_for"] == [
+        {
+            "kind": "artifact",
+            "task_id": "train",
+            "artifact_id": "checkpoint/step000000007.pt",
+        }
+    ]

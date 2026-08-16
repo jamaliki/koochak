@@ -7,6 +7,7 @@ belong in their existing stores rather than in a coordination event journal.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import numbers
 import os
@@ -18,6 +19,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import torch
 
 from ..core.hooks import rank0_only
+from ..storage import checkpoint as checkpoint_lib
 
 __all__ = ["make_event_hooks", "make_scruffy_hooks"]
 
@@ -204,6 +206,12 @@ def make_event_hooks(
         }
         if current_step is not None:
             data["step"] = current_step
+        try:
+            data["publication"] = checkpoint_lib.publication(checkpoint_path)
+        except (FileNotFoundError, OSError, ValueError):
+            # Hooks may be used with checkpoints not written by Koochak. They
+            # remain useful observations but cannot satisfy a Scruffy gate.
+            pass
         send("workload.artifact", data)
 
     def on_train_end(ctx: Mapping[str, Any]) -> None:
@@ -260,12 +268,23 @@ def make_scruffy_hooks(
     def publish(kind: str, data: Dict[str, object]) -> object:
         from scruffy import publish_event
 
+        event_id = None
+        publication = data.get("publication")
+        if kind == "workload.artifact" and isinstance(publication, Mapping):
+            artifact_id = publication.get("artifact_id")
+            digest = publication.get("sha256")
+            if isinstance(artifact_id, str) and isinstance(digest, str):
+                identity = hashlib.sha256(
+                    f"{artifact_id}\0{digest}".encode()
+                ).hexdigest()
+                event_id = f"koochak-checkpoint-{identity}"
         return publish_event(
             root,
             job_id=job_id,
             kind=kind,
             data=data,
             source=source,
+            **({"event_id": event_id} if event_id is not None else {}),
         )
 
     return make_event_hooks(

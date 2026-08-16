@@ -26,18 +26,25 @@ This doc tracks incremental design decisions and changes from the initial design
   - The loop shards the dataset when `config.ddp=True`, and places `barrier()` calls around checkpointing. Only rank 0 writes checkpoints.
 
 - Storage
-  - `koochak/storage/checkpoint.py` – atomic save/load, `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` pointer and prunes with `keep_last_k`.
+  - `koochak/storage/checkpoint.py` – atomic save/load, publication manifests,
+    `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` convenience
+    pointer and prunes checkpoint/manifest pairs with `keep_last_k`.
 
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
   - `koochak/logging/wandb_logger.py` – lazy-import W&B hooks, logs metrics and artifacts, tracks `best/*` summaries.
-  - `koochak/logging/events.py` – bounded, rank-0 lifecycle/progress events plus a lazy optional Scruffy adapter. It excludes full config objects and checkpoint contents so coordination events cannot become a telemetry stream.
+  - `koochak/logging/events.py` – bounded, rank-0 lifecycle/progress events plus
+    a lazy optional Scruffy adapter. Numbered checkpoints publish strict,
+    deterministic artifact evidence after their ready manifest exists; full
+    config objects and checkpoint contents never enter coordination events.
   - Stdout and W&B record resolved config at `on_train_start`; CSV/JSONL remain metric logs.
 
 - Jobs
   - `koochak/jobs` compiles strict environment YAML and resolved training config into an immutable launch manifest.
   - One isolated runner verifies the environment and uses exact Python argv for both Pazuzu and Scruffy. Thin adapters retain each backend's native resource model.
   - Agent-authored experiment submission must live in a committed Python script using `prepare_run`, then `submit_pazuzu` or `submit_scruffy`. Do not assemble SSH, `sbatch`, or scheduler CLI submissions in tool calls.
+  - `submit_scruffy(..., wait_for=[...])` declares intermediate artifact gates.
+    Use the numbered checkpoint artifact ID and never `latest.pt`.
   - Profiles contain no secret values. They name required secrets, inherit only Koochak's fixed runtime identity, and cannot override it. All ordinary values, including compiler and NCCL settings, belong under `environment.set`.
 
 - Optim
