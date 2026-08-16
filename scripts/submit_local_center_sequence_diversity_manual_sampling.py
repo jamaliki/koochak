@@ -8,7 +8,14 @@ import json
 import sys
 from pathlib import Path
 
-from koochak.jobs import load_environment_profile, prepare_run, submit_scruffy
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
+
+from koochak.jobs import (
+    load_environment_profile,
+    prepare_run,
+    submit_scruffy,
+)
 from submit_local_center_sequence_diversity_16x100k import (
     CPU_PROFILE,
     GPU_PROFILE,
