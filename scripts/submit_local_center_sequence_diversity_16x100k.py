@@ -263,9 +263,13 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--stage-only", action="store_true")
+    mode.add_argument("--train-only", action="store_true")
     args = parser.parse_args()
     commit = _validate_checkout()
     workflow_id, tasks = _prepare_tasks(commit)
+    if args.train_only:
+        workflow_id = f"hk-local-center-seq-16x100k-{commit[:7]}-train-only-v1"
+        tasks = [{**item, "needs": []} for item in tasks if item["resource"] == "train"]
     if args.dry_run:
         result = [{"task_id": item["task_id"], "name": item["run"].name,
                    "run_dir": item["run"].run_dir, "resource": item["resource"], "needs": item["needs"]} for item in tasks]
