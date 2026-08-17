@@ -117,17 +117,15 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
         sample_ids.append(task_id)
         tasks.append({"task_id": task_id, "run": prepared, "resource": "sample", "needs": []})
 
-    expected_args = [argument for variant in VARIANTS for argument in ("--expected-variant", variant.name)]
     analysis_dir = output_root / "analysis" / f"step{MILESTONE:06d}"
     analysis_output = output_root / "analysis" / f"milestone_step{MILESTONE:06d}.json"
     analysis = prepare_run(
         name=f"hk-coarse-continuation-manual-analysis-150000-{short}",
         profile=cpu_profile,
         python_args=[
-            "{cwd}/scripts/analyze_sequence_diversity_16x100k.py",
-            "--sample-root", str(output_root / "samples" / f"step{MILESTONE:06d}"),
-            "--step", str(MILESTONE), "--output", str(analysis_output),
-            "--control", CONTROL, *expected_args,
+            "{cwd}/scripts/analyze_sample_panel.py",
+            str(output_root / "samples" / f"step{MILESTONE:06d}"),
+            "--output", str(analysis_output),
         ],
         cwd=str(remote_cwd), run_dir=str(analysis_dir), base_config=None,
     )
