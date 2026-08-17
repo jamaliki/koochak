@@ -132,7 +132,7 @@ def corrupt_structure(
     noisy = (target + sigma_scalar * noise) * model_atom_mask[..., None]
     residue_mask = model_atom_mask[..., 1]
     aatype = torch.as_tensor(clean["aatype"], device=target.device, dtype=torch.long)
-    return {
+    result = {
         "x0": target,
         "x_t": noisy,
         "t": torch.full_like(model_atom_mask, sigma_scalar, dtype=target.dtype),
@@ -154,6 +154,10 @@ def corrupt_structure(
         ),
         "sigma": sigma_scalar,
     }
+    for key in ("secondary_structure", "secondary_structure_input"):
+        if key in clean:
+            result[key] = torch.as_tensor(clean[key], device=target.device, dtype=torch.long)
+    return result
 
 
 __all__ = [

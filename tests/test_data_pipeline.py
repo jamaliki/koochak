@@ -232,6 +232,20 @@ def test_corruption_hides_sequence_and_preserves_rigid_internal_geometry(tmp_pat
     torch.testing.assert_close(before, after, atol=2e-5, rtol=2e-5)
 
 
+def test_corruption_preserves_secondary_structure_targets_and_inputs(tmp_path) -> None:
+    clean = load_sample(index_shards(_ragged_fixture(tmp_path), min_length=4)[0])
+    clean["secondary_structure"] = torch.tensor([0, 1, 2, 0, 1])
+    clean["secondary_structure_input"] = torch.tensor([3, 1, 2, 3, 0])
+    sample = corrupt_structure(
+        clean,
+        sigma=1.0,
+        generator=torch.Generator().manual_seed(7),
+        translation_std=0.0,
+    )
+    assert torch.equal(sample["secondary_structure"], clean["secondary_structure"])
+    assert torch.equal(sample["secondary_structure_input"], clean["secondary_structure_input"])
+
+
 def test_standard_edm_noise_has_configured_variance(tmp_path) -> None:
     clean = load_sample(index_shards(_ragged_fixture(tmp_path), min_length=4)[0])
     sigma = 5.0

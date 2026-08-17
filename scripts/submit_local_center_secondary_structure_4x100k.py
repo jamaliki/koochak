@@ -139,7 +139,7 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
     remote_cwd = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"
     gpu_profile = load_environment_profile(GPU_PROFILE)
     cpu_profile = load_environment_profile(CPU_PROFILE)
-    workflow_id = f"hk-local-center-secondary-structure-4x100k-{short}-v1"
+    workflow_id = f"hk-local-center-secondary-structure-4x100k-{short}-v2"
     tasks: list[dict[str, object]] = []
     train_dirs: dict[str, Path] = {}
     train_ids: dict[str, str] = {}
