@@ -26,8 +26,8 @@ PROJECT_ID = "kaveh-ce20-20260806"
 SOURCE_COMMIT = "88306f9a1eff48343fa5017aba76298bdba4b6f1"
 SOURCE_ROOT = REMOTE_RUN_ROOT / "local-center-coordinate-alignment-1x100k" / SOURCE_COMMIT
 TRAIN_DIR = SOURCE_ROOT / "train" / "baseline_no_kabsch"
-SAMPLE_DIR = SOURCE_ROOT / "samples" / "step050000" / "baseline_no_kabsch"
-ANALYSIS_OUTPUT = SOURCE_ROOT / "analysis" / "step050000.json"
+SAMPLE_DIR = SOURCE_ROOT / "samples" / "step050000-recovery" / "baseline_no_kabsch"
+ANALYSIS_OUTPUT = SOURCE_ROOT / "analysis" / "step050000-recovery.json"
 CHECKPOINT = TRAIN_DIR / "step000050000.pt"
 
 
@@ -79,12 +79,12 @@ def _prepare(commit: str) -> tuple[str, list[dict[str, object]]]:
         ],
         cwd=str(remote_cwd), run_dir=str(SAMPLE_DIR), base_config=None,
     )
-    analysis_dir = SOURCE_ROOT / "analysis" / "step050000-recovery"
+    analysis_dir = SOURCE_ROOT / "analysis" / "step050000-recovery-launch"
     analysis = prepare_run(
         name=f"hk-local-center-align-analysis-50000-recovery-{SOURCE_COMMIT[:7]}",
         profile=cpu_profile,
         python_args=[
-            "{cwd}/scripts/analyze_sample_panel.py", str(SOURCE_ROOT / "samples" / "step050000"),
+            "{cwd}/scripts/analyze_sample_panel.py", str(SOURCE_ROOT / "samples" / "step050000-recovery"),
             "--output", str(ANALYSIS_OUTPUT),
         ],
         cwd=str(remote_cwd), run_dir=str(analysis_dir), base_config=None,
