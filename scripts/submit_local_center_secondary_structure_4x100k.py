@@ -25,7 +25,7 @@ from koochak.jobs import (  # noqa: E402
 import koochak  # noqa: E402
 
 
-BASE_MAIN_COMMIT = "62233ea"
+BASE_MAIN_COMMIT = "8b67f48"
 KOOCHAK_COMMIT = "48384ceae5e986b849eaa8b5b0ed1012b2f65a7c"
 REMOTE_CODE_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code")
 REMOTE_RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs")
