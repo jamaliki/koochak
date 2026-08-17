@@ -96,8 +96,9 @@ def _patches(variant: SSVariant, run_dir: Path, *, production: bool) -> list[Con
         ConfigPatch("loss.secondary_structure_weight", variant.loss_weight),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
-        ConfigPatch("wandb.name", f"local-center-ss-4x100k-{variant.name}"),
-        ConfigPatch("wandb.tags", ["local-center-ss-4x100k", variant.name]),
+        ConfigPatch("wandb.name", f"local-center-ss-4x100k-v3-{variant.name}"),
+        ConfigPatch("wandb.group", "local-center-secondary-structure-4x100k-v3"),
+        ConfigPatch("wandb.tags", ["local-center-ss-4x100k", "v3", variant.name]),
     ]
     if not production:
         patches.extend([
@@ -114,7 +115,7 @@ def _assert_rendered_config(prepared, patches: list[ConfigPatch]) -> None:
         "model.secondary_structure_self_conditioning",
         "model.secondary_structure_self_conditioning_alpha", "data.secondary_structure",
         "loss.secondary_structure_weight", "logging.csv_path", "logging.jsonl_path",
-        "train.out_dir", "wandb.name", "wandb.tags", "wandb.enabled", "wandb.mode",
+        "train.out_dir", "wandb.name", "wandb.group", "wandb.tags", "wandb.enabled", "wandb.mode",
         "wandb.resume",
     }
     if any(patch.path not in allowed for patch in patches):
@@ -139,7 +140,7 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
     remote_cwd = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"
     gpu_profile = load_environment_profile(GPU_PROFILE)
     cpu_profile = load_environment_profile(CPU_PROFILE)
-    workflow_id = f"hk-local-center-secondary-structure-4x100k-{short}-v2"
+    workflow_id = f"hk-local-center-secondary-structure-4x100k-{short}-v3"
     tasks: list[dict[str, object]] = []
     train_dirs: dict[str, Path] = {}
     train_ids: dict[str, str] = {}
