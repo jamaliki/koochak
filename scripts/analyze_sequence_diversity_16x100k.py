@@ -20,6 +20,12 @@ EXPECTED_SAMPLING = {
     "step_scale": 2.25, "translation_std": 1.0, "sequence_temperature": 0.1,
 }
 CONTROL = "hard05_uniform_nojs"
+DECODER_VARIANTS = (
+    "atom_decoder_double_33836", "coarse12_decoder_double_331266",
+    "coarse12_residue6_331263", "coarse12_residue8_331283",
+    "coarse12_residue8_decoder_double_331286", "decoder_double_33866",
+    "residue_decoder_double_33863", "residue_deeper_33883",
+)
 METRICS = (
     "effective_alphabet", "entropy_bits", "max_residue_fraction",
     "max_homopolymer_run", "ca_step_bad_fraction", "ca_clashes_per_residue",
@@ -90,7 +96,7 @@ def _validate_manifest(directory: Path, step: int) -> dict[str, object]:
     return manifest
 
 
-def _load_rows(sample_root: Path, step: int) -> list[dict[str, object]]:
+def _load_rows(sample_root: Path, step: int, expected_variants: tuple[str, ...]) -> list[dict[str, object]]:
     rows = []
     for variant_dir in sorted(item for item in sample_root.iterdir() if item.is_dir()):
         _validate_manifest(variant_dir, step)
@@ -112,13 +118,8 @@ def _load_rows(sample_root: Path, step: int) -> list[dict[str, object]]:
                 row["ca_step_bad_fraction"] = step_bad
                 row["ca_clashes_per_residue"] = clashes
                 rows.append(row)
-    if not rows or {row["variant"] for row in rows} != {
-        "hard05_uniform_nojs", "hard05_uniform_js005", "hard05_polar2_nojs", "hard05_polar2_js005",
-        "hard10_uniform_nojs", "hard10_uniform_js005", "hard10_polar2_nojs", "hard10_polar2_js005",
-        "lin05to10_uniform_nojs", "lin05to10_uniform_js005", "lin05to10_polar2_nojs", "lin05to10_polar2_js005",
-        "lin05to20_uniform_nojs", "lin05to20_uniform_js005", "lin05to20_polar2_nojs", "lin05to20_polar2_js005",
-    }:
-        raise ValueError("sample root must contain exactly the 16 campaign variants")
+    if not rows or {str(row["variant"]) for row in rows} != set(expected_variants):
+        raise ValueError(f"sample root must contain exactly these variants: {expected_variants}")
     return rows
 
 
@@ -160,10 +161,12 @@ def _summaries(rows: list[dict[str, object]]) -> dict[str, object]:
     return variants
 
 
-def _bootstrap(rows: list[dict[str, object]], *, seed: int = 20260813, draws: int = 2000) -> dict[str, object]:
-    control = [row for row in rows if row["variant"] == CONTROL]
+def _bootstrap(
+    rows: list[dict[str, object]], *, control_name: str, seed: int = 20260813, draws: int = 2000
+) -> dict[str, object]:
+    control = [row for row in rows if row["variant"] == control_name]
     contrasts = {}
-    for variant in sorted({str(row["variant"]) for row in rows} - {CONTROL}):
+    for variant in sorted({str(row["variant"]) for row in rows} - {control_name}):
         candidate = [row for row in rows if row["variant"] == variant]
         per_metric = {}
         for metric in METRICS:
@@ -185,11 +188,17 @@ def _bootstrap(rows: list[dict[str, object]], *, seed: int = 20260813, draws: in
                 "upper_95": distributions[int(0.975 * draws) - 1],
             }
         contrasts[variant] = per_metric
-    return {"control": CONTROL, "draws": draws, "seed": seed, "paired_by_index_stratified_by_length": True, "metrics": contrasts}
+    return {"control": control_name, "draws": draws, "seed": seed, "paired_by_index_stratified_by_length": True, "metrics": contrasts}
 
 
-def analyze(sample_root: Path, step: int, output: Path) -> None:
-    rows = _load_rows(sample_root, step)
+def analyze(
+    sample_root: Path,
+    step: int,
+    output: Path,
+    expected_variants: tuple[str, ...],
+    control_name: str,
+) -> None:
+    rows = _load_rows(sample_root, step, expected_variants)
     audit = output.with_name(f"{output.stem}_samples.jsonl")
     audit.parent.mkdir(parents=True, exist_ok=True)
     with audit.open("w", encoding="utf-8") as stream:
@@ -200,7 +209,7 @@ def analyze(sample_root: Path, step: int, output: Path) -> None:
         "sample_root": str(sample_root),
         "manifest_contract": {"weights": "ema", "precision": "bf16", "compiled": True, "lengths": list(EXPECTED_LENGTHS), "samples_per_length": 32, "seed": 20260813},
         "variants": _summaries(rows),
-        "paired_bootstrap_vs_control": _bootstrap(rows),
+        "paired_bootstrap_vs_control": _bootstrap(rows, control_name=control_name),
         "audit_rows": str(audit),
         "bootstrap_limitation": "Intervals quantify fixed-panel sampling uncertainty, not training-seed uncertainty.",
     }
@@ -250,6 +259,9 @@ def main() -> None:
     parser.add_argument("--sample-root", type=Path)
     parser.add_argument("--step", type=int)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--expected-variant", action="append")
+    parser.add_argument("--control", default=CONTROL)
+    parser.add_argument("--decoder-followup", action="store_true")
     parser.add_argument("--finalize", action="store_true")
     parser.add_argument("--analysis-dir", type=Path)
     args = parser.parse_args()
@@ -260,7 +272,16 @@ def main() -> None:
     else:
         if args.sample_root is None or args.step is None:
             parser.error("--sample-root and --step are required")
-        analyze(args.sample_root, args.step, args.output)
+        default_variants = DECODER_VARIANTS if args.decoder_followup else (
+            "hard05_uniform_nojs", "hard05_uniform_js005", "hard05_polar2_nojs", "hard05_polar2_js005",
+            "hard10_uniform_nojs", "hard10_uniform_js005", "hard10_polar2_nojs", "hard10_polar2_js005",
+            "lin05to10_uniform_nojs", "lin05to10_uniform_js005", "lin05to10_polar2_nojs", "lin05to10_polar2_js005",
+            "lin05to20_uniform_nojs", "lin05to20_uniform_js005", "lin05to20_polar2_nojs", "lin05to20_polar2_js005",
+        )
+        expected_variants = tuple(args.expected_variant or default_variants)
+        if args.control not in expected_variants:
+            parser.error("--control must be one of the --expected-variant values")
+        analyze(args.sample_root, args.step, args.output, expected_variants, args.control)
 
 
 if __name__ == "__main__":
