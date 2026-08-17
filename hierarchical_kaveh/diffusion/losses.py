@@ -15,6 +15,7 @@ from .patch_distogram_loss_triton import patch_distogram_cross_entropy
 
 
 AA_ALPHABET = "ARNDCQEGHILKMFPSTWYV"
+SS_ALPHABET = "HEL"
 
 
 @torch.no_grad()
@@ -174,6 +175,24 @@ def aatype_marginal_js(
         q * (q.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
     ).sum()
     return torch.where(denominator > 0, js, logits.sum() * 0.0)
+
+
+def secondary_structure_cross_entropy(
+    logits: Tensor,
+    target: Tensor,
+    residue_mask: Tensor,
+) -> Tensor:
+    """Three-class H/E/L CE over valid residues."""
+
+    if logits.shape[:-1] != target.shape or target.shape != residue_mask.shape:
+        raise ValueError("secondary-structure logits, target, and mask shapes do not match")
+    if logits.shape[-1] != len(SS_ALPHABET):
+        raise ValueError("secondary-structure logits must contain exactly three classes")
+    selected = residue_mask.bool() & target.ge(0) & target.lt(len(SS_ALPHABET))
+    safe_target = target.clamp(0, len(SS_ALPHABET) - 1)
+    errors = F.cross_entropy(logits.float().movedim(-1, 1), safe_target, reduction="none")
+    weights = selected.to(errors.dtype)
+    return (errors * weights).sum() / weights.sum().clamp_min(1.0)
 
 
 def smooth_lddt_loss(
@@ -375,6 +394,22 @@ def compute_losses(
         torch.stack(intermediate_layers).mean()
         if intermediate_layers else coordinate.new_zeros(())
     )
+    if loss_config.secondary_structure_weight != 0.0:
+        if prediction.secondary_structure_logits is None:
+            raise ValueError(
+                "secondary-structure logits are required when secondary_structure_weight is nonzero"
+            )
+        if "secondary_structure" not in batch:
+            raise ValueError(
+                "batch secondary_structure labels are required when secondary_structure_weight is nonzero"
+            )
+        secondary_structure = secondary_structure_cross_entropy(
+            prediction.secondary_structure_logits,
+            batch["secondary_structure"],
+            batch["residue_mask"],
+        )
+    else:
+        secondary_structure = coordinate.new_zeros(())
     total = (
         loss_config.coordinate_weight * coordinate
         + loss_config.aatype_weight * (
@@ -383,6 +418,7 @@ def compute_losses(
         + loss_config.smooth_lddt_weight * smooth_lddt
         + loss_config.distogram_weight * distogram
         + loss_config.intermediate_distogram_weight * intermediate_distogram
+        + loss_config.secondary_structure_weight * secondary_structure
     )
     losses = {
         "loss": total,
@@ -393,6 +429,7 @@ def compute_losses(
         "aatype_sigma_weight_mean": aatype_weights.mean(),
         "smooth_lddt_loss": smooth_lddt,
         "distogram_loss": distogram,
+        "secondary_structure_loss": secondary_structure,
     }
     if intermediate_layers or loss_config.intermediate_distogram_weight != 0.0:
         losses["intermediate_distogram_loss"] = intermediate_distogram
@@ -413,4 +450,6 @@ __all__ = [
     "compute_losses",
     "distogram_cross_entropy",
     "smooth_lddt_loss",
+    "SS_ALPHABET",
+    "secondary_structure_cross_entropy",
 ]

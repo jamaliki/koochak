@@ -48,6 +48,10 @@ class ModelConfig:
     checkpoint_blocks: bool = False
     intermediate_distograms: bool = False
     intermediate_distogram_feedback: bool = False
+    secondary_structure_conditioning: bool = False
+    secondary_structure_prediction: bool = False
+    secondary_structure_self_conditioning: bool = False
+    secondary_structure_self_conditioning_alpha: float = 0.5
 
     def __post_init__(self) -> None:
         positive = (
@@ -96,6 +100,12 @@ class ModelConfig:
             raise ValueError("pair_self_conditioned_geometry requires local_center geometry")
         if self.intermediate_distogram_feedback and not self.intermediate_distograms:
             raise ValueError("intermediate distogram feedback requires intermediate_distograms")
+        if self.secondary_structure_prediction and not self.secondary_structure_conditioning:
+            raise ValueError("secondary-structure prediction requires conditioning")
+        if self.secondary_structure_self_conditioning and not self.secondary_structure_prediction:
+            raise ValueError("secondary-structure self-conditioning requires prediction")
+        if not 0.0 <= self.secondary_structure_self_conditioning_alpha <= 1.0:
+            raise ValueError("secondary-structure self-conditioning alpha must lie in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,8 @@ class DataConfig:
     # disjoint shards. An integer retains a bounded lazy cache for small-memory
     # environments and tests.
     shard_cache_size: int | None = None
+    secondary_structure: bool = False
+    secondary_structure_mask_probability: float = 0.5
     seed: int = 42
     length_buckets: tuple[int, ...] = (64, 96, 128)
 
@@ -126,6 +138,8 @@ class DataConfig:
             raise ValueError("batch_size must be positive and num_workers non-negative")
         if self.shard_cache_size is not None and self.shard_cache_size <= 0:
             raise ValueError("shard_cache_size must be positive or null")
+        if not 0.0 <= self.secondary_structure_mask_probability <= 1.0:
+            raise ValueError("secondary_structure_mask_probability must lie in [0, 1]")
         if self.mean_plddt_min is not None and not 0.0 <= self.mean_plddt_min <= 100.0:
             raise ValueError("data.mean_plddt_min must lie in [0, 100]")
         if self.loop_content_max is not None and not 0.0 <= self.loop_content_max <= 1.0:
@@ -159,6 +173,7 @@ class LossConfig:
     smooth_lddt_weight: float = 1.0
     distogram_weight: float = 0.5
     intermediate_distogram_weight: float = 0.0
+    secondary_structure_weight: float = 0.0
     polar_aatypes: str = "RNDCEQHKSTY"
     polar_weight: float = 2.0
     smooth_lddt_cutoff: float = 15.0
@@ -188,6 +203,8 @@ class LossConfig:
             raise ValueError("loss.smooth_lddt_chunk_size must be positive")
         if self.intermediate_distogram_weight < 0:
             raise ValueError("loss intermediate distogram weight must be non-negative")
+        if self.secondary_structure_weight < 0:
+            raise ValueError("secondary_structure_weight must be non-negative")
 
 
 @dataclass(frozen=True)

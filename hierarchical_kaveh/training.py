@@ -62,6 +62,7 @@ def denoiser_input(
         chain_break=batch["chain_breaks_per_residue"],
         atom_mask=batch["model_atom_mask"].to(torch.bool),
         aatype_input=batch["aatype_input"],
+        secondary_structure_input=batch.get("secondary_structure_input"),
     )
     return inputs.with_self_conditioning(previous)
 
@@ -133,6 +134,9 @@ class PallatomTrainingStep:
             ).detach(),
             "smooth_lddt_loss": losses["smooth_lddt_loss"].detach(),
             "distogram_loss": losses["distogram_loss"].detach(),
+            "secondary_structure_loss": losses.get(
+                "secondary_structure_loss", losses["loss"].new_zeros(())
+            ).detach(),
             "self_conditioned": losses["loss"].new_tensor(float(use_self_conditioning)),
             "node_count": batch["residue_mask"].sum(),
             "node_slot_count": batch["model_atom_mask"].sum(),

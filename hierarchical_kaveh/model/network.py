@@ -34,6 +34,10 @@ AA_INPUT_CLASSES = 22  # 20 standard amino acids, unknown/mask, padding
 AA_OUTPUT_CLASSES = 20
 UNKNOWN_AA = 20
 PAD_AA = 21
+SS_INPUT_CLASSES = 5  # H, E, L, unknown/mask, padding
+SS_OUTPUT_CLASSES = 3
+UNKNOWN_SS = 3
+PAD_SS = 4
 
 
 def _broadcast_sigma(sigma: Tensor, coordinates: Tensor) -> Tensor:
@@ -54,15 +58,34 @@ def _broadcast_sigma(sigma: Tensor, coordinates: Tensor) -> Tensor:
 
 
 class ResidueInput(nn.Module):
-    """Masked amino-acid and chain-break residue metadata."""
+    """Masked residue metadata, optionally including secondary structure."""
 
-    def __init__(self, node_dim: int):
+    def __init__(
+        self,
+        node_dim: int,
+        *,
+        secondary_structure_conditioning: bool = False,
+        secondary_structure_self_conditioning: bool = False,
+        secondary_structure_self_conditioning_alpha: float = 0.5,
+    ):
         super().__init__()
         self.chain_break = nn.Linear(1, node_dim, bias=False)
         self.aatype = nn.Linear(AA_INPUT_CLASSES, node_dim, bias=False)
         # A one-hot selects one column: initialize these as embedding tables.
         nn.init.normal_(self.aatype.weight, std=1.0)
-        self.scales = nn.Parameter(torch.full((2,), 1.0 / math.sqrt(2.0)))
+        self.secondary_structure_conditioning = bool(secondary_structure_conditioning)
+        self.secondary_structure_self_conditioning = bool(secondary_structure_self_conditioning)
+        if self.secondary_structure_conditioning:
+            self.secondary_structure = nn.Linear(SS_INPUT_CLASSES, node_dim, bias=False)
+            nn.init.normal_(self.secondary_structure.weight, std=1.0)
+        if self.secondary_structure_self_conditioning:
+            self.secondary_structure_self = nn.Linear(SS_OUTPUT_CLASSES, node_dim, bias=False)
+            nn.init.zeros_(self.secondary_structure_self.weight)
+        self.secondary_structure_self_conditioning_alpha = float(
+            secondary_structure_self_conditioning_alpha
+        )
+        piece_count = 2 + int(self.secondary_structure_conditioning)
+        self.scales = nn.Parameter(torch.full((piece_count,), 1.0 / math.sqrt(piece_count)))
 
     @staticmethod
     def _indices(value: Tensor | None, residue_mask: Tensor) -> Tensor:
@@ -74,24 +97,66 @@ class ResidueInput(nn.Module):
             value = value.long().clamp(0, UNKNOWN_AA)
         return torch.where(residue_mask, value, torch.full_like(value, PAD_AA))
 
+    @staticmethod
+    def _secondary_structure_indices(value: Tensor | None, residue_mask: Tensor) -> Tensor:
+        if value is None:
+            value = torch.full_like(residue_mask, UNKNOWN_SS, dtype=torch.long)
+        else:
+            if value.shape != residue_mask.shape:
+                raise ValueError("secondary-structure input must have [B,N] shape")
+            value = value.long().clamp(0, UNKNOWN_SS)
+        return torch.where(residue_mask, value, torch.full_like(value, PAD_SS))
+
     def forward(
         self,
         aatype_input: Tensor | None,
         chain_break: Tensor,
         residue_mask: Tensor,
+        secondary_structure_input: Tensor | None = None,
+        self_conditioned_secondary_structure: Tensor | None = None,
     ) -> Tensor:
         aa = F.one_hot(
             self._indices(aatype_input, residue_mask), AA_INPUT_CLASSES
         ).to(self.aatype.weight.dtype)
-        pieces = torch.stack(
-            (
-                self.chain_break(chain_break[..., None].to(self.chain_break.weight.dtype)),
-                self.aatype(aa),
-            ),
-            dim=-2,
-        )
-        x = (pieces * self.scales.to(pieces.dtype)[..., None]).sum(-2)
+        pieces = [
+            self.chain_break(chain_break[..., None].to(self.chain_break.weight.dtype)),
+            self.aatype(aa),
+        ]
+        if self.secondary_structure_conditioning:
+            ss = F.one_hot(
+                self._secondary_structure_indices(secondary_structure_input, residue_mask),
+                SS_INPUT_CLASSES,
+            ).to(self.secondary_structure.weight.dtype)
+            pieces.append(self.secondary_structure(ss))
+            if self.secondary_structure_self_conditioning:
+                if self_conditioned_secondary_structure is None:
+                    ss_self = torch.zeros_like(pieces[-1])
+                else:
+                    if self_conditioned_secondary_structure.shape != (*residue_mask.shape, SS_OUTPUT_CLASSES):
+                        raise ValueError(
+                            "self-conditioned secondary structure must have [B,N,3] shape"
+                        )
+                    probabilities = self_conditioned_secondary_structure.float().softmax(-1)
+                    predicted = self.secondary_structure_self(probabilities.to(pieces[-1].dtype))
+                    alpha = self.secondary_structure_self_conditioning_alpha
+                    pieces[-1] = (1.0 - alpha) * pieces[-1] + alpha * predicted
+        stacked = torch.stack(pieces, dim=-2)
+        x = (stacked * self.scales.to(stacked.dtype)[..., None]).sum(-2)
         return x * residue_mask[..., None].to(x.dtype)
+
+
+class SecondaryStructureHead(nn.Module):
+    """Three-class H/E/L predictor over final residue representations."""
+
+    def __init__(self, node_dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(node_dim)
+        self.features = nn.Linear(node_dim, node_dim)
+        self.output = init_linear(nn.Linear(node_dim, SS_OUTPUT_CLASSES, bias=False), "zero")
+
+    def forward(self, residues: Tensor, residue_mask: Tensor) -> Tensor:
+        logits = self.output(F.relu(self.features(self.norm(residues))))
+        return logits * residue_mask[..., None].to(logits.dtype)
 
 
 class AtomSequenceHead(nn.Module):
@@ -126,7 +191,12 @@ class HierarchicalKaveh(nn.Module):
 
         self.time_embedding = TimeEmbedding(14, c.condition_dim)
         self.time_ffn = FeedForward(c.condition_dim, None, 2, 0.0)
-        self.residue_input = ResidueInput(c.node_dim)
+        self.residue_input = ResidueInput(
+            c.node_dim,
+            secondary_structure_conditioning=c.secondary_structure_conditioning,
+            secondary_structure_self_conditioning=c.secondary_structure_self_conditioning,
+            secondary_structure_self_conditioning_alpha=c.secondary_structure_self_conditioning_alpha,
+        )
         self.registers = nn.Parameter(torch.randn(REGISTER_COUNT, c.node_dim) / 20.0)
 
         self.atom_input = AtomInput(c.node_dim, c.condition_dim, c.atom_dim)
@@ -179,6 +249,10 @@ class HierarchicalKaveh(nn.Module):
         self.distogram_pair_feedback = (
             DistogramPairFeedback(c.distogram_bins, c.pair_dim)
             if c.intermediate_distogram_feedback else None
+        )
+        self.secondary_structure_output = (
+            SecondaryStructureHead(c.node_dim)
+            if c.secondary_structure_prediction else None
         )
 
     def _validate(self, inputs: DenoiserInput) -> tuple[Tensor, Tensor]:
@@ -268,6 +342,8 @@ class HierarchicalKaveh(nn.Module):
             inputs.aatype_input,
             inputs.chain_break,
             residue_mask,
+            inputs.secondary_structure_input,
+            inputs.self_conditioned_secondary_structure,
         )
         batch_size, residue_count = residue_mask.shape
         registers = self.registers[None].expand(batch_size, -1, -1)
@@ -359,6 +435,11 @@ class HierarchicalKaveh(nn.Module):
         raw_update = self.atom_output.decode(atoms, active_atom_mask)
         raw_update = F.pad(raw_update, (0, 0, 0, 0, 0, residue_count - active_residues))
         aatype_logits = self.aatype_output(atoms, active_atom_mask, residue_count)
+        secondary_structure_logits = (
+            None
+            if self.secondary_structure_output is None
+            else self.secondary_structure_output(residue_x, residue_mask)
+        )
 
         sigma_data_sq = self.config.sigma_data**2
         denominator = sigma.square() + sigma_data_sq
@@ -372,6 +453,7 @@ class HierarchicalKaveh(nn.Module):
             aatype_logits=aatype_logits,
             distogram=self.distogram(pair, layout) if compute_distogram else None,
             intermediate_distograms=tuple(intermediate_distograms),
+            secondary_structure_logits=secondary_structure_logits,
         )
 
     def denoise(

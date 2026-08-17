@@ -44,7 +44,7 @@ def _metadata_entries(metadata_path: Path) -> list[dict[str, Any]]:
 class ShardCache:
     """Bounded worker-local LRU of decompressed training arrays."""
 
-    _keys = ("pos", "mask", "aatype", "chain_idx", "res_idx")
+    _keys = ("pos", "mask", "aatype", "chain_idx", "res_idx", "sec_struct")
 
     def __init__(self, capacity: int | None):
         if capacity is not None and capacity <= 0:
@@ -63,7 +63,11 @@ class ShardCache:
             self._arrays.move_to_end(shard)
             return cached
         with np.load(shard, allow_pickle=False) as payload:
-            cached = {key: np.asarray(payload[key]) for key in self._keys}
+            cached = {
+                key: np.asarray(payload[key])
+                for key in self._keys
+                if key in payload.files
+            }
         self.misses += 1
         self.resident_bytes += sum(int(array.nbytes) for array in cached.values())
         self._arrays[shard] = cached
@@ -165,6 +169,7 @@ def load_sample(
     reference: SampleReference,
     *,
     cache: ShardCache | None = None,
+    include_secondary_structure: bool = False,
 ) -> dict[str, Tensor | float]:
     """Load and normalize one sample from an existing ragged NPZ shard."""
 
@@ -175,6 +180,16 @@ def load_sample(
     aatype = torch.from_numpy(arrays["aatype"][start:stop]).to(torch.long)
     chain_idx = torch.from_numpy(arrays["chain_idx"][start:stop]).to(torch.long)
     res_idx = torch.from_numpy(arrays["res_idx"][start:stop]).to(torch.long)
+    secondary_structure = None
+    if include_secondary_structure:
+        if "sec_struct" not in arrays:
+            raise ValueError(f"sample shard has no sec_struct array: {reference.shard}")
+        raw_secondary_structure = np.asarray(arrays["sec_struct"])
+        if raw_secondary_structure.ndim != 1 or len(raw_secondary_structure) < stop:
+            raise ValueError(f"invalid sec_struct array in {reference.shard}")
+        secondary_structure = torch.from_numpy(
+            raw_secondary_structure[start:stop]
+        ).to(torch.long)
 
     # A residue without CA cannot participate in the residue stream. Removing
     # it also turns an internal unresolved gap into a residue-index break.
@@ -186,6 +201,10 @@ def load_sample(
     aatype = aatype[resolved_residue]
     chain_idx = chain_idx[resolved_residue]
     res_idx = res_idx[resolved_residue]
+    if secondary_structure is not None:
+        secondary_structure = secondary_structure[resolved_residue]
+        if not bool(secondary_structure.ge(0).logical_and(secondary_structure.lt(3)).all()):
+            raise ValueError("secondary-structure labels must be H/E/L encoded as [0, 3)")
     if not bool(aatype.ge(0).logical_and(aatype.lt(20)).all()):
         raise ValueError("training samples require canonical residue types in [0, 20)")
 
@@ -213,7 +232,7 @@ def load_sample(
         pair_valid = model_atom_mask[1:, 1] & model_atom_mask[:-1, 1]
         chain_break[1:] = pair_valid & (ca_distance > 4.0)
 
-    return {
+    result: dict[str, Tensor | float] = {
         "atom14_coordinates": coordinates,
         "model_atom_mask": model_atom_mask,
         "coordinate_mask": coordinate_mask,
@@ -223,6 +242,9 @@ def load_sample(
         "res_idx": res_idx,
         "chain_breaks_per_residue": chain_break,
     }
+    if secondary_structure is not None:
+        result["secondary_structure"] = secondary_structure
+    return result
 
 
 __all__ = ["SampleReference", "ShardCache", "index_shards", "load_sample"]

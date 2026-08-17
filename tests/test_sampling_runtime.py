@@ -61,6 +61,8 @@ def test_chain_topology_uses_index_gap_not_synthetic_break() -> None:
     assert topology.residue_index[0].tolist() == [1, 2, 3, 67, 68]
     assert topology.chain_index[0].tolist() == [0, 0, 0, 1, 1]
     assert not topology.chain_break.any()
+    assert topology.secondary_structure_input.shape == (2, 5)
+    assert topology.secondary_structure_input.eq(3).all()
 
 
 def test_chain_length_parser_and_schedule() -> None:

@@ -21,6 +21,7 @@ class SampleTopology:
     chain_break: Tensor
     atom_mask: Tensor
     chain_lengths: tuple[int, ...]
+    secondary_structure_input: Tensor
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class SampleBatch:
     coordinates: Tensor
     aatype: Tensor
     topology: SampleTopology
+    secondary_structure: Tensor | None = None
 
 
 def parse_chain_lengths(value: str) -> tuple[int, ...]:
@@ -48,6 +50,7 @@ def build_topology(
     device: torch.device | str,
     *,
     chain_gap: int = 64,
+    secondary_structure: Tensor | None = None,
 ) -> SampleTopology:
     """Build training-compatible chain IDs, residue indices, and break flags."""
 
@@ -70,7 +73,27 @@ def build_topology(
         dtype=torch.bool,
         device=device,
     )
-    return SampleTopology(residue_index, chain_index, chain_break, atom_mask, chain_lengths)
+    total_residues = residue_index.shape[1]
+    if secondary_structure is None:
+        secondary_structure_input = torch.full(
+            (batch_size, total_residues), 3, dtype=torch.long, device=device
+        )
+    else:
+        secondary_structure_input = torch.as_tensor(secondary_structure, device=device).long()
+        if secondary_structure_input.ndim == 1:
+            if secondary_structure_input.shape != (total_residues,):
+                raise ValueError("secondary_structure must have [residues] shape")
+            secondary_structure_input = secondary_structure_input[None].expand(batch_size, -1)
+        elif secondary_structure_input.shape != (batch_size, total_residues):
+            raise ValueError("secondary_structure must have [batch,residues] shape")
+        if not bool(
+            secondary_structure_input.ge(0).logical_and(secondary_structure_input.le(3)).all()
+        ):
+            raise ValueError("secondary_structure values must be H/E/L/X encoded as [0, 4)")
+    return SampleTopology(
+        residue_index, chain_index, chain_break, atom_mask, chain_lengths,
+        secondary_structure_input,
+    )
 
 
 def sigma_schedule(
@@ -181,6 +204,7 @@ def sample(
     dtype: torch.dtype = torch.bfloat16,
     generator: torch.Generator | None = None,
     use_intermediate_feedback: bool | None = None,
+    secondary_structure_input: Tensor | None = None,
 ) -> SampleBatch:
     """Run a stochastic Euler sampler on one coherent EDM time grid."""
 
@@ -194,7 +218,9 @@ def sample(
         use_intermediate_feedback = bool(
             getattr(model_config, "intermediate_distogram_feedback", False)
         )
-    topology = build_topology(chain_lengths, batch_size, device)
+    topology = build_topology(
+        chain_lengths, batch_size, device, secondary_structure=secondary_structure_input
+    )
     sigma_data = float(getattr(getattr(model, "config", None), "sigma_data", ModelConfig().sigma_data))
     time_grid = _sample_time_grid(
         config.num_steps,
@@ -283,6 +309,12 @@ def sample(
                 atom_mask=topology.atom_mask,
                 aatype_input=unknown_aatype,
                 self_conditioned_coordinates=aligned_self_conditioning,
+                secondary_structure_input=topology.secondary_structure_input,
+                self_conditioned_secondary_structure=(
+                    None
+                    if last_prediction is None
+                    else last_prediction.secondary_structure_logits
+                ),
             )
             with autocast():
                 last_prediction = model(
@@ -300,7 +332,12 @@ def sample(
     if not torch.isfinite(final_coordinates).all():
         raise FloatingPointError("sampler produced non-finite coordinates")
     final_aatype = _decode_aatype(last_prediction.aatype_logits, config.sequence_temperature)
-    return SampleBatch(final_coordinates, final_aatype, topology)
+    final_secondary_structure = (
+        None
+        if last_prediction.secondary_structure_logits is None
+        else last_prediction.secondary_structure_logits.argmax(dim=-1)
+    )
+    return SampleBatch(final_coordinates, final_aatype, topology, final_secondary_structure)
 
 
 __all__ = [

@@ -107,6 +107,32 @@ def test_output_contract_is_finite():
     assert torch.isfinite(output.coordinates).all()
 
 
+def test_secondary_structure_conditioning_prediction_and_recycling() -> None:
+    model = HierarchicalKaveh(
+        small_config(
+            secondary_structure_conditioning=True,
+            secondary_structure_prediction=True,
+            secondary_structure_self_conditioning=True,
+        )
+    ).eval()
+    inputs = sample_input(lengths=(5,), padded=5)
+    inputs = DenoiserInput(
+        coordinates=inputs.coordinates,
+        sigma=inputs.sigma,
+        residue_index=inputs.residue_index,
+        chain_index=inputs.chain_index,
+        chain_break=inputs.chain_break,
+        atom_mask=inputs.atom_mask,
+        aatype_input=inputs.aatype_input,
+        secondary_structure_input=torch.tensor([[0, 1, 2, 3, 0]]),
+    )
+    first = model(inputs, compute_distogram=False)
+    second = model(inputs.with_self_conditioning(first), compute_distogram=False)
+    assert first.secondary_structure_logits is not None
+    assert first.secondary_structure_logits.shape == (1, 5, 3)
+    assert torch.isfinite(second.secondary_structure_logits).all()
+
+
 def test_pair_multiplication_is_present_every_coarse_layer_with_separate_trainable_scales():
     model = HierarchicalKaveh(small_config(coarse_depth=3))
     blocks = [block.pair_multiplication for block in model.coarse]

@@ -8,6 +8,7 @@ from hierarchical_kaveh.diffusion import (
     aatype_sigma_weights,
     compute_losses,
     distogram_cross_entropy,
+    secondary_structure_cross_entropy,
     smooth_lddt_loss,
 )
 from hierarchical_kaveh.types import CompactDistogram, DenoiserInput, Prediction
@@ -220,6 +221,7 @@ def test_compute_losses_has_only_supported_final_objectives() -> None:
         "aatype_sigma_weight_mean",
         "smooth_lddt_loss",
         "distogram_loss",
+        "secondary_structure_loss",
     }
     torch.testing.assert_close(losses["coordinate_loss"], torch.zeros(()))
 
@@ -266,3 +268,55 @@ def test_compute_losses_gates_sequence_ce_at_inclusive_sigma_boundary() -> None:
     assert logits.grad is not None
     assert torch.count_nonzero(logits.grad[:2]) > 0
     assert torch.count_nonzero(logits.grad[2]) == 0
+
+
+def test_secondary_structure_cross_entropy_ignores_unknown_and_padding() -> None:
+    logits = torch.zeros(1, 4, 3, requires_grad=True)
+    target = torch.tensor([[0, 1, 2, 3]])
+    mask = torch.tensor([[True, True, True, False]])
+    loss = secondary_structure_cross_entropy(logits, target, mask)
+    torch.testing.assert_close(loss, torch.log(torch.tensor(3.0)))
+    loss.backward()
+    assert torch.count_nonzero(logits.grad[0, 3]) == 0
+
+
+def test_compute_losses_includes_weighted_secondary_structure_objective() -> None:
+    batch_size, residues = 1, 3
+    atom_mask = torch.ones(batch_size, residues, 14, dtype=torch.bool)
+    target = torch.randn(batch_size, residues, 14, 3)
+    ss_logits = torch.zeros(batch_size, residues, 3, requires_grad=True)
+    batch = {
+        "x0": target,
+        "sigma": torch.full((batch_size,), 0.25),
+        "coordinate_mask": atom_mask,
+        "residue_mask": atom_mask[..., 1],
+        "aatype": torch.zeros(batch_size, residues, dtype=torch.long),
+        "secondary_structure": torch.tensor([[0, 1, 2]]),
+    }
+    losses = compute_losses(
+        Prediction(
+            coordinates=target,
+            aatype_logits=torch.zeros(batch_size, residues, 20),
+            secondary_structure_logits=ss_logits,
+        ),
+        DenoiserInput(
+            coordinates=target,
+            sigma=torch.full((batch_size, residues, 14), 0.25),
+            residue_index=torch.arange(residues)[None],
+            chain_index=torch.zeros(batch_size, residues, dtype=torch.long),
+            chain_break=torch.zeros(batch_size, residues, dtype=torch.bool),
+            atom_mask=atom_mask,
+        ),
+        batch,
+        LossConfig(
+            coordinate_weight=0.0,
+            aatype_weight=0.0,
+            smooth_lddt_weight=0.0,
+            distogram_weight=0.0,
+            secondary_structure_weight=1.0,
+        ),
+        ModelConfig(),
+    )
+    torch.testing.assert_close(losses["loss"], losses["secondary_structure_loss"])
+    losses["loss"].backward()
+    assert ss_logits.grad is not None

@@ -161,15 +161,30 @@ def write_sample_batch(
     chain_lengths: Sequence[int],
     *,
     start_index: int = 0,
+    secondary_structure: Tensor | None = None,
 ) -> None:
     """Write paired PDB and FASTA files for a sampled batch."""
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if secondary_structure is not None and secondary_structure.shape != aatype.shape:
+        raise ValueError("secondary_structure must have the same [batch,residues] shape as aatype")
+    ss_symbols = "HELX"
     for batch_index in range(coordinates.shape[0]):
         name = f"sample_{start_index + batch_index:05d}"
         write_pdb(output_dir / f"{name}.pdb", coordinates[batch_index], aatype[batch_index], chain_lengths)
         write_fasta(output_dir / f"{name}.fasta", aatype[batch_index], chain_lengths, name)
+        if secondary_structure is not None:
+            write_text = "".join(
+                ss_symbols[int(value)] if 0 <= int(value) < len(ss_symbols) else "X"
+                for value in secondary_structure[batch_index].detach().long().cpu()
+            )
+            offsets = []
+            start = 0
+            for length in chain_lengths:
+                offsets.append(write_text[start:start + length])
+                start += length
+            (output_dir / f"{name}.ss").write_text("/".join(offsets) + "\n", encoding="ascii")
 
 
 __all__ = [

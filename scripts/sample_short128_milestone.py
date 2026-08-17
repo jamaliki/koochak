@@ -34,6 +34,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Load weights strictly while allowing additive checkpoint/config schema differences.",
     )
     parser.add_argument("--compile", action="store_true", help="Compile the inference model.")
+    parser.add_argument(
+        "--secondary-structure",
+        default="all_x",
+        help="H/E/L/X pattern, all_x, or one pattern per residue for each sampled length.",
+    )
     return parser
 
 
@@ -47,6 +52,14 @@ def _parse_lengths(value: str) -> tuple[int, ...]:
     if len(set(lengths)) != len(lengths):
         raise ValueError("sampling lengths must be unique")
     return lengths
+
+
+def _parse_secondary_structure(value: str, length: int) -> torch.Tensor:
+    if value.lower() in {"all_x", "x"}:
+        return torch.full((length,), 3, dtype=torch.long)
+    if len(value) != length or any(symbol.upper() not in "HELX" for symbol in value):
+        raise ValueError(f"secondary-structure pattern must be all_x or exactly {length} H/E/L/X symbols")
+    return torch.tensor(["HELX".index(symbol.upper()) for symbol in value], dtype=torch.long)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -75,6 +88,7 @@ def main(argv: list[str] | None = None) -> None:
         length_dir = output_root / f"L{length:04d}"
         completed = 0
         generator = torch.Generator(device=device).manual_seed(args.seed + length)
+        ss_input = _parse_secondary_structure(args.secondary_structure, length).to(device)
         while completed < args.samples_per_length:
             current_batch = min(args.batch_size, args.samples_per_length - completed)
             result = sample(
@@ -86,6 +100,7 @@ def main(argv: list[str] | None = None) -> None:
                 dtype=dtype,
                 generator=generator,
                 use_intermediate_feedback=use_intermediate_feedback,
+                secondary_structure_input=ss_input,
             )
             write_sample_batch(
                 length_dir,
@@ -93,6 +108,7 @@ def main(argv: list[str] | None = None) -> None:
                 result.aatype,
                 (length,),
                 start_index=completed,
+                secondary_structure=result.secondary_structure,
             )
             completed += current_batch
 
@@ -108,6 +124,7 @@ def main(argv: list[str] | None = None) -> None:
         "compiled": args.compile,
         "recurrent_self_conditioning": True,
         "intermediate_feedback": use_intermediate_feedback,
+        "secondary_structure_condition": args.secondary_structure,
         "sampling": asdict(config.sampling),
     }
     (output_root / "manifest.json").write_text(

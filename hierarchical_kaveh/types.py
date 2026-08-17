@@ -23,6 +23,8 @@ class DenoiserInput:
     atom_mask: Tensor
     aatype_input: Tensor | None = None
     self_conditioned_coordinates: Tensor | None = None
+    secondary_structure_input: Tensor | None = None
+    self_conditioned_secondary_structure: Tensor | None = None
 
     @property
     def residue_mask(self) -> Tensor:
@@ -48,8 +50,20 @@ class DenoiserInput:
         """Return an input carrying a detached previous denoiser prediction."""
 
         if prediction is None:
-            return replace(self, self_conditioned_coordinates=None)
-        return replace(self, self_conditioned_coordinates=prediction.coordinates.detach())
+            return replace(
+                self,
+                self_conditioned_coordinates=None,
+                self_conditioned_secondary_structure=None,
+            )
+        return replace(
+            self,
+            self_conditioned_coordinates=prediction.coordinates.detach(),
+            self_conditioned_secondary_structure=(
+                None
+                if prediction.secondary_structure_logits is None
+                else prediction.secondary_structure_logits.detach()
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -86,6 +100,7 @@ class Prediction:
     aatype_logits: Tensor
     distogram: Tensor | CompactDistogram | None = None
     intermediate_distograms: tuple[CompactDistogram, ...] = ()
+    secondary_structure_logits: Tensor | None = None
 
     def detach(self) -> "Prediction":
         """Detach a prediction for reuse as self-conditioning."""
@@ -101,5 +116,10 @@ class Prediction:
             distogram=distogram,
             intermediate_distograms=tuple(
                 intermediate.detach() for intermediate in self.intermediate_distograms
+            ),
+            secondary_structure_logits=(
+                None
+                if self.secondary_structure_logits is None
+                else self.secondary_structure_logits.detach()
             ),
         )

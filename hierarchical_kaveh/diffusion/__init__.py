@@ -8,6 +8,7 @@ from .losses import (
     aatype_sigma_weights,
     compute_losses,
     distogram_cross_entropy,
+    secondary_structure_cross_entropy,
     smooth_lddt_loss,
 )
 from .schedules import sample_training_sigma, sigma_from_probability
@@ -20,6 +21,7 @@ __all__ = [
     "compute_losses",
     "corrupt_structure",
     "distogram_cross_entropy",
+    "secondary_structure_cross_entropy",
     "random_rigid_augmentation",
     "sample_training_sigma",
     "sigma_from_probability",

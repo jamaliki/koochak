@@ -19,6 +19,9 @@ from hierarchical_kaveh.diffusion.schedules import sample_training_sigma
 from .shards import SampleReference, ShardCache, index_shards, load_sample
 
 
+SECONDARY_STRUCTURE_UNKNOWN = 3
+
+
 def _seed(base: int, rank: int, worker: int, global_step: int) -> int:
     """Stable 63-bit seed mixer independent of Python hash randomization."""
 
@@ -97,6 +100,23 @@ def _crop(clean: dict[str, Any], max_length: int, generator: torch.Generator) ->
     }
 
 
+def _mask_secondary_structure(
+    clean: dict[str, Any],
+    generator: torch.Generator,
+    probability: float,
+) -> dict[str, Any]:
+    labels = clean["secondary_structure"]
+    masked = torch.rand(labels.shape, generator=generator) < float(probability)
+    return {
+        **clean,
+        "secondary_structure_input": torch.where(
+            masked,
+            torch.full_like(labels, SECONDARY_STRUCTURE_UNKNOWN),
+            labels,
+        ),
+    }
+
+
 def collate_samples(
     samples: Sequence[Mapping[str, Tensor]],
     *,
@@ -124,6 +144,11 @@ def collate_samples(
         "chain_idx": -1,
         "chain_breaks_per_residue": False,
     }
+    if "secondary_structure" in samples[0]:
+        pad_values.update({
+            "secondary_structure": SECONDARY_STRUCTURE_UNKNOWN,
+            "secondary_structure_input": SECONDARY_STRUCTURE_UNKNOWN + 1,
+        })
 
     def padded(key: str) -> Tensor:
         values = []
@@ -210,10 +235,20 @@ class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
 
         while True:
             clean = _crop(
-                load_sample(pool.pop(), cache=shard_cache),
+                load_sample(
+                    pool.pop(),
+                    cache=shard_cache,
+                    include_secondary_structure=self.data.secondary_structure,
+                ),
                 self.data.max_length,
                 generator,
             )
+            if self.data.secondary_structure:
+                clean = _mask_secondary_structure(
+                    clean,
+                    generator,
+                    self.data.secondary_structure_mask_probability,
+                )
             sigma = sample_training_sigma(
                 generator,
                 p_mean=self.diffusion.p_mean,
