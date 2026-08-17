@@ -11,12 +11,11 @@ from pathlib import Path
 import subprocess
 import sys
 
-from koochak.jobs import load_environment_profile, prepare_run, submit_scruffy
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
 
 import koochak  # noqa: E402
+from koochak.jobs import load_environment_profile, prepare_run, submit_scruffy  # noqa: E402
 
 
 BASE_MAIN_COMMIT = "c7dc7e0"
