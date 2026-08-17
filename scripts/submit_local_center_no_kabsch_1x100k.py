@@ -108,6 +108,15 @@ def _task(task_id: str, prepared, resource: str, needs=None) -> dict[str, object
     return {"task_id": task_id, "run": prepared, "resource": resource, "needs": needs or []}
 
 
+def _checkpoint_path(train_dir: Path, step: int) -> Path:
+    """Resolve the checkpoint naming used by the training writer."""
+    candidates = (train_dir / f"step{step:09d}.pt", train_dir / f"step{step:07d}.pt")
+    for checkpoint in candidates:
+        if checkpoint.is_file() and checkpoint.stat().st_size > 0:
+            return checkpoint
+    raise FileNotFoundError(f"checkpoint missing; checked: {candidates}")
+
+
 def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
     short = commit[:7]
     output_root = REMOTE_RUN_ROOT / "local-center-coordinate-alignment-1x100k" / commit
@@ -128,7 +137,7 @@ def _prepare_tasks(commit: str) -> tuple[str, list[dict[str, object]]]:
     sample_ids: list[str] = []
     for step in MILESTONES:
         sample_dir = output_root / "samples" / f"step{step:06d}" / CONTROL.name
-        checkpoint = train_dir / f"step{step:07d}.pt"
+        checkpoint = _checkpoint_path(train_dir, step)
         sample = prepare_run(
             name=f"hk-local-center-align-sample-{step}-{CONTROL.name}-{short}",
             profile=gpu_profile,
