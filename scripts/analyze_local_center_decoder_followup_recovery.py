@@ -15,9 +15,9 @@ RUN_ROOT = Path(
     "1ecf2c66b659d0f0b335405e231dda5e4e7a40ae/v1"
 )
 ORIGINAL_PANEL = RUN_ROOT / "samples" / "step100000"
-RECOVERY_SAMPLE = RUN_ROOT / "samples" / "step100000-recovery-v3" / "coarse12_residue8_decoder_double_331286"
-PANEL_ROOT = RUN_ROOT / "samples" / "step100000-recovery-v3-panel"
-OUTPUT = RUN_ROOT / "analysis" / "milestone_step100000-recovery-v3.json"
+RECOVERY_SAMPLE = RUN_ROOT / "samples" / "step100000-recovery-v4" / "coarse12_residue8_331283"
+PANEL_ROOT = RUN_ROOT / "samples" / "step100000-recovery-v4-panel"
+OUTPUT = RUN_ROOT / "analysis" / "milestone_step100000-recovery-v4.json"
 VARIANTS = (
     "atom_decoder_double_33836", "coarse12_decoder_double_331266",
     "coarse12_residue6_331263", "coarse12_residue8_331283",

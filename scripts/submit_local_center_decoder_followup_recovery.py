@@ -25,12 +25,12 @@ PROJECT_ID = "kaveh-ce20-20260806"
 SOURCE_COMMIT = "1ecf2c66b659d0f0b335405e231dda5e4e7a40ae"
 SOURCE_ROOT = REMOTE_RUN_ROOT / "local-center-decoder-followup-8x100k" / SOURCE_COMMIT / "v1"
 TRAIN_CODE_ROOT = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{SOURCE_COMMIT[:7]}"
-VARIANT = "coarse12_residue8_decoder_double_331286"
+VARIANT = "coarse12_residue8_331283"
 TRAIN_ROOT = SOURCE_ROOT / "train" / VARIANT
 CHECKPOINT = TRAIN_ROOT / "step0100000.pt"
-SAMPLE_DIR = SOURCE_ROOT / "samples" / "step100000-recovery-v3" / VARIANT
-ANALYSIS_DIR = SOURCE_ROOT / "analysis" / "step100000-recovery-v3-launch"
-ANALYSIS_OUTPUT = SOURCE_ROOT / "analysis" / "milestone_step100000-recovery-v3.json"
+SAMPLE_DIR = SOURCE_ROOT / "samples" / "step100000-recovery-v4" / VARIANT
+ANALYSIS_DIR = SOURCE_ROOT / "analysis" / "step100000-recovery-v4-launch"
+ANALYSIS_OUTPUT = SOURCE_ROOT / "analysis" / "milestone_step100000-recovery-v4.json"
 
 
 def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
@@ -69,9 +69,9 @@ def _prepare(commit: str) -> tuple[str, list[dict[str, object]]]:
     remote_cwd = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"
     gpu_profile = load_environment_profile(REPO_ROOT / "environments/tokyo-pair-distogram-gpu.yaml")
     cpu_profile = load_environment_profile(REPO_ROOT / "environments/tokyo-pair-distogram-cpu.yaml")
-    workflow_id = f"hk-local-center-decoder-followup-recovery-100k-{SOURCE_COMMIT[:7]}-v2"
+    workflow_id = f"hk-local-center-decoder-followup-recovery-100k-{SOURCE_COMMIT[:7]}-v3"
     sample = prepare_run(
-        name=f"hk-decoder-followup-sample-100000-recovery-v3-{SOURCE_COMMIT[:7]}",
+        name=f"hk-decoder-followup-sample-100000-recovery-v4-{SOURCE_COMMIT[:7]}",
         profile=gpu_profile,
         python_args=[
             "{cwd}/scripts/sample_short128_milestone.py",
@@ -84,7 +84,7 @@ def _prepare(commit: str) -> tuple[str, list[dict[str, object]]]:
         cwd=str(TRAIN_CODE_ROOT), run_dir=str(SAMPLE_DIR), base_config=None,
     )
     analysis = prepare_run(
-        name=f"hk-decoder-followup-analysis-100000-recovery-v3-{SOURCE_COMMIT[:7]}",
+        name=f"hk-decoder-followup-analysis-100000-recovery-v4-{SOURCE_COMMIT[:7]}",
         profile=cpu_profile,
         python_args=[str(REPO_ROOT / "scripts" / "analyze_local_center_decoder_followup_recovery.py")],
         cwd=str(remote_cwd), run_dir=str(ANALYSIS_DIR), base_config=None,
