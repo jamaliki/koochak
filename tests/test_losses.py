@@ -8,6 +8,7 @@ from hierarchical_kaveh.diffusion import (
     aatype_sigma_weights,
     compute_losses,
     distogram_cross_entropy,
+    edm_coordinate_loss,
     secondary_structure_cross_entropy,
     smooth_lddt_loss,
 )
@@ -24,6 +25,20 @@ def test_kabsch_aligned_edm_loss_ignores_rigid_motion() -> None:
     prediction = target @ rotation + torch.tensor([4.0, -3.0, 2.0])
     loss = aligned_edm_loss(prediction, target, mask, torch.ones(2))
     torch.testing.assert_close(loss, torch.zeros(()), atol=2e-6, rtol=0.0)
+
+
+def test_unaligned_edm_coordinate_loss_penalizes_rigid_motion() -> None:
+    torch.manual_seed(2)
+    target = torch.randn(1, 5, 14, 3)
+    mask = torch.ones(1, 5, 14, dtype=torch.bool)
+    rotation = torch.tensor(
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    prediction = target @ rotation + torch.tensor([4.0, -3.0, 2.0])
+    loss = edm_coordinate_loss(
+        prediction, target, mask, torch.ones(1), align_target=False
+    )
+    assert loss > 1.0
 
 
 def test_aatype_loss_applies_explicit_polar_weights() -> None:

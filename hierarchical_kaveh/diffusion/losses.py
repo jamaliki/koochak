@@ -58,9 +58,34 @@ def aligned_edm_loss(
     *,
     sigma_data: float = 16.0,
 ) -> Tensor:
-    """Pallatom's stopped-gradient aligned MSE weighted by ``1/c_out²``."""
+    """Pallatom's stopped-gradient Kabsch-aligned MSE."""
 
-    aligned_target = align_target_to_prediction(target, prediction, atom_mask)
+    return edm_coordinate_loss(
+        prediction,
+        target,
+        atom_mask,
+        sigma,
+        sigma_data=sigma_data,
+        align_target=True,
+    )
+
+
+def edm_coordinate_loss(
+    prediction: Tensor,
+    target: Tensor,
+    atom_mask: Tensor,
+    sigma: Tensor,
+    *,
+    sigma_data: float = 16.0,
+    align_target: bool = True,
+) -> Tensor:
+    """EDM coordinate MSE, optionally after stopped-gradient Kabsch alignment."""
+
+    aligned_target = (
+        align_target_to_prediction(target, prediction, atom_mask)
+        if align_target
+        else target
+    )
     mask = atom_mask.to(device=prediction.device, dtype=torch.float32)
     squared_error = (prediction.float() - aligned_target.float()).square().sum(-1)
     count = mask.sum(dim=(-2, -1))
@@ -313,12 +338,13 @@ def compute_losses(
 ) -> dict[str, Tensor]:
     """Compute Pallatom's supported final-output training objectives."""
 
-    coordinate = aligned_edm_loss(
+    coordinate = edm_coordinate_loss(
         prediction.coordinates,
         batch["x0"],
         batch["coordinate_mask"],
         batch["sigma"],
         sigma_data=model_config.sigma_data,
+        align_target=loss_config.align_coordinate_loss,
     )
     aatype_sigma = batch["sigma"].to(prediction.aatype_logits.device)
     if aatype_sigma.shape != (prediction.aatype_logits.shape[0],):
@@ -449,6 +475,7 @@ __all__ = [
     "aatype_sigma_weights",
     "compute_losses",
     "distogram_cross_entropy",
+    "edm_coordinate_loss",
     "smooth_lddt_loss",
     "SS_ALPHABET",
     "secondary_structure_cross_entropy",

@@ -166,6 +166,7 @@ class LossConfig:
     """Published Pallatom terminal losses supported by this architecture."""
 
     coordinate_weight: float = 1.0
+    align_coordinate_loss: bool = True
     aatype_weight: float = 0.25
     aatype_sigma_max: float = 0.5
     aatype_sigma_ramp_max: float | None = None

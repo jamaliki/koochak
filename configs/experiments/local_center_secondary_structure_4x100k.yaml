@@ -39,6 +39,7 @@ diffusion:
 
 loss:
   coordinate_weight: 1.0
+  align_coordinate_loss: true
   aatype_weight: 0.25
   aatype_sigma_max: 0.5
   aatype_sigma_ramp_max: null
