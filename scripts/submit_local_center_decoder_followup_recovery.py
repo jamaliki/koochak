@@ -27,9 +27,9 @@ SOURCE_ROOT = REMOTE_RUN_ROOT / "local-center-decoder-followup-8x100k" / SOURCE_
 VARIANT = "coarse12_residue8_decoder_double_331286"
 TRAIN_ROOT = SOURCE_ROOT / "train" / VARIANT
 CHECKPOINT = TRAIN_ROOT / "step0100000.pt"
-SAMPLE_DIR = SOURCE_ROOT / "samples" / "step100000-recovery" / VARIANT
-ANALYSIS_DIR = SOURCE_ROOT / "analysis" / "step100000-recovery-launch"
-ANALYSIS_OUTPUT = SOURCE_ROOT / "analysis" / "milestone_step100000-recovery.json"
+SAMPLE_DIR = SOURCE_ROOT / "samples" / "step100000-recovery-v2" / VARIANT
+ANALYSIS_DIR = SOURCE_ROOT / "analysis" / "step100000-recovery-v2-launch"
+ANALYSIS_OUTPUT = SOURCE_ROOT / "analysis" / "milestone_step100000-recovery-v2.json"
 
 
 def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
