@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-scruffy = ["scruffy-gpu>=0.1.1"]
+scruffy = ["scruffy-gpu @ git+https://github.com/jamaliki/scruffy.git@cb633a6"]
 
 [tool.setuptools]
 package-dir = {"" = "."}
