@@ -451,7 +451,8 @@ training_loop(
 - The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `train.scheduler_step`), evaluation hooks, automatic DDP bootstrap/wrapping when `train.ddp` is true, and deterministic checkpointing.
 - Rank-0 prints a compact parameter count banner at startup to highlight model size changes.
 - Non-finite gradients are zeroed and skipped with a rank-0 warning instead of crashing the run.
-- Returns a plain checkpoint dict sufficient to resume.
+- Atomically saves the terminal in-memory state before `on_train_end` and
+  returns the same resume-ready checkpoint dictionary.
 
 Minimal step_fn example:
 
@@ -525,6 +526,11 @@ W&B artifacts:
 
 ## Checkpointing
 
+- Normal completion writes `step{N:09d}.pt`, where `N` is the number of
+  completed optimizer updates. Terminal checkpoints record `step=N` and
+  `next_step=N`; periodic checkpoints retain their zero-based update index and
+  record `next_step=step+1`. This keeps filenames and resume cursors
+  unambiguous when a run is extended.
 - `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` atomically installs
   and syncs the numbered checkpoint, then atomically publishes
   `<path>.ready.json` with its stable artifact ID, byte size, and SHA256. It
