@@ -29,7 +29,16 @@ def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
     )
     metadata = tmp_path / "metadata.json"
     metadata.write_text(
-        json.dumps([{"shard": "shard.npz", "cond_feature_names": ["mean_plddt"]}]),
+        json.dumps(
+            [
+                {
+                    "shard": "shard.npz",
+                    "cond_feature_names": ["mean_plddt"],
+                    "ca_distance_validation_max": 4.0,
+                    "excluded_ca_distance_samples": [],
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     model = ModelConfig(

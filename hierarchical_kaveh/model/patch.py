@@ -77,12 +77,11 @@ def build_patch_layout(
     residue_mask: Tensor,
     chain_index: Tensor,
     residue_index: Tensor,
-    chain_break: Tensor,
 ) -> PatchLayout:
-    """Patch contiguous chain segments without crossing breaks or dropping tails."""
+    """Chunk consecutive residues from each chain into patches of four."""
 
     if residue_mask.ndim != 2 or any(
-        tensor.shape != residue_mask.shape for tensor in (chain_index, residue_index, chain_break)
+        tensor.shape != residue_mask.shape for tensor in (chain_index, residue_index)
     ):
         raise ValueError("patch layout inputs must have matching [B,N] shapes")
     valid = residue_mask.bool()
@@ -97,7 +96,6 @@ def build_patch_layout(
     starts = valid & (
         ~previous_valid
         | (chain_index != previous_chain)
-        | chain_break.bool()
         | (residue_index != previous_residue + 1)
     )
     segment_index = starts.long().cumsum(1) - 1

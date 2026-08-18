@@ -15,7 +15,15 @@ The root is either a list of shard entries or a mapping whose `shards` (or
 ```
 
 `shard` may be absolute or relative to `metadata.json`. Additional historical
-metadata fields are ignored.
+metadata fields are ignored. Training excludes a complete sample when any two
+resolved residues that are in the same chain and consecutively numbered have a
+C-alpha distance above 4 Angstrom. Metadata materialized by
+`scripts/materialize_ca_distance_exclusions.py` carries
+`ca_distance_validation_max: 4.0` and `excluded_ca_distance_samples: [...]` on
+each shard entry, avoiding coordinate decompression during indexing. When those
+annotations are absent, indexing fails rather than scanning coordinates at
+training startup. Materialization is a one-time dataset preparation step and
+does not rewrite the compressed coordinate shards.
 
 ## NPZ arrays
 
@@ -38,8 +46,9 @@ experimentally unresolved real atoms from coordinate and smooth-lDDT objectives;
 their model input uses a C-alpha placeholder. Residues without a resolved
 C-alpha are removed.
 An internal unresolved gap therefore remains visible as a residue-index break.
-The sample is then centered, and geometric chain breaks are inferred from
-adjacent C-alpha distances above 4 Angstrom.
+The sample is then centered. Patches contain up to four residues and restart
+only when the chain identifier changes or residue numbering is not consecutive;
+geometry never changes the patch layout.
 
 ## Loading behavior
 

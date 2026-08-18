@@ -16,6 +16,11 @@ from torch import Tensor
 from hierarchical_kaveh.residue_constants import physical_atom14_mask
 
 
+MAX_CONSECUTIVE_CA_DISTANCE = 4.0
+CA_DISTANCE_VALIDATION_KEY = "ca_distance_validation_max"
+CA_DISTANCE_EXCLUSIONS_KEY = "excluded_ca_distance_samples"
+
+
 @dataclass(frozen=True)
 class SampleReference:
     """Location and cheap metadata for one sample in a ragged shard."""
@@ -39,6 +44,91 @@ def _metadata_entries(metadata_path: Path) -> list[dict[str, Any]]:
     if not isinstance(contents, list):
         raise ValueError("metadata must be a list, or a mapping containing 'shards'")
     return contents
+
+
+def invalid_ca_distance_samples(
+    coordinates: np.ndarray,
+    atom_mask: np.ndarray,
+    chain_index: np.ndarray,
+    residue_index: np.ndarray,
+    sample_offsets: np.ndarray,
+    *,
+    maximum: float = MAX_CONSECUTIVE_CA_DISTANCE,
+) -> np.ndarray:
+    """Return samples with an invalid consecutive same-chain CA step."""
+
+    coordinates = np.asarray(coordinates)
+    atom_mask = np.asarray(atom_mask)
+    chain_index = np.asarray(chain_index)
+    residue_index = np.asarray(residue_index)
+    sample_offsets = np.asarray(sample_offsets, dtype=np.int64)
+    total_residues = len(coordinates)
+    if (
+        coordinates.shape != (total_residues, 14, 3)
+        or atom_mask.shape != (total_residues, 14)
+        or chain_index.shape != (total_residues,)
+        or residue_index.shape != (total_residues,)
+        or sample_offsets.ndim != 1
+        or len(sample_offsets) < 2
+        or sample_offsets[0] != 0
+        or sample_offsets[-1] != total_residues
+        or np.any(sample_offsets[1:] < sample_offsets[:-1])
+    ):
+        raise ValueError("invalid arrays for CA-distance validation")
+    if not np.isfinite(maximum) or maximum <= 0:
+        raise ValueError("maximum CA distance must be finite and positive")
+    if total_residues < 2:
+        return np.empty(0, dtype=np.int64)
+
+    same_sample = np.ones(total_residues - 1, dtype=np.bool_)
+    sample_boundaries = sample_offsets[1:-1] - 1
+    same_sample[sample_boundaries[sample_boundaries >= 0]] = False
+    consecutive = (
+        same_sample
+        & atom_mask[:-1, 1].astype(np.bool_, copy=False)
+        & atom_mask[1:, 1].astype(np.bool_, copy=False)
+        & (chain_index[1:] == chain_index[:-1])
+        & (residue_index[1:] == residue_index[:-1] + 1)
+    )
+    candidate_edges = np.flatnonzero(consecutive)
+    if not len(candidate_edges):
+        return np.empty(0, dtype=np.int64)
+
+    ca = coordinates[:, 1].astype(np.float64, copy=False)
+    delta = ca[candidate_edges + 1] - ca[candidate_edges]
+    squared_distance = np.einsum("ij,ij->i", delta, delta)
+    invalid_edges = candidate_edges[
+        ~np.isfinite(squared_distance) | (squared_distance > maximum * maximum)
+    ]
+    if not len(invalid_edges):
+        return np.empty(0, dtype=np.int64)
+    return np.unique(np.searchsorted(sample_offsets[1:], invalid_edges, side="right"))
+
+
+def _precomputed_ca_distance_exclusions(
+    entry: dict[str, Any],
+    *,
+    sample_count: int,
+) -> np.ndarray | None:
+    validation_maximum = entry.get(CA_DISTANCE_VALIDATION_KEY)
+    exclusions = entry.get(CA_DISTANCE_EXCLUSIONS_KEY)
+    if validation_maximum is None and exclusions is None:
+        return None
+    if validation_maximum != MAX_CONSECUTIVE_CA_DISTANCE or not isinstance(exclusions, list):
+        raise ValueError(
+            f"{CA_DISTANCE_EXCLUSIONS_KEY} requires "
+            f"{CA_DISTANCE_VALIDATION_KEY}: {MAX_CONSECUTIVE_CA_DISTANCE}"
+        )
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in exclusions):
+        raise ValueError(f"{CA_DISTANCE_EXCLUSIONS_KEY} must contain integer sample indices")
+    result = np.asarray(exclusions, dtype=np.int64)
+    if len(result) and (
+        np.any(result < 0)
+        or np.any(result >= sample_count)
+        or len(np.unique(result)) != len(result)
+    ):
+        raise ValueError(f"invalid {CA_DISTANCE_EXCLUSIONS_KEY}")
+    return result
 
 
 class ShardCache:
@@ -90,10 +180,17 @@ def index_shards(
     metadata_path: str | Path,
     *,
     min_length: int = 1,
+    max_length: int | None = None,
     mean_plddt_min: float | None = None,
+    loop_length_max: int | None = None,
     loop_content_max: float | None = None,
+    packing_density_min: float | None = None,
 ) -> list[SampleReference]:
-    """Index samples passing strict quality bounds without retaining shard arrays."""
+    """Index samples passing length and strict quality bounds.
+
+    Length bounds are inclusive. Quality feature bounds retain the historical
+    strict semantics: minimums require ``>`` and maximums require ``<``.
+    """
 
     metadata_path = Path(metadata_path).expanduser().resolve()
     if not metadata_path.is_file():
@@ -107,7 +204,9 @@ def index_shards(
         feature_names = [str(name) for name in entry.get("cond_feature_names", ())]
         requested_features = {
             "mean_plddt": mean_plddt_min,
+            "max_loop_length": loop_length_max,
             "loop_content": loop_content_max,
+            "packing_density": packing_density_min,
         }
         missing = [
             name
@@ -129,26 +228,67 @@ def index_shards(
                 or offsets[-1] != len(atom_mask)
             ):
                 raise ValueError(f"invalid Atom14 mask in {shard}")
+            excluded_samples = _precomputed_ca_distance_exclusions(
+                entry,
+                sample_count=len(offsets) - 1,
+            )
+            if excluded_samples is None:
+                raise ValueError(
+                    f"{shard} lacks precomputed CA-distance validation; run "
+                    "scripts/materialize_ca_distance_exclusions.py"
+                )
+            excluded = np.zeros(len(offsets) - 1, dtype=np.bool_)
+            excluded[excluded_samples] = True
             conditions = None
-            if mean_plddt_min is not None or loop_content_max is not None:
+            if any(bound is not None for bound in requested_features.values()):
                 conditions = np.asarray(payload["cond"], dtype=np.float32)
                 if conditions.shape != (len(offsets) - 1, len(feature_names)):
                     raise ValueError(f"invalid conditioning array in {shard}")
             plddt_index = feature_names.index("mean_plddt") if mean_plddt_min is not None else None
+            loop_length_index = (
+                feature_names.index("max_loop_length") if loop_length_max is not None else None
+            )
             loop_index = feature_names.index("loop_content") if loop_content_max is not None else None
+            packing_density_index = (
+                feature_names.index("packing_density") if packing_density_min is not None else None
+            )
+            mean_plddt_bound = None if mean_plddt_min is None else np.float32(mean_plddt_min)
+            loop_length_bound = None if loop_length_max is None else np.float32(loop_length_max)
+            loop_content_bound = None if loop_content_max is None else np.float32(loop_content_max)
+            packing_density_bound = (
+                None if packing_density_min is None else np.float32(packing_density_min)
+            )
             for sample_idx, (start, stop) in enumerate(zip(offsets[:-1], offsets[1:])):
-                if conditions is not None:
-                    if plddt_index is not None:
-                        mean_plddt = float(conditions[sample_idx, plddt_index])
-                        if not np.isfinite(mean_plddt) or mean_plddt <= mean_plddt_min:
-                            continue
-                    if loop_index is not None:
-                        loop_content = float(conditions[sample_idx, loop_index])
-                        if not np.isfinite(loop_content) or loop_content >= loop_content_max:
-                            continue
+                if excluded[sample_idx]:
+                    continue
                 resolved_length = int(np.count_nonzero(atom_mask[start:stop, 1]))
                 if resolved_length < min_length:
                     continue
+                if max_length is not None and resolved_length > max_length:
+                    continue
+                if conditions is not None:
+                    if plddt_index is not None:
+                        mean_plddt = conditions[sample_idx, plddt_index]
+                        if not np.isfinite(mean_plddt) or mean_plddt <= mean_plddt_bound:
+                            continue
+                    if loop_length_index is not None:
+                        sample_loop_length = conditions[sample_idx, loop_length_index]
+                        if (
+                            not np.isfinite(sample_loop_length)
+                            or sample_loop_length >= loop_length_bound
+                        ):
+                            continue
+                    if loop_index is not None:
+                        loop_content = conditions[sample_idx, loop_index]
+                        if not np.isfinite(loop_content) or loop_content >= loop_content_bound:
+                            continue
+                    if packing_density_index is not None:
+                        packing_density = conditions[sample_idx, packing_density_index]
+                        if (
+                            not np.isfinite(packing_density)
+                            or packing_density <= packing_density_bound
+                        ):
+                            continue
                 references.append(
                     SampleReference(
                         shard,
@@ -247,4 +387,13 @@ def load_sample(
     return result
 
 
-__all__ = ["SampleReference", "ShardCache", "index_shards", "load_sample"]
+__all__ = [
+    "CA_DISTANCE_EXCLUSIONS_KEY",
+    "CA_DISTANCE_VALIDATION_KEY",
+    "MAX_CONSECUTIVE_CA_DISTANCE",
+    "SampleReference",
+    "ShardCache",
+    "index_shards",
+    "invalid_ca_distance_samples",
+    "load_sample",
+]

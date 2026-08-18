@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+import hierarchical_kaveh.data.shards as shard_module
 from hierarchical_kaveh.config import DataConfig, DiffusionConfig
 from hierarchical_kaveh.data import (
     ShardCache,
@@ -14,6 +15,7 @@ from hierarchical_kaveh.data import (
     shard_references,
 )
 from hierarchical_kaveh.diffusion import corrupt_structure
+from scripts.materialize_ca_distance_exclusions import materialize_metadata
 
 
 def _ragged_fixture(tmp_path):
@@ -53,6 +55,8 @@ def _ragged_fixture(tmp_path):
                     "count": 3,
                     "ids": [0],
                     "cond_feature_names": ["mean_plddt", "loop_content"],
+                    "ca_distance_validation_max": 4.0,
+                    "excluded_ca_distance_samples": [],
                 }
             ]
         )
@@ -126,6 +130,72 @@ def test_quality_filters_are_strict_and_applied_before_partition(tmp_path) -> No
         loop_content_max=0.5,
     )
     assert [reference.index for reference in references] == [2]
+
+
+def test_index_excludes_sample_with_overlong_consecutive_ca_step(tmp_path) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    shard = tmp_path / "shard.npz"
+    with np.load(shard) as payload:
+        arrays = {key: payload[key].copy() for key in payload.files}
+    # Sample 1 begins at global residue 5. Move one residue without changing
+    # its chain or consecutive residue number.
+    arrays["pos"][7, :, 0] += 10.0
+    np.savez_compressed(shard, **arrays)
+
+    validated_metadata = tmp_path / "metadata_ca4.json"
+    materialize_metadata(metadata, validated_metadata)
+    references = index_shards(validated_metadata, min_length=1)
+    assert [reference.index for reference in references] == [0, 2]
+
+
+def test_ca_filter_is_strict_and_ignores_topological_discontinuities(tmp_path) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    shard = tmp_path / "shard.npz"
+    with np.load(shard) as payload:
+        arrays = {key: payload[key].copy() for key in payload.files}
+    # Exactly 4 Angstrom is retained.
+    arrays["pos"][5:12, :, 0] = np.arange(7)[:, None] * 4.0
+    # A large spatial jump at the existing chain boundary in sample 0 is valid.
+    arrays["pos"][3:5, :, 0] += 100.0
+    # A large jump across a residue-number gap is also valid.
+    arrays["res_idx"][7:12] += 100
+    arrays["pos"][7:12, :, 0] += 200.0
+    np.savez_compressed(shard, **arrays)
+
+    validated_metadata = tmp_path / "metadata_ca4.json"
+    materialize_metadata(metadata, validated_metadata)
+    references = index_shards(validated_metadata, min_length=1)
+    assert [reference.index for reference in references] == [0, 1, 2]
+
+
+def test_index_uses_precomputed_ca_distance_exclusions(tmp_path, monkeypatch) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    contents = json.loads(metadata.read_text())
+    contents[0].update(
+        {
+            "ca_distance_validation_max": 4.0,
+            "excluded_ca_distance_samples": [1],
+        }
+    )
+    metadata.write_text(json.dumps(contents))
+
+    def unexpected_scan(*_args, **_kwargs):
+        raise AssertionError("precomputed exclusions must avoid coordinate scanning")
+
+    monkeypatch.setattr(shard_module, "invalid_ca_distance_samples", unexpected_scan)
+    references = index_shards(metadata, min_length=1)
+    assert [reference.index for reference in references] == [0, 2]
+
+
+def test_index_requires_offline_ca_distance_validation(tmp_path) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    contents = json.loads(metadata.read_text())
+    contents[0].pop("ca_distance_validation_max")
+    contents[0].pop("excluded_ca_distance_samples")
+    metadata.write_text(json.dumps(contents))
+
+    with pytest.raises(ValueError, match="lacks precomputed CA-distance validation"):
+        index_shards(metadata, min_length=1)
 
 
 def test_quality_filter_requires_named_conditioning_feature(tmp_path) -> None:

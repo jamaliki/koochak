@@ -335,9 +335,7 @@ class HierarchicalKaveh(nn.Module):
                 raise ValueError("self_conditioned_coordinates must match coordinates")
             self_conditioned_coordinates = self_conditioned_coordinates / self.config.sigma_data
 
-        layout = build_patch_layout(
-            residue_mask, inputs.chain_index, inputs.residue_index, inputs.chain_break
-        )
+        layout = build_patch_layout(residue_mask, inputs.chain_index, inputs.residue_index)
         residue_x = self.residue_input(
             inputs.aatype_input,
             inputs.chain_break,

@@ -11,7 +11,6 @@ def _layout(lengths: list[int], padded: int):
         mask,
         torch.zeros(batch, padded, dtype=torch.long),
         positions,
-        torch.zeros(batch, padded, dtype=torch.long),
     )
 
 
@@ -37,9 +36,7 @@ def test_multichain_patches_never_cross_chain_boundaries():
     mask = torch.ones(1, residue_count, dtype=torch.bool)
     chains = torch.tensor([[0, 0, 0, 1, 1, 1, 1, 1]])
     residue_index = torch.tensor([[10, 11, 12, 4, 5, 6, 7, 8]])
-    breaks = torch.tensor([[0, 0, 0, 1, 0, 0, 0, 0]])
-
-    layout = build_patch_layout(mask, chains, residue_index, breaks)
+    layout = build_patch_layout(mask, chains, residue_index)
 
     assert not layout.regular_contiguous
     assert layout.patch_lengths.tolist() == [3]  # ceil(3/4) + ceil(5/4)
@@ -55,7 +52,6 @@ def test_residue_index_discontinuity_starts_a_fresh_partial_patch():
         mask,
         torch.zeros_like(residue_index),
         residue_index,
-        torch.zeros_like(residue_index),
     )
     assert layout.patch_residue_index.tolist() == [[[0, 1, -1, -1], [2, 3, 4, 5]]]
 
@@ -64,8 +60,7 @@ def test_pack_unpack_is_a_bijection_for_arbitrary_chain_layout():
     mask = torch.tensor([[True, True, True, True, True, True, False]])
     chains = torch.tensor([[0, 0, 1, 1, 1, 2, 0]])
     residue_index = torch.tensor([[1, 2, 1, 2, 3, 8, 0]])
-    breaks = torch.tensor([[0, 0, 1, 0, 0, 1, 0]])
-    layout = build_patch_layout(mask, chains, residue_index, breaks)
+    layout = build_patch_layout(mask, chains, residue_index)
     values = torch.randn(1, 7, 3, 2)
     result = layout.unpack(layout.pack(values))
     assert torch.equal(result[:, :6], values[:, :6])
