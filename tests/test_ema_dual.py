@@ -361,9 +361,10 @@ def test_training_loop_checkpoint_history_reconstructs_mlp_target_ema(tmp_path) 
         },
     )
 
-    assert result["step"] == 128
+    assert result["step"] == total_steps
+    assert result["next_step"] == total_steps
     assert len(post_step_snapshots) == total_steps
-    assert len(ema_checkpoint_states) == 32
+    assert len(ema_checkpoint_states) == 34
 
     expected = _closed_form_power_average(post_step_snapshots, gamma_target)
     reconstructed = reconstruct_power_ema_state_dict(
