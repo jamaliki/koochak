@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import sys
 import types
 from pathlib import Path
@@ -121,3 +122,76 @@ def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(
             "artifact_id": "checkpoint/step000000007.pt",
         }
     ]
+
+
+def test_scruffy_adapter_explains_an_incompatible_installed_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _prepared(tmp_path)
+    original_import = builtins.__import__
+
+    def incompatible_import(name, *args, **kwargs):
+        if name == "scruffy":
+            raise ImportError("cannot import name 'UTC' from 'datetime'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", incompatible_import)
+
+    with pytest.raises(RuntimeError, match=r"upgrade.*koochak\[scruffy\]"):
+        submit_scruffy(
+            prepared,
+            root=tmp_path / "queue",
+            resources=object(),
+            request_id="campaign/train/attempt-1",
+            project_id="project",
+        )
+
+
+def test_scruffy_adapter_never_drops_unsupported_artifact_conditions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _prepared(tmp_path)
+    called = False
+
+    def old_submit(
+        root,
+        *,
+        argv,
+        name,
+        cwd,
+        environment,
+        request,
+        request_id,
+        project_id,
+        workflow_id=None,
+        task_id=None,
+        needs=None,
+    ):
+        nonlocal called
+        called = True
+
+    module = types.ModuleType("scruffy")
+    module.submit_job = old_submit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    with pytest.raises(RuntimeError, match=r"artifact conditions.*upgrade"):
+        submit_scruffy(
+            prepared,
+            root=tmp_path / "queue",
+            resources=object(),
+            request_id="campaign/infer/attempt-1",
+            project_id="project",
+            workflow_id="campaign",
+            task_id="infer",
+            needs=[{"task_id": "train", "condition": "succeeded"}],
+            wait_for=[
+                {
+                    "kind": "artifact",
+                    "task_id": "train",
+                    "artifact_id": "checkpoint/step000000007.pt",
+                }
+            ],
+        )
+
+    assert not called
+    assert not Path(prepared.manifest_path).exists()
