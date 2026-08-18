@@ -15,6 +15,7 @@ def _run(
     max_steps: int,
     checkpoint: dict[str, Any] | None = None,
     ckpt_every: int = 100,
+    dataset_steps: int | None = None,
 ) -> tuple[dict[str, Any], torch.nn.Module, list[int]]:
     model = torch.nn.Linear(1, 1, bias=False)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
@@ -30,7 +31,10 @@ def _run(
     def record_step(_logs: Mapping[str, object], ctx: Mapping[str, object]) -> None:
         steps.append(int(ctx["step"]))
 
-    data = [{"x": torch.ones(1, 1), "y": torch.zeros(1, 1)} for _ in range(max_steps + 1)]
+    data = [
+        {"x": torch.ones(1, 1), "y": torch.zeros(1, 1)}
+        for _ in range(max_steps + 1 if dataset_steps is None else dataset_steps)
+    ]
     result = training_loop(
         model=model,
         dataset=data,
@@ -92,3 +96,22 @@ def test_terminal_checkpoint_supersedes_earlier_periodic_state(tmp_path: Path) -
     assert result["step"] == 4
     assert result["next_step"] == 4
     torch.testing.assert_close(result["model"]["weight"], model.state_dict()["weight"])
+
+    terminal_path = tmp_path / "step000000004.pt"
+    assert terminal_path.exists()
+    assert terminal_path.with_suffix(".pt.ready.json").exists()
+    saved = torch.load(terminal_path, weights_only=False, map_location="cpu")
+    assert saved["step"] == 4
+    assert saved["next_step"] == 4
+    torch.testing.assert_close(saved["model"]["weight"], model.state_dict()["weight"])
+
+
+def test_dataset_exhaustion_saves_latest_completed_update(tmp_path: Path) -> None:
+    result, model, steps = _run(tmp_path, max_steps=4, dataset_steps=2)
+
+    assert steps == [0, 1]
+    assert result["step"] == 2
+    assert result["next_step"] == 2
+    terminal_path = tmp_path / "step000000002.pt"
+    saved = torch.load(terminal_path, weights_only=False, map_location="cpu")
+    torch.testing.assert_close(saved["model"]["weight"], model.state_dict()["weight"])

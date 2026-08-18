@@ -836,9 +836,13 @@ class _TrainLoop:
         return ckpt
 
     def _save_checkpoint(
-        self, step: int, *, metrics: Optional[Dict[str, Any]] = None
+        self,
+        step: int,
+        *,
+        next_step: Optional[int] = None,
+        metrics: Optional[Dict[str, Any]] = None,
     ) -> tuple[str, Dict[str, Any]]:
-        ckpt = self._build_checkpoint(step, metrics=metrics)
+        ckpt = self._build_checkpoint(step, next_step=next_step, metrics=metrics)
         os.makedirs(self.settings.out_dir, exist_ok=True)
         path = os.path.join(self.settings.out_dir, f"step{step:09d}.pt")
         saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=self.settings.keep_last_k)
@@ -1185,15 +1189,20 @@ class _TrainLoop:
             start_step = self._resume_from_checkpoint()
             next_step = start_step
             it = self._make_iterator()
-            train_ended_normally = False
             for step in range(start_step, self.settings.max_steps):
                 if not self._run_step(step, it):
                     break
                 next_step = step + 1
+
+            # A terminal checkpoint is a completed-update cursor, unlike a
+            # periodic checkpoint whose step is the zero-based update index.
+            # Persist it before announcing completion so downstream consumers
+            # can immediately resolve the final immutable artifact.
+            if self.is_rank0:
+                _, self.final_ckpt = self._save_checkpoint(next_step, next_step=next_step)
             else:
-                train_ended_normally = True
-            if train_ended_normally or start_step >= self.settings.max_steps:
-                _emit(self.hooks, "on_train_end", self.ctx)
+                self.final_ckpt = self._build_checkpoint(next_step, next_step=next_step)
+            _emit(self.hooks, "on_train_end", self.ctx)
         except Exception as exc:
             _emit(self.hooks, "on_exception", exc, self.ctx)
             raise
@@ -1202,20 +1211,7 @@ class _TrainLoop:
             if callable(close_iterator):
                 close_iterator()
 
-        # Always assemble from the terminal in-memory state. ``final_ckpt`` may
-        # otherwise still refer to the input checkpoint or to an earlier
-        # periodic save, silently discarding updates made later in this run.
-        # Preserve the legacy ``step`` value when that checkpoint already
-        # describes the terminal update; ``next_step`` carries the unambiguous
-        # resume cursor.
-        terminal_step = next_step
-        if self.final_ckpt is not None:
-            try:
-                if int(self.final_ckpt.get("next_step", -1)) == next_step:
-                    terminal_step = int(self.final_ckpt["step"])
-            except (TypeError, ValueError):
-                pass
-        self.final_ckpt = self._build_checkpoint(terminal_step, next_step=next_step)
+        assert self.final_ckpt is not None
         return self.final_ckpt
 
     def _run_step(self, step: int, it: Iterator[Any]) -> bool:
@@ -1240,7 +1236,6 @@ class _TrainLoop:
         try:
             stats = self._run_micro_steps(step, it, collect_rank_timing=collect_rank_timing)
         except StopIteration:
-            _emit(self.hooks, "on_train_end", self.ctx)
             return False
         for key, value in profile_timing_totals.items():
             stats.profile_timing_totals[key] = stats.profile_timing_totals.get(key, 0.0) + value
