@@ -1,6 +1,10 @@
 """Pallatom EDM corruption, schedules, and terminal losses."""
 
-from .corruption import corrupt_structure, random_rigid_augmentation
+from .corruption import (
+    align_coordinates_to_reference,
+    corrupt_structure,
+    random_rigid_augmentation,
+)
 from .losses import (
     aligned_edm_loss,
     aatype_cross_entropy,
@@ -19,6 +23,7 @@ __all__ = [
     "aatype_marginal_js",
     "aatype_sigma_weights",
     "aligned_edm_loss",
+    "align_coordinates_to_reference",
     "compute_losses",
     "corrupt_structure",
     "distogram_cross_entropy",

@@ -8,6 +8,54 @@ import torch
 from torch import Tensor
 
 
+@torch.no_grad()
+def align_coordinates_to_reference(
+    source: Tensor,
+    reference: Tensor,
+    atom_mask: Tensor,
+) -> Tensor:
+    """Rigidly align ``source`` to ``reference`` without changing its shape.
+
+    Self-conditioned coordinates are later fused with the current Cartesian
+    input, so preserving internal distances is not enough: both tensors must
+    use the same rigid frame.  The transform is detached because this helper
+    is used only to prepare a recurrent state, never as a differentiable loss
+    path.
+    """
+
+    if source.shape != reference.shape or source.shape[-1] != 3:
+        raise ValueError("source and reference must have matching [...,3] shapes")
+    if atom_mask.shape != source.shape[:-1]:
+        raise ValueError("atom_mask must match coordinate slots")
+    if source.ndim < 3:
+        raise ValueError("coordinates must have a batch and point dimension")
+
+    batch = source.shape[0]
+    with torch.autocast(device_type=source.device.type, enabled=False):
+        source_float = source.float().reshape(batch, -1, 3)
+        reference_float = reference.detach().float().reshape(batch, -1, 3)
+        weights = atom_mask.to(device=source.device, dtype=torch.float32).reshape(batch, -1, 1)
+        count = weights.sum(1, keepdim=True).clamp_min(1.0)
+        source_center = (source_float * weights).sum(1, keepdim=True) / count
+        reference_center = (reference_float * weights).sum(1, keepdim=True) / count
+        source_centered = (source_float - source_center) * weights
+        reference_centered = (reference_float - reference_center) * weights
+        covariance = source_centered.transpose(1, 2) @ reference_centered
+        left, _, right_t = torch.linalg.svd(covariance)
+        handedness = torch.linalg.det(left @ right_t)
+        correction = torch.ones(batch, 3, device=source.device, dtype=torch.float32)
+        correction[:, -1] = handedness
+        rotation = (left * correction[:, None]) @ right_t
+        enough_points = (weights.sum(1).squeeze(-1) >= 3).view(batch, 1, 1)
+        rotation = torch.where(
+            enough_points,
+            rotation,
+            torch.eye(3, device=source.device, dtype=torch.float32)[None],
+        )
+        aligned = (source_float - source_center) @ rotation + reference_center
+    return aligned.reshape_as(source).to(source.dtype) * atom_mask[..., None]
+
+
 def _uniform_rotation(
     generator: torch.Generator,
     *,
@@ -161,6 +209,7 @@ def corrupt_structure(
 
 
 __all__ = [
+    "align_coordinates_to_reference",
     "aligned_random_rigid_augmentation",
     "corrupt_structure",
     "random_rigid_augmentation",

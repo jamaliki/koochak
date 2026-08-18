@@ -2,6 +2,7 @@ import torch
 
 from hierarchical_kaveh.config import LossConfig, ModelConfig
 from hierarchical_kaveh.diffusion import (
+    align_coordinates_to_reference,
     aligned_edm_loss,
     aatype_cross_entropy,
     aatype_marginal_js,
@@ -39,6 +40,28 @@ def test_unaligned_edm_coordinate_loss_penalizes_rigid_motion() -> None:
         prediction, target, mask, torch.ones(1), align_target=False
     )
     assert loss > 1.0
+
+
+def test_coordinate_frame_alignment_recovers_rigid_motion_and_masks_padding() -> None:
+    torch.manual_seed(4)
+    reference = torch.randn(2, 5, 14, 3)
+    rotation = torch.tensor(
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    source = reference @ rotation + torch.tensor([4.0, -3.0, 2.0])
+    mask = torch.ones(2, 5, 14, dtype=torch.bool)
+    mask[:, -1, 7:] = False
+    aligned = align_coordinates_to_reference(source, reference, mask)
+    torch.testing.assert_close(aligned[mask], reference[mask], atol=2e-5, rtol=0.0)
+    assert torch.equal(aligned[~mask], torch.zeros_like(aligned[~mask]))
+
+
+def test_coordinate_frame_alignment_uses_translation_only_for_two_points() -> None:
+    reference = torch.tensor([[[[0.0, 0.0, 0.0]], [[2.0, 0.0, 0.0]]]])
+    source = reference + torch.tensor([[[[3.0, -2.0, 1.0]], [[3.0, -2.0, 1.0]]]])
+    mask = torch.ones(1, 2, 1, dtype=torch.bool)
+    aligned = align_coordinates_to_reference(source, reference, mask)
+    torch.testing.assert_close(aligned, reference)
 
 
 def test_aatype_loss_applies_explicit_polar_weights() -> None:

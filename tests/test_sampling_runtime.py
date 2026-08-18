@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
@@ -13,6 +15,8 @@ from hierarchical_kaveh.diffusion.corruption import random_rigid_augmentation
 from hierarchical_kaveh.io import load_checkpoint, sequence_string, write_sample_batch
 from hierarchical_kaveh.sampling import (
     _augment_batch,
+    _model_config,
+    _prepare_coordinate_self_conditioning,
     _churn_gamma,
     build_topology,
     parse_chain_lengths,
@@ -138,6 +142,45 @@ def test_sampling_applies_the_same_rigid_frame_to_state_and_self_conditioning() 
         torch.rand(16, generator=baseline_generator),
         torch.rand(16, generator=aligned_generator),
     )
+
+
+def test_sampling_aligns_a_rigidly_mismatched_previous_prediction() -> None:
+    coordinates = torch.randn(1, 5, 14, 3, generator=torch.Generator().manual_seed(21))
+    rotation = torch.tensor(
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    prediction = Prediction(
+        coordinates=coordinates @ rotation + torch.tensor([4.0, -3.0, 2.0]),
+        aatype_logits=torch.zeros(1, 5, 20),
+    )
+    atom_mask = torch.ones(1, 5, 14, dtype=torch.bool)
+    aligned = _prepare_coordinate_self_conditioning(
+        coordinates, prediction, atom_mask, "aligned"
+    )
+    raw = _prepare_coordinate_self_conditioning(coordinates, prediction, atom_mask, "raw")
+    disabled = _prepare_coordinate_self_conditioning(
+        coordinates, prediction, atom_mask, "disabled"
+    )
+    assert aligned is not None and raw is not None and disabled is None
+    torch.testing.assert_close(aligned, coordinates, atol=2e-5, rtol=0.0)
+    assert not torch.allclose(raw, coordinates)
+
+
+def test_sampling_rejects_unknown_coordinate_self_conditioning_mode() -> None:
+    prediction = Prediction(torch.zeros(1, 2, 14, 3), torch.zeros(1, 2, 20))
+    with pytest.raises(ValueError, match="coordinate self-conditioning mode"):
+        _prepare_coordinate_self_conditioning(
+            torch.zeros(1, 2, 14, 3),
+            prediction,
+            torch.ones(1, 2, 14, dtype=torch.bool),
+            "unknown",
+        )
+
+
+def test_sampling_reads_sigma_data_through_compiled_model_wrapper() -> None:
+    wrapped = nn.Module()
+    wrapped._orig_mod = SimpleNamespace(config=SimpleNamespace(sigma_data=7.5))
+    assert _model_config(wrapped).sigma_data == 7.5
 
 
 def test_sampler_coordinates_match_declared_sigma_on_every_step(monkeypatch) -> None:

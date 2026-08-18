@@ -11,6 +11,7 @@ from torch import Tensor
 from hierarchical_kaveh.config import LossConfig, ModelConfig
 from hierarchical_kaveh.types import CompactDistogram, DenoiserInput, Prediction
 
+from .corruption import align_coordinates_to_reference
 from .patch_distogram_loss_triton import patch_distogram_cross_entropy
 
 
@@ -26,28 +27,7 @@ def align_target_to_prediction(
 ) -> Tensor:
     """Kabsch-align each ground-truth point cloud to its prediction."""
 
-    if target.shape != prediction.shape or target.shape[-1] != 3:
-        raise ValueError("target and prediction must have matching [...,3] shapes")
-    if atom_mask.shape != target.shape[:-1]:
-        raise ValueError("atom_mask must match coordinate slots")
-    batch = target.shape[0]
-    with torch.autocast(device_type=target.device.type, enabled=False):
-        source = target.float().reshape(batch, -1, 3)
-        destination = prediction.detach().float().reshape(batch, -1, 3)
-        weights = atom_mask.float().reshape(batch, -1, 1)
-        count = weights.sum(1, keepdim=True).clamp_min(1.0)
-        source_center = (source * weights).sum(1, keepdim=True) / count
-        destination_center = (destination * weights).sum(1, keepdim=True) / count
-        source_centered = (source - source_center) * weights
-        destination_centered = (destination - destination_center) * weights
-        covariance = source_centered.transpose(1, 2) @ destination_centered
-        left, _, right_t = torch.linalg.svd(covariance)
-        handedness = torch.linalg.det(left @ right_t)
-        correction = torch.ones(batch, 3, device=target.device, dtype=torch.float32)
-        correction[:, -1] = handedness
-        rotation = (left * correction[:, None]) @ right_t
-        aligned = (source - source_center) @ rotation + destination_center
-    return aligned.reshape_as(target).to(target.dtype) * atom_mask[..., None]
+    return align_coordinates_to_reference(target, prediction, atom_mask)
 
 
 def aligned_edm_loss(

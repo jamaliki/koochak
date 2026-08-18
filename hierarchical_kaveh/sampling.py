@@ -9,7 +9,10 @@ import torch
 from torch import Tensor, nn
 
 from .config import ModelConfig, SamplingConfig
-from .diffusion.corruption import aligned_random_rigid_augmentation
+from .diffusion.corruption import (
+    align_coordinates_to_reference,
+    aligned_random_rigid_augmentation,
+)
 from .diffusion.schedules import sigma_from_probability
 from .types import DenoiserInput, Prediction
 
@@ -148,6 +151,24 @@ def _augment_batch(
     )
 
 
+def _prepare_coordinate_self_conditioning(
+    coordinates: Tensor,
+    prediction: Prediction | None,
+    atom_mask: Tensor,
+    mode: str,
+) -> Tensor | None:
+    """Put recurrent coordinates in the current state's frame before fusion."""
+
+    if mode not in {"aligned", "raw", "disabled"}:
+        raise ValueError("coordinate self-conditioning mode must be aligned, raw, or disabled")
+    if prediction is None or mode == "disabled":
+        return None
+    previous = prediction.coordinates
+    if mode == "aligned":
+        previous = align_coordinates_to_reference(previous, coordinates, atom_mask)
+    return previous
+
+
 def _decode_aatype(logits: Tensor, temperature: float) -> Tensor:
     """Match Pallatom's final temperature-softmax followed by argmax."""
 
@@ -194,6 +215,15 @@ def _churn_gamma(
     )
 
 
+def _model_config(model: nn.Module):
+    """Read configuration through torch.compile wrappers when necessary."""
+
+    config = getattr(model, "config", None)
+    if config is None:
+        config = getattr(getattr(model, "_orig_mod", None), "config", None)
+    return config
+
+
 def sample(
     model: nn.Module,
     chain_lengths: tuple[int, ...],
@@ -205,23 +235,29 @@ def sample(
     generator: torch.Generator | None = None,
     use_intermediate_feedback: bool | None = None,
     secondary_structure_input: Tensor | None = None,
+    coordinate_self_conditioning_mode: str = "aligned",
 ) -> SampleBatch:
-    """Run a stochastic Euler sampler on one coherent EDM time grid."""
+    """Run a stochastic Euler sampler on one coherent EDM time grid.
+
+    ``aligned`` is the production mode. ``raw`` reproduces the historical
+    frame-unsafe path for A/B diagnostics, and ``disabled`` removes coordinate
+    self-conditioning while leaving any configured secondary-structure
+    self-conditioning untouched.
+    """
+
+    if coordinate_self_conditioning_mode not in {"aligned", "raw", "disabled"}:
+        raise ValueError("coordinate self-conditioning mode must be aligned, raw, or disabled")
 
     device = torch.device(device)
     if use_intermediate_feedback is None:
-        model_config = getattr(model, "config", None)
-        if model_config is None:
-            # torch.compile wraps the model in an OptimizedModule and does
-            # not guarantee forwarding arbitrary attributes such as config.
-            model_config = getattr(getattr(model, "_orig_mod", None), "config", None)
+        model_config = _model_config(model)
         use_intermediate_feedback = bool(
             getattr(model_config, "intermediate_distogram_feedback", False)
         )
     topology = build_topology(
         chain_lengths, batch_size, device, secondary_structure=secondary_structure_input
     )
-    sigma_data = float(getattr(getattr(model, "config", None), "sigma_data", ModelConfig().sigma_data))
+    sigma_data = float(getattr(_model_config(model), "sigma_data", ModelConfig().sigma_data))
     time_grid = _sample_time_grid(
         config.num_steps,
         device=device,
@@ -274,9 +310,15 @@ def sample(
                 if step_index + 1 < config.num_steps
                 else torch.zeros((), device=device)
             )
+            previous_coordinates = _prepare_coordinate_self_conditioning(
+                coordinates,
+                last_prediction,
+                topology.atom_mask,
+                coordinate_self_conditioning_mode,
+            )
             coordinates, aligned_self_conditioning = _augment_batch(
                 coordinates,
-                last_prediction.coordinates if last_prediction is not None else None,
+                previous_coordinates,
                 topology.atom_mask,
                 generator,
                 config.translation_std,
