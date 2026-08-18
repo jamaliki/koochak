@@ -484,7 +484,9 @@ def step_fn(model, batch, ctx):
     condition. Payloads never include full resolved configs or checkpoint
     contents.
   - `koochak.logging.events.make_scruffy_hooks()` – requires `SCRUFFY_ROOT` and
-    `SCRUFFY_JOB_ID`; Scruffy is imported lazily and is not a Koochak dependency.
+    `SCRUFFY_JOB_ID`; Scruffy is imported lazily. Install `koochak[scruffy]` in
+    submission environments to get the compatible Python client without adding
+    Scruffy to worker-only environments.
     Failed publication never releases a dependent task; Scruffy leaves it
     blocked rather than inferring readiness from the filesystem.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.

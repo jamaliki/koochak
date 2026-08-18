@@ -13,6 +13,9 @@ dependencies = [
   "omegaconf>=2.3",
 ]
 
+[project.optional-dependencies]
+scruffy = ["scruffy-gpu>=0.1.1"]
+
 [tool.setuptools]
 package-dir = {"" = "."}
 

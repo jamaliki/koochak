@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any
 
@@ -101,8 +102,31 @@ def submit_scruffy(
 
     try:
         from scruffy import submit_job
+    except ModuleNotFoundError as exc:
+        if exc.name == "scruffy":
+            raise RuntimeError(
+                "submit_scruffy requires the optional dependency: "
+                "install 'koochak[scruffy]'"
+            ) from exc
+        raise RuntimeError(
+            "the installed scruffy-gpu package has a missing dependency; "
+            "upgrade with 'pip install --upgrade koochak[scruffy]'"
+        ) from exc
     except ImportError as exc:
-        raise RuntimeError("submit_scruffy requires the optional scruffy-gpu package") from exc
+        raise RuntimeError(
+            "the installed scruffy-gpu package is incompatible with this Python; "
+            "upgrade with 'pip install --upgrade koochak[scruffy]'"
+        ) from exc
+
+    parameters = signature(submit_job).parameters
+    accepts_keywords = any(
+        parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if wait_for and "wait_for" not in parameters and not accepts_keywords:
+        raise RuntimeError(
+            "the installed scruffy-gpu client does not support artifact conditions; "
+            "upgrade with 'pip install --upgrade koochak[scruffy]'"
+        )
 
     stage_run(prepared)
     return submit_job(
