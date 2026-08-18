@@ -10,7 +10,7 @@ This doc tracks incremental design decisions and changes from the initial design
 ## Implemented so far
 
 - Core loop
-  - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. Loop returns a resume-ready checkpoint dict.
+  - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. The loop atomically saves its terminal in-memory state before completion hooks and returns the same resume-ready checkpoint dict.
   - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner plus warnings when gradients become non-finite.
 
 - Hooks
