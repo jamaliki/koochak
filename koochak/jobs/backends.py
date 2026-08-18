@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -105,17 +106,26 @@ def submit_scruffy(
         raise RuntimeError("submit_scruffy requires the optional scruffy-gpu package") from exc
 
     stage_run(prepared)
-    return submit_job(
-        Path(root),
-        argv=prepared.runner_argv(),
-        name=prepared.name,
-        cwd=Path(prepared.cwd),
-        environment={},
-        request=resources,
-        request_id=request_id,
-        project_id=project_id,
-        workflow_id=workflow_id,
-        task_id=task_id,
-        needs=needs,
-        wait_for=wait_for,
+    submit_kwargs = {
+        "argv": prepared.runner_argv(),
+        "name": prepared.name,
+        "cwd": Path(prepared.cwd),
+        "environment": {},
+        "request": resources,
+        "request_id": request_id,
+        "project_id": project_id,
+        "workflow_id": workflow_id,
+        "task_id": task_id,
+        "needs": needs,
+    }
+    # Current Scruffy expresses dependencies through ``needs``; older clients
+    # also exposed a separate ``wait_for`` keyword. Avoid passing an obsolete
+    # keyword into a newer client while preserving older-client compatibility.
+    signature = inspect.signature(submit_job)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
     )
+    if wait_for is not None and ("wait_for" in signature.parameters or accepts_kwargs):
+        submit_kwargs["wait_for"] = wait_for
+    return submit_job(Path(root), **submit_kwargs)
