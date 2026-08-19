@@ -20,6 +20,7 @@ __all__ = [
     "OptimConfig",
     "LoggingConfig",
     "WandbConfig",
+    "MorboConfig",
     "EntryConfig",
     "RootConfig",
     "STRUCTURED_DEFAULTS",
@@ -158,6 +159,22 @@ class WandbConfig:
 
 
 @dataclass
+class MorboConfig:
+    enabled: bool = False
+    project_id: Optional[str] = None
+    socket_path: str = "/tmp/morbo-agent.sock"
+    run_name: Optional[str] = None
+    run_id: Optional[str] = None
+    attempt_id: Optional[str] = None
+    identity_path: Optional[str] = None
+    gradient_log_freq: int = 100
+    weight_log_freq: int = 100
+    weight_bins: int = 32
+    max_weight_tensors: int = 64
+    weight_reduction: str = "sidecar"
+
+
+@dataclass
 class EntryConfig:
     model: Optional[str] = None
     dataset: Optional[str] = None
@@ -173,6 +190,7 @@ class RootConfig:
     optim: OptimConfig = field(default_factory=OptimConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    morbo: MorboConfig = field(default_factory=MorboConfig)
     entry: EntryConfig = field(default_factory=EntryConfig)
 
 

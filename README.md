@@ -140,9 +140,13 @@ data:  { ... }
 optim: { optimizer: {...}, scheduler: {...} }
 logging: { csv_path: ..., jsonl_path: ... }
 wandb: { enabled: false, project: ... }
+morbo:
+  enabled: false
+  project_id: your-project
+  socket_path: /tmp/morbo-agent.sock
 ```
 
-The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop` with `train_cfg`.
+The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, optionally attaches Morbo hooks when `morbo.enabled` is true, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop` with `train_cfg`. Morbo keeps a stable logical `run_id` in `<train.out_dir>/.morbo-identity.json` and creates a new `attempt_id` for each launch unless one is supplied explicitly. The resolved IDs are also included in the serialized training config stored in checkpoints.
 
 
 ## Core API

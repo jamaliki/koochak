@@ -15,6 +15,7 @@ from ..optim.build import build_optimizer, build_scheduler
 from ..utils.seed import set_all_seeds
 from .. import config as config_lib
 from ..storage import checkpoint as checkpoint_lib
+from ..integrations.morbo import create_hooks as create_morbo_hooks
 
 
 def _import_obj(path: str):
@@ -41,6 +42,7 @@ def main():
     cfg_optim = config_lib.get_section(cfg_all, "optim")
     cfg_logging = config_lib.get_section(cfg_all, "logging")
     cfg_wandb = config_lib.get_section(cfg_all, "wandb")
+    cfg_morbo = config_lib.get_section(cfg_all, "morbo", required=False)
     cfg_entry = config_lib.get_section(cfg_all, "entry")
 
     # Strict config summary and validation (default strict)
@@ -78,7 +80,13 @@ def main():
     if getattr(cfg_entry, "eval_fn", None):
         eval_fn = _import_obj(cfg_entry.eval_fn)
 
-    # Hooks (stdout, CSV/JSONL, optional W&B)
+    # Resume
+    latest = checkpoint_lib.latest(str(cfg_train.out_dir))
+    ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
+
+    config_json = config_lib.as_dict(cfg_all)
+
+    # Hooks (stdout, CSV/JSONL, optional W&B and Morbo)
     hooks = hooks_lib.merge({}, make_stdout_hooks())
     csv_path = cfg_logging.csv_path or os.path.join(str(cfg_train.out_dir), "log.csv")
     jsonl_path = cfg_logging.jsonl_path or os.path.join(str(cfg_train.out_dir), "log.jsonl")
@@ -88,25 +96,38 @@ def main():
         hooks = hooks_lib.merge(hooks, make_jsonl_hooks(jsonl_path))
     if cfg_wandb and getattr(cfg_wandb, "enabled", False):
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(cfg_wandb))
-
-    # Resume
-    latest = checkpoint_lib.latest(str(cfg_train.out_dir))
-    ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
+    morbo_client = None
+    morbo_hooks, morbo_client, morbo_identity = create_morbo_hooks(cfg_morbo, cfg_train, ckpt)
+    if morbo_hooks is not None:
+        hooks = hooks_lib.merge(hooks, morbo_hooks)
+        config_json.setdefault("morbo", {}).update(
+            {
+                "project_id": morbo_identity.project_id,
+                "run_id": morbo_identity.run_id,
+                "attempt_id": morbo_identity.attempt_id,
+                "run_name": morbo_identity.run_name,
+                "identity_path": morbo_identity.identity_path,
+            }
+        )
 
     # Train
-    training_loop(
-        model=model,
-        dataset=dataset,
-        step_fn=step_fn,
-        optimizer=opt,
-        scheduler=sched,
-        train_cfg=cfg_train,
-        config_json=config_lib.as_dict(cfg_all),
-        checkpoint_dict=ckpt,
-        eval_dataset=eval_dataset,
-        eval_fn=eval_fn,
-        hooks=hooks,
-    )
+    try:
+        training_loop(
+            model=model,
+            dataset=dataset,
+            step_fn=step_fn,
+            optimizer=opt,
+            scheduler=sched,
+            train_cfg=cfg_train,
+            config_json=config_json,
+            checkpoint_dict=ckpt,
+            eval_dataset=eval_dataset,
+            eval_fn=eval_fn,
+            hooks=hooks,
+        )
+    finally:
+        if morbo_client is not None:
+            morbo_client.close()
 
 
 if __name__ == "__main__":
