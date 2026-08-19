@@ -118,14 +118,19 @@ def submit_scruffy(
         "task_id": task_id,
         "needs": needs,
     }
-    # Current Scruffy expresses dependencies through ``needs``; older clients
-    # also exposed a separate ``wait_for`` keyword. Avoid passing an obsolete
-    # keyword into a newer client while preserving older-client compatibility.
+    # Artifact conditions are not equivalent to terminal-state dependencies.
+    # Never silently drop them when an older Scruffy client is installed: that
+    # would start consumers before their checkpoint exists.
     signature = inspect.signature(submit_job)
     accepts_kwargs = any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
-    if wait_for is not None and ("wait_for" in signature.parameters or accepts_kwargs):
+    supports_wait_for = "wait_for" in signature.parameters or accepts_kwargs
+    if wait_for and not supports_wait_for:
+        raise RuntimeError(
+            "installed Scruffy client does not support artifact wait_for gates"
+        )
+    if wait_for is not None and supports_wait_for:
         submit_kwargs["wait_for"] = wait_for
     return submit_job(Path(root), **submit_kwargs)

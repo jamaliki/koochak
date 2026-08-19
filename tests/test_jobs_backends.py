@@ -121,3 +121,47 @@ def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(
             "artifact_id": "checkpoint/step000000007.pt",
         }
     ]
+
+
+def test_scruffy_adapter_rejects_dropped_artifact_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _prepared(tmp_path)
+
+    def old_submit(
+        root,
+        *,
+        argv,
+        name,
+        cwd,
+        environment,
+        request,
+        request_id,
+        project_id,
+        workflow_id,
+        task_id,
+        needs,
+    ):
+        raise AssertionError("unsupported submission must not be attempted")
+
+    module = types.ModuleType("scruffy")
+    module.submit_job = old_submit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    with pytest.raises(RuntimeError, match="does not support artifact wait_for"):
+        submit_scruffy(
+            prepared,
+            root=tmp_path / "queue",
+            resources=object(),
+            request_id="campaign/sample/attempt-1",
+            project_id="project",
+            workflow_id="campaign",
+            task_id="sample",
+            wait_for=[
+                {
+                    "kind": "artifact",
+                    "task_id": "train",
+                    "artifact_id": "checkpoint/step000000007.pt",
+                }
+            ],
+        )
