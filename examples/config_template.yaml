@@ -123,5 +123,5 @@ morbo:
   weight_log_freq: 100
   weight_bins: 32
   max_weight_tensors: 64
-  max_weight_sample_values: 256
+  max_weight_sample_values: 128
   weight_reduction: sidecar

@@ -171,7 +171,7 @@ class MorboConfig:
     weight_log_freq: int = 100
     weight_bins: int = 32
     max_weight_tensors: int = 64
-    max_weight_sample_values: int = 256
+    max_weight_sample_values: int = 128
     weight_reduction: str = "sidecar"
 
 
