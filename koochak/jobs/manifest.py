@@ -122,6 +122,7 @@ def prepare_run(
     python_args: Sequence[str],
     cwd: str,
     run_dir: str,
+    launch_dir: str | None = None,
     base_config: str | Path | None = None,
     patches: Sequence[ConfigPatch] = (),
     out_dir_config_key: str | None = "train.out_dir",
@@ -132,8 +133,17 @@ def prepare_run(
         raise ValueError("name must contain only letters, digits, '.', '_' or '-'")
     cwd = _absolute(cwd, "cwd")
     run_dir = _absolute(run_dir, "run_dir").rstrip("/") or "/"
-    manifest_path = posixpath.join(run_dir, "launch.json")
-    config_path = posixpath.join(run_dir, "config.yaml") if base_config is not None else None
+    launch_dir = (
+        run_dir
+        if launch_dir is None
+        else (_absolute(launch_dir, "launch_dir").rstrip("/") or "/")
+    )
+    manifest_path = posixpath.join(launch_dir, "launch.json")
+    config_path = (
+        posixpath.join(launch_dir, "config.yaml")
+        if base_config is not None
+        else None
+    )
     config_text = (
         materialize_config(
             base_config,
@@ -158,7 +168,7 @@ def prepare_run(
         "run_dir": run_dir,
         "argv": argv,
         "environment": environment.to_dict(),
-        "preflight_result_path": posixpath.join(run_dir, "preflight.json"),
+        "preflight_result_path": posixpath.join(launch_dir, "preflight.json"),
     }
     artifacts = []
     if config_text is not None and config_path is not None:

@@ -85,6 +85,38 @@ def test_prepare_run_is_deterministic_and_contains_resolved_inputs(tmp_path: Pat
     assert first.runner_argv()[1:4] == ["-I", "-m", "koochak.jobs.runner"]
 
 
+def test_prepare_run_can_separate_immutable_launch_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_dir = str(tmp_path / "outputs" / "cell")
+    launch_dir = str(tmp_path / "launches" / "attempt-2")
+    prepared = prepare_run(
+        name="training-retry",
+        profile=_profile(),
+        python_args=["-m", "project.train", "--config", "{config}"],
+        cwd=str(tmp_path),
+        run_dir=run_dir,
+        launch_dir=launch_dir,
+        base_config=_config(tmp_path),
+    )
+
+    manifest = json.loads(prepared.artifacts[-1].content)
+    config = OmegaConf.create(prepared.artifacts[0].content.decode())
+    assert prepared.run_dir == run_dir
+    assert prepared.manifest_path == f"{launch_dir}/launch.json"
+    assert {artifact.path for artifact in prepared.artifacts} == {
+        f"{launch_dir}/config.yaml",
+        f"{launch_dir}/launch.json",
+    }
+    assert manifest["run_dir"] == run_dir
+    assert manifest["preflight_result_path"] == f"{launch_dir}/preflight.json"
+    assert manifest["argv"][-1] == f"{launch_dir}/config.yaml"
+    assert manifest["environment"]["environment"]["set"]["TRITON_CACHE_DIR"] == (
+        f"{run_dir}/triton-cache"
+    )
+    assert config.train.out_dir == run_dir
+
+
 def test_stage_is_idempotent_but_never_clobbers_another_launch(tmp_path: Path) -> None:
     run_dir = str(tmp_path / "run")
     common = {
