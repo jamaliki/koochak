@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import functools
-from dataclasses import dataclass
-
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -213,50 +210,6 @@ class AtomOutput(nn.Module):
         return self.output(self.output_norm(atoms)) * atom_mask[..., None].to(atoms.dtype)
 
 
-@dataclass(frozen=True)
-class PackedLayout:
-    indices: Tensor
-    cumulative_lengths: Tensor
-    max_length: int
-    batch_size: int
-    padded_length: int
-
-    def pack(self, values: Tensor) -> Tensor:
-        flat = values.reshape(self.batch_size * self.padded_length, *values.shape[2:])
-        return flat.index_select(0, self.indices)
-
-    def unpack(self, values: Tensor) -> Tensor:
-        flat = values.new_zeros(self.batch_size * self.padded_length, *values.shape[1:])
-        flat.index_copy_(0, self.indices, values)
-        return flat.reshape(self.batch_size, self.padded_length, *values.shape[1:])
-
-
-def build_packed_layout(mask: Tensor) -> PackedLayout:
-    lengths = mask.sum(1, dtype=torch.int32)
-    prefix = torch.arange(mask.shape[1], device=mask.device)[None] < lengths[:, None]
-    if not bool(torch.all(mask.bool() == prefix)):
-        raise ValueError("residue stages require prefix-padded inputs")
-    cumulative = torch.zeros(mask.shape[0] + 1, dtype=torch.int32, device=mask.device)
-    cumulative[1:] = lengths.cumsum(0)
-    return PackedLayout(
-        torch.nonzero(mask.reshape(-1), as_tuple=False).flatten(),
-        cumulative,
-        int(lengths.max()),
-        mask.shape[0],
-        mask.shape[1],
-    )
-
-
-@functools.lru_cache(maxsize=1)
-def _flash_varlen():
-    try:
-        from flash_attn_interface import flash_attn_varlen_func
-
-        return flash_attn_varlen_func
-    except ImportError:
-        return None
-
-
 class GlobalAttention(nn.Module):
     """Global residue/register attention with FA3 varlen on CUDA."""
 
@@ -287,39 +240,6 @@ class GlobalAttention(nn.Module):
         gate = torch.sigmoid(self.gate(torch.cat((normalized, condition), -1)))
         return self.output(attended.flatten(-2) * gate) * mask[..., None].to(x.dtype)
 
-    def forward_packed(
-        self,
-        x: Tensor,
-        condition: Tensor,
-        positions: Tensor,
-        cumulative_lengths: Tensor,
-        max_length: int,
-    ) -> Tensor:
-        normalized, query, key, value = self._project(x, positions)
-        flash = _flash_varlen() if query.is_cuda and query.dtype in {torch.float16, torch.bfloat16} else None
-        if flash is None:
-            if query.is_cuda:
-                fused_failure("FA3 variable-length global attention")
-            pieces = []
-            offsets = cumulative_lengths.cpu().long().tolist()
-            for start, end in zip(offsets[:-1], offsets[1:], strict=True):
-                pieces.append(F.scaled_dot_product_attention(
-                    query[start:end].transpose(0, 1)[None],
-                    key[start:end].transpose(0, 1)[None],
-                    value[start:end].transpose(0, 1)[None], dropout_p=0.0,
-                )[0].transpose(0, 1))
-            attended = torch.cat(pieces)
-        else:
-            attended = flash(
-                query, key, value, cumulative_lengths, cumulative_lengths,
-                max_length, max_length, softmax_scale=self.head_dim**-0.5, causal=False,
-            )
-            if isinstance(attended, tuple):
-                attended = attended[0]
-        gate = torch.sigmoid(self.gate(torch.cat((normalized, condition), -1)))
-        return self.output(attended.flatten(-2) * gate)
-
-
 class GlobalBlock(nn.Module):
     def __init__(
         self,
@@ -338,9 +258,3 @@ class GlobalBlock(nn.Module):
     def forward(self, x: Tensor, condition: Tensor, mask: Tensor, positions: Tensor) -> Tensor:
         x = x * mask[..., None].to(x.dtype)
         return self.ffn(x + self.attention(x, condition, mask, positions), condition) * mask[..., None].to(x.dtype)
-
-    def forward_packed(
-        self, x: Tensor, condition: Tensor, positions: Tensor, cumulative_lengths: Tensor, max_length: int
-    ) -> Tensor:
-        x = x + self.attention.forward_packed(x, condition, positions, cumulative_lengths, max_length)
-        return self.ffn(x, condition)

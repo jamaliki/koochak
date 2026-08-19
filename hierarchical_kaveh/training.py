@@ -49,7 +49,7 @@ _BATCH_TELEMETRY = (
 
 
 def denoiser_input(
-    batch: Mapping[str, Tensor],
+    batch: Mapping[str, Any],
     previous: Prediction | None = None,
 ) -> DenoiserInput:
     """Translate one standard-EDM batch into the immutable model contract."""
@@ -63,8 +63,16 @@ def denoiser_input(
         atom_mask=batch["model_atom_mask"].to(torch.bool),
         aatype_input=batch["aatype_input"],
         secondary_structure_input=batch.get("secondary_structure_input"),
+        patch_capacity=batch.get("patch_capacity"),
     )
     return inputs.with_self_conditioning(previous)
+
+
+def _self_conditioning_model(model: nn.Module) -> nn.Module:
+    """Use eager inference for the optional auxiliary denoiser pass."""
+
+    unwrapped = getattr(model, "module", model)
+    return getattr(unwrapped, "_orig_mod", unwrapped)
 
 
 class PallatomTrainingStep:
@@ -92,7 +100,7 @@ class PallatomTrainingStep:
     def __call__(
         self,
         model: nn.Module,
-        batch: Mapping[str, Tensor],
+        batch: Mapping[str, Any],
         context: Mapping[str, Any],
     ) -> dict[str, Tensor]:
         inputs = denoiser_input(batch)
@@ -101,7 +109,9 @@ class PallatomTrainingStep:
         previous = None
         if use_self_conditioning:
             with torch.no_grad(), autocast():
-                previous = model(inputs, compute_distogram=False)
+                previous = _self_conditioning_model(model)(
+                    inputs, compute_distogram=False
+                )
         inputs = denoiser_input(batch, previous)
 
         with autocast():

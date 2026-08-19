@@ -20,5 +20,10 @@ def test_denoiser_input_moves_and_attaches_detached_self_conditioning() -> None:
     )
     conditioned = model_input.with_self_conditioning(prediction)
     assert conditioned.self_conditioned_coordinates is not None
+    assert conditioned.self_conditioning_mask.all()
     assert not conditioned.self_conditioned_coordinates.requires_grad
     assert conditioned.to("cpu").residue_mask.all()
+
+    unconditioned = model_input.with_self_conditioning(None)
+    assert torch.count_nonzero(unconditioned.self_conditioned_coordinates) == 0
+    assert not unconditioned.self_conditioning_mask.any()

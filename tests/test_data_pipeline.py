@@ -57,6 +57,7 @@ def _ragged_fixture(tmp_path):
                     "cond_feature_names": ["mean_plddt", "loop_content"],
                     "ca_distance_validation_max": 4.0,
                     "excluded_ca_distance_samples": [],
+                    "consecutive_patch_counts": [2, 2, 1],
                 }
             ]
         )
@@ -67,6 +68,7 @@ def _ragged_fixture(tmp_path):
 def test_ragged_reader_preserves_multichain_non_divisible_by_four(tmp_path) -> None:
     references = index_shards(_ragged_fixture(tmp_path), min_length=4)
     assert [reference.length for reference in references] == [5, 7]
+    assert [reference.patch_count for reference in references] == [2, 2]
     sample = load_sample(references[0])
     assert sample["atom14_coordinates"].shape == (5, 14, 3)
     assert sample["model_atom_mask"].all()
@@ -146,6 +148,7 @@ def test_index_excludes_sample_with_overlong_consecutive_ca_step(tmp_path) -> No
     materialize_metadata(metadata, validated_metadata)
     references = index_shards(validated_metadata, min_length=1)
     assert [reference.index for reference in references] == [0, 2]
+    assert [reference.patch_count for reference in references] == [2, 1]
 
 
 def test_ca_filter_is_strict_and_ignores_topological_discontinuities(tmp_path) -> None:
@@ -390,6 +393,7 @@ def test_loader_buckets_and_prefix_pads(tmp_path) -> None:
     batch = next(iter(build_train_dataloader(data, DiffusionConfig(), sigma_data=16.0)))
     assert batch["x_t"].shape == (2, 8, 14, 3)
     assert batch["t"].shape == (2, 8, 14)
+    assert batch["patch_capacity"] == 4
     assert set(batch["lengths"].tolist()) <= {5, 7}
     for row, length in enumerate(batch["lengths"].tolist()):
         assert batch["residue_mask"][row, :length].all()

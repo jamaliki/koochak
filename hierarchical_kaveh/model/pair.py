@@ -222,11 +222,17 @@ class PairInitializer(nn.Module):
         layout: PatchLayout,
         dtype: torch.dtype,
         self_conditioned_ca_slots: Tensor | None = None,
+        self_conditioning_mask: Tensor | None = None,
     ) -> Tensor:
         pair = self._static(layout).to(dtype)
         pair = pair + self.geometry_scale.to(dtype) * self._geometry(ca_slots, layout).to(dtype)
         if self.geometry_mode == "local_center" and self.self_conditioned_geometry:
             if self_conditioned_ca_slots is not None:
+                scale = (
+                    self_conditioning_mask[:, None, None, None].to(dtype)
+                    if self_conditioning_mask is not None
+                    else 1.0
+                )
                 local, center = self.local_center_features(self_conditioned_ca_slots, layout)
                 local_embedding = self.sc_local_projection(
                     local.flatten(2).to(self.sc_local_projection.weight.dtype)
@@ -234,20 +240,20 @@ class PairInitializer(nn.Module):
                 center_embedding = self.sc_center_projection(
                     center.to(self.sc_center_projection.weight.dtype)
                 )
-                pair = pair + (
+                pair = pair + scale * (
                     local_embedding[:, :, None, :]
                     + local_embedding[:, None, :, :]
                     + center_embedding
                 ).to(dtype)
                 if self.cross_patch_geometry:
-                    pair = pair + self._cross_patch_geometry(
+                    pair = pair + scale * self._cross_patch_geometry(
                         self_conditioned_ca_slots, layout, self.sc_cross_projection
                     ).to(dtype)
                     if self.cross_patch_extrema:
                         extrema = self.cross_patch_extrema_features(
                             self_conditioned_ca_slots, layout
                         )
-                        pair = pair + self.sc_cross_extrema_projection(
+                        pair = pair + scale * self.sc_cross_extrema_projection(
                             extrema.flatten(3).to(self.sc_cross_extrema_projection.weight.dtype)
                         ).to(dtype)
         return pair * layout.pair_mask[..., None].to(dtype)

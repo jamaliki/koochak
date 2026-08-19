@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
 from torch import nn
 
 from hierarchical_kaveh.config import LossConfig, ModelConfig
-from hierarchical_kaveh.training import PallatomTrainingStep, denoiser_input
+from hierarchical_kaveh.training import (
+    PallatomTrainingStep,
+    _self_conditioning_model,
+    denoiser_input,
+)
 from hierarchical_kaveh.types import Prediction
 
 
@@ -26,6 +31,7 @@ def _batch() -> dict[str, torch.Tensor]:
         "res_idx": torch.arange(residues).expand(batch, -1),
         "chain_idx": torch.zeros(batch, residues, dtype=torch.long),
         "chain_breaks_per_residue": torch.zeros(batch, residues, dtype=torch.bool),
+        "patch_capacity": 4,
     }
 
 
@@ -49,12 +55,24 @@ class FakeModel(nn.Module):
         return self.prediction
 
 
+def test_self_conditioning_model_bypasses_compile_and_ddp_wrappers() -> None:
+    eager = FakeModel(_prediction(_batch()))
+    compiled = SimpleNamespace(_orig_mod=eager)
+    ddp = SimpleNamespace(module=compiled)
+
+    assert _self_conditioning_model(eager) is eager
+    assert _self_conditioning_model(compiled) is eager
+    assert _self_conditioning_model(ddp) is eager
+
+
 def test_denoiser_input_uses_standard_edm_contract() -> None:
     batch = _batch()
     inputs = denoiser_input(batch)
     assert inputs.coordinates is batch["x_t"]
     assert inputs.sigma is batch["t"]
-    assert inputs.self_conditioned_coordinates is None
+    assert torch.count_nonzero(inputs.self_conditioned_coordinates) == 0
+    assert not inputs.self_conditioning_mask.any()
+    assert inputs.patch_capacity == 4
 
 
 def test_training_step_always_self_conditions_coordinates(monkeypatch) -> None:
@@ -80,6 +98,7 @@ def test_training_step_always_self_conditions_coordinates(monkeypatch) -> None:
     first_input, first_kwargs = model.inputs[0]
     final_input, final_kwargs = model.inputs[1]
     assert torch.equal(final_input.self_conditioned_coordinates, prediction.coordinates)
+    assert final_input.self_conditioning_mask.all()
     assert not final_input.self_conditioned_coordinates.requires_grad
     assert first_kwargs == {"compute_distogram": False}
     assert final_kwargs == {"compute_distogram": True}
@@ -122,7 +141,8 @@ def test_training_step_can_skip_self_conditioning_and_distogram(monkeypatch) -> 
 
     assert len(model.inputs) == 1
     final_input, final_kwargs = model.inputs[0]
-    assert final_input.self_conditioned_coordinates is None
+    assert torch.count_nonzero(final_input.self_conditioned_coordinates) == 0
+    assert not final_input.self_conditioning_mask.any()
     assert final_kwargs == {"compute_distogram": False}
     assert output["self_conditioned"].item() == 0.0
     assert output["data_owned_shard_count"].item() == 17

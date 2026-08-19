@@ -36,6 +36,7 @@ def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
                     "cond_feature_names": ["mean_plddt"],
                     "ca_distance_validation_max": 4.0,
                     "excluded_ca_distance_samples": [],
+                    "consecutive_patch_counts": [1],
                 }
             ]
         ),

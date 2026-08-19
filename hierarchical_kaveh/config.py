@@ -147,6 +147,13 @@ class DataConfig:
         if any(a >= b for a, b in zip(self.length_buckets, self.length_buckets[1:])):
             raise ValueError("length_buckets must be strictly increasing")
 
+    @property
+    def effective_length_buckets(self) -> tuple[int, ...]:
+        """Return configured buckets with ``max_length`` represented once."""
+
+        edges = tuple(edge for edge in self.length_buckets if edge <= self.max_length)
+        return edges if edges and edges[-1] == self.max_length else (*edges, self.max_length)
+
 
 @dataclass(frozen=True)
 class DiffusionConfig:

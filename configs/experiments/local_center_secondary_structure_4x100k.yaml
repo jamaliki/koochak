@@ -16,7 +16,7 @@ model:
   checkpoint_blocks: false
 
 data:
-  metadata_path: /mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/metadata_ca4.json
+  metadata_path: /mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/metadata_ca4_patch4.json
   min_length: 4
   max_length: 128
   mean_plddt_min: 80.0

@@ -15,6 +15,7 @@ from koochak.data.sharding import mark_sharded
 from hierarchical_kaveh.config import DataConfig, DiffusionConfig
 from hierarchical_kaveh.diffusion.corruption import corrupt_structure
 from hierarchical_kaveh.diffusion.schedules import sample_training_sigma
+from hierarchical_kaveh.model.patch import bucket_patch_capacity
 
 from .shards import SampleReference, ShardCache, index_shards, load_sample
 
@@ -121,7 +122,8 @@ def collate_samples(
     samples: Sequence[Mapping[str, Tensor]],
     *,
     pad_to: int | None = None,
-) -> dict[str, Tensor]:
+    patch_capacity: int | None = None,
+) -> dict[str, Any]:
     """Prefix-pad corrupted samples and stack them into one plain mapping."""
 
     if not samples:
@@ -167,10 +169,13 @@ def collate_samples(
     batch = {key: padded(key) for key in pad_values}
     batch["sigma"] = torch.stack([sample["sigma"] for sample in samples])
     batch["lengths"] = lengths
+    if patch_capacity is None:
+        patch_capacity = bucket_patch_capacity((target + 3) // 4)
+    batch["patch_capacity"] = patch_capacity
     return batch
 
 
-class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
+class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
     """Infinite standard-EDM batches sharded across DDP ranks and workers."""
 
     def __init__(
@@ -194,16 +199,27 @@ class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
                 loop_content_max=data.loop_content_max,
             )
         )
-        edges = tuple(edge for edge in data.length_buckets if edge <= data.max_length)
-        self.length_buckets = (
-            edges if edges and edges[-1] == data.max_length else (*edges, data.max_length)
-        )
+        self.length_buckets = data.effective_length_buckets
+        required_by_bucket = {edge: 0 for edge in self.length_buckets}
+        for reference in self.references:
+            edge = next(
+                edge for edge in self.length_buckets if reference.resolved_length <= edge
+            )
+            required_by_bucket[edge] = max(
+                required_by_bucket[edge], reference.patch_count
+            )
+        self.patch_capacities = {
+            edge: bucket_patch_capacity(
+                max(required_by_bucket[edge], (edge + 3) // 4)
+            )
+            for edge in self.length_buckets
+        }
         mark_sharded(self)
 
     def set_global_step(self, step: int) -> None:
         self.global_step = int(step)
 
-    def __iter__(self) -> Iterator[dict[str, Tensor]]:
+    def __iter__(self) -> Iterator[dict[str, Any]]:
         worker = get_worker_info()
         worker_id, worker_count = (worker.id, worker.num_workers) if worker else (0, 1)
         rank, world = dist.rank(), dist.world_size()
@@ -265,7 +281,11 @@ class TrainingBatchDataset(IterableDataset[dict[str, Tensor]]):
             buffer = buffers[edge]
             buffer.append(sample)
             if len(buffer) == self.data.batch_size:
-                batch = collate_samples(buffer, pad_to=edge)
+                batch = collate_samples(
+                    buffer,
+                    pad_to=edge,
+                    patch_capacity=self.patch_capacities[edge],
+                )
                 batch.update(
                     {
                         "data_worker_id": torch.tensor(

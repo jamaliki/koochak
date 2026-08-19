@@ -67,6 +67,7 @@ def test_chain_topology_uses_index_gap_not_synthetic_break() -> None:
     assert not topology.chain_break.any()
     assert topology.secondary_structure_input.shape == (2, 5)
     assert topology.secondary_structure_input.eq(3).all()
+    assert topology.patch_capacity == 4
 
 
 def test_chain_length_parser_and_schedule() -> None:
@@ -93,9 +94,13 @@ def test_sampler_carries_previous_prediction_as_self_conditioning() -> None:
     second, second_kwargs = model.inputs[1]
     third, third_kwargs = model.inputs[2]
     assert torch.all(first.sigma == first.sigma[..., :1])
-    assert first.self_conditioned_coordinates is None
+    assert torch.count_nonzero(first.self_conditioned_coordinates) == 0
+    assert not first.self_conditioning_mask.any()
+    assert first.patch_capacity == 4
     assert second.self_conditioned_coordinates is not None
     assert third.self_conditioned_coordinates is not None
+    assert second.self_conditioning_mask.all()
+    assert third.self_conditioning_mask.all()
     assert torch.isfinite(second.self_conditioned_coordinates).all()
     assert torch.isfinite(third.self_conditioned_coordinates).all()
     assert first_kwargs == second_kwargs == third_kwargs == {

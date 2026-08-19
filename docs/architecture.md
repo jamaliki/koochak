@@ -25,16 +25,20 @@ residual makes atom-to-residue information flow available from initialization.
 
 ## 2. Global residue encoder
 
-Residues and learned registers use global RoPE attention. Prefix-padded batches
-are packed for FA3 varlen attention; PyTorch SDPA is the reference fallback.
-This is the first global communication stage and occurs before lossy patching.
+Residues and learned registers use global RoPE attention. Prefix-padded length
+buckets remain rectangular and use PyTorch SDPA, allowing its fused CUDA
+backend without introducing data-dependent packed tensor shapes. This is the
+first global communication stage and occurs before lossy patching.
 
 ## 3. Coarse p=4 trunk
 
-Patchify groups four contiguous residues without crossing a chain boundary,
-explicit break, residue-index discontinuity, or padding. Learned masked pooling
-again sits on an exact mean residual. A tail of one to three residues forms a
-masked partial patch rather than being dropped.
+Patchify groups four residues without crossing a chain boundary,
+residue-index discontinuity, or padding. Diffusion coordinates and historical
+geometry break flags never affect the layout. Learned masked pooling again sits
+on an exact mean residual. A tail of one to three residues forms a masked
+partial patch rather than being dropped. Offline per-sample counts determine
+one fixed coarse capacity per filtered length bucket; pack and unpack always
+use the same gather/scatter path.
 
 The stable pair initializer keeps the 4x4 ordered C-alpha distance matrix for
 every patch pair. Sixteen RBF distance channels per slot pair preserve more

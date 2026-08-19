@@ -1,4 +1,5 @@
 import gc
+from dataclasses import replace
 
 import pytest
 import torch
@@ -67,6 +68,23 @@ def test_forward_contract_and_compact_distogram():
     assert isinstance(prediction.distogram, CompactDistogram)
     assert expand_distogram(prediction.distogram).shape == (2, 9, 9, 8)
     assert torch.count_nonzero(prediction.coordinates[1, 5:]) == 0
+
+
+def test_fixed_patch_capacity_matches_compact_eager_model_output():
+    model = HierarchicalKaveh(small_config()).eval()
+    inputs = sample_input()
+    exact = model(inputs)
+    static = model(replace(inputs, patch_capacity=4))
+
+    torch.testing.assert_close(static.coordinates, exact.coordinates, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(static.aatype_logits, exact.aatype_logits, atol=1e-6, rtol=1e-6)
+    assert static.distogram is not None and exact.distogram is not None
+    torch.testing.assert_close(
+        expand_distogram(static.distogram),
+        expand_distogram(exact.distogram),
+        atol=1e-6,
+        rtol=1e-6,
+    )
 
 
 def test_local_center_geometry_and_intermediate_feedback_variant():

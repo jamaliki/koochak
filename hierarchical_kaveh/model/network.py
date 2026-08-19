@@ -16,7 +16,6 @@ from .attention import (
     AtomOutput,
     AtomToResidue,
     GlobalBlock,
-    build_packed_layout,
 )
 from .layers import FeedForward, TimeEmbedding, checkpoint, init_linear
 from .pair import (
@@ -128,18 +127,18 @@ class ResidueInput(nn.Module):
                 SS_INPUT_CLASSES,
             ).to(self.secondary_structure.weight.dtype)
             pieces.append(self.secondary_structure(ss))
-            if self.secondary_structure_self_conditioning:
-                if self_conditioned_secondary_structure is None:
-                    ss_self = torch.zeros_like(pieces[-1])
-                else:
-                    if self_conditioned_secondary_structure.shape != (*residue_mask.shape, SS_OUTPUT_CLASSES):
-                        raise ValueError(
-                            "self-conditioned secondary structure must have [B,N,3] shape"
-                        )
-                    probabilities = self_conditioned_secondary_structure.float().softmax(-1)
-                    predicted = self.secondary_structure_self(probabilities.to(pieces[-1].dtype))
-                    alpha = self.secondary_structure_self_conditioning_alpha
-                    pieces[-1] = (1.0 - alpha) * pieces[-1] + alpha * predicted
+            if (
+                self.secondary_structure_self_conditioning
+                and self_conditioned_secondary_structure is not None
+            ):
+                if self_conditioned_secondary_structure.shape != (*residue_mask.shape, SS_OUTPUT_CLASSES):
+                    raise ValueError(
+                        "self-conditioned secondary structure must have [B,N,3] shape"
+                    )
+                probabilities = self_conditioned_secondary_structure.float().softmax(-1)
+                predicted = self.secondary_structure_self(probabilities.to(pieces[-1].dtype))
+                alpha = self.secondary_structure_self_conditioning_alpha
+                pieces[-1] = (1.0 - alpha) * pieces[-1] + alpha * predicted
         stacked = torch.stack(pieces, dim=-2)
         x = (stacked * self.scales.to(stacked.dtype)[..., None]).sum(-2)
         return x * residue_mask[..., None].to(x.dtype)
@@ -266,11 +265,15 @@ class HierarchicalKaveh(nn.Module):
             if getattr(inputs, name).shape != residue_shape:
                 raise ValueError(f"{name} must have [B,N] shape")
         residue_mask = inputs.residue_mask
-        prefix = torch.arange(residue_shape[1], device=coordinates.device)[None] < residue_mask.sum(1)[:, None]
-        if not bool(torch.all(residue_mask == prefix)):
-            raise ValueError("residues must be left-aligned and prefix padded")
-        if not bool(residue_mask.any()):
-            raise ValueError("a batch must contain at least one valid residue")
+        if not torch.compiler.is_compiling():
+            prefix = (
+                torch.arange(residue_shape[1], device=coordinates.device)[None]
+                < residue_mask.sum(1)[:, None]
+            )
+            if not bool(torch.all(residue_mask == prefix)):
+                raise ValueError("residues must be left-aligned and prefix padded")
+            if not bool(residue_mask.any()):
+                raise ValueError("a batch must contain at least one valid residue")
         return atom_mask & residue_mask[..., None], residue_mask
 
     def _conditions(self, sigma: Tensor, residue_mask: Tensor) -> tuple[Tensor, Tensor]:
@@ -288,27 +291,15 @@ class HierarchicalKaveh(nn.Module):
         mask: Tensor,
         positions: Tensor,
     ) -> Tensor:
-        # Hopper uses packed varlen attention; CPU and other GPUs use exact dense SDPA.
-        use_packed = x.is_cuda and x.dtype in {torch.float16, torch.bfloat16}
-        layout = build_packed_layout(mask) if use_packed else None
-        if layout is not None:
-            packed_x = layout.pack(x)
-            packed_condition = layout.pack(condition)
-            packed_positions = layout.pack(positions)
-            for block in blocks:
-                if self.config.checkpoint_blocks and torch.is_grad_enabled():
-                    packed_x = torch.utils.checkpoint.checkpoint(
-                        block.forward_packed, packed_x, packed_condition, packed_positions,
-                        layout.cumulative_lengths, layout.max_length, use_reentrant=False,
-                    )
-                else:
-                    packed_x = block.forward_packed(
-                        packed_x, packed_condition, packed_positions,
-                        layout.cumulative_lengths, layout.max_length,
-                    )
-            return layout.unpack(packed_x)
         for block in blocks:
-            x = checkpoint(block, x, condition, mask, positions, enabled=self.config.checkpoint_blocks)
+            x = checkpoint(
+                block,
+                x,
+                condition,
+                mask,
+                positions,
+                enabled=self.config.checkpoint_blocks,
+            )
         return x
 
     def forward(
@@ -329,13 +320,39 @@ class HierarchicalKaveh(nn.Module):
         c_in = (self.config.sigma_data**2 + sigma_sq).rsqrt()
         coordinates = c_in[..., None] * raw_coordinates
         raw_self_conditioned_coordinates = inputs.self_conditioned_coordinates
-        self_conditioned_coordinates = raw_self_conditioned_coordinates
-        if self_conditioned_coordinates is not None:
-            if self_conditioned_coordinates.shape != raw_coordinates.shape:
+        self_conditioning_mask = inputs.self_conditioning_mask
+        if raw_self_conditioned_coordinates is None:
+            raw_self_conditioned_coordinates = torch.zeros_like(raw_coordinates)
+            self_conditioning_mask = torch.zeros(
+                raw_coordinates.shape[0],
+                dtype=torch.bool,
+                device=raw_coordinates.device,
+            )
+        else:
+            if raw_self_conditioned_coordinates.shape != raw_coordinates.shape:
                 raise ValueError("self_conditioned_coordinates must match coordinates")
-            self_conditioned_coordinates = self_conditioned_coordinates / self.config.sigma_data
+            if self_conditioning_mask is None:
+                self_conditioning_mask = torch.ones(
+                    raw_coordinates.shape[0],
+                    dtype=torch.bool,
+                    device=raw_coordinates.device,
+                )
+            elif self_conditioning_mask.shape != (raw_coordinates.shape[0],):
+                raise ValueError("self_conditioning_mask must have [B] shape")
+        sc_scale = self_conditioning_mask[:, None, None, None].to(
+            raw_coordinates.dtype
+        )
+        raw_self_conditioned_coordinates = raw_self_conditioned_coordinates * sc_scale
+        self_conditioned_coordinates = (
+            raw_self_conditioned_coordinates / self.config.sigma_data
+        )
 
-        layout = build_patch_layout(residue_mask, inputs.chain_index, inputs.residue_index)
+        layout = build_patch_layout(
+            residue_mask,
+            inputs.chain_index,
+            inputs.residue_index,
+            patch_capacity=inputs.patch_capacity,
+        )
         residue_x = self.residue_input(
             inputs.aatype_input,
             inputs.chain_break,
@@ -353,23 +370,21 @@ class HierarchicalKaveh(nn.Module):
         register_positions = torch.arange(1, REGISTER_COUNT + 1, device=residue_mask.device)[None].expand(batch_size, -1)
         token_positions = torch.cat((register_positions, inputs.residue_index + REGISTER_COUNT + 1), 1)
 
-        active_residues = int(residue_mask.sum(1).max())
-        active_atom_mask = atom_mask[:, :active_residues]
-        active_condition = residue_condition[:, :active_residues]
         atoms = self.atom_input(
-            coordinates[:, :active_residues],
-            None if self_conditioned_coordinates is None else self_conditioned_coordinates[:, :active_residues],
-            residue_x[:, :active_residues], active_condition, active_atom_mask,
+            coordinates,
+            self_conditioned_coordinates,
+            residue_x,
+            residue_condition,
+            atom_mask,
         )
-        segment_index = layout.segment_index[:, :active_residues]
+        segment_index = layout.segment_index
         for block in self.atom_encoder:
             atoms = checkpoint(
-                block, atoms, active_condition, active_atom_mask, segment_index,
+                block, atoms, residue_condition, atom_mask, segment_index,
                 enabled=self.config.checkpoint_blocks,
             )
         atom_skip = atoms
-        atom_update = self.atom_to_residue(atoms, active_condition, active_atom_mask)
-        atom_update = F.pad(atom_update, (0, 0, 0, residue_count - active_residues))
+        atom_update = self.atom_to_residue(atoms, residue_condition, atom_mask)
         residue_x = residue_x + atom_update
 
         tokens = torch.cat((registers, residue_x), 1)
@@ -385,11 +400,19 @@ class HierarchicalKaveh(nn.Module):
         coarse_positions = torch.cat((register_positions, patch_positions), 1)
 
         ca_slots = layout.pack(raw_coordinates[..., 1, :])
-        sc_ca_slots = None
-        if raw_self_conditioned_coordinates is not None and self.config.pair_self_conditioned_geometry:
-            sc_ca_slots = layout.pack(raw_self_conditioned_coordinates[..., 1, :])
+        sc_ca_slots = (
+            layout.pack(raw_self_conditioned_coordinates[..., 1, :])
+            if self.config.pair_self_conditioned_geometry
+            else None
+        )
         pair_dtype = torch.bfloat16 if raw_coordinates.is_cuda else coarse_x.dtype
-        pair = self.pair_initializer(ca_slots, layout, pair_dtype, sc_ca_slots)
+        pair = self.pair_initializer(
+            ca_slots,
+            layout,
+            pair_dtype,
+            sc_ca_slots,
+            self_conditioning_mask,
+        )
         structure_condition = (
             (residue_condition * residue_mask[..., None]).sum(1)
             / residue_mask.sum(1, keepdim=True).clamp_min(1).to(residue_condition.dtype)
@@ -424,15 +447,14 @@ class HierarchicalKaveh(nn.Module):
         )
         residue_x = tokens[:, REGISTER_COUNT:]
 
-        atoms = self.atom_output.inject(atom_skip, residue_x[:, :active_residues], active_atom_mask)
+        atoms = self.atom_output.inject(atom_skip, residue_x, atom_mask)
         for block in self.atom_decoder:
             atoms = checkpoint(
-                block, atoms, active_condition, active_atom_mask, segment_index,
+                block, atoms, residue_condition, atom_mask, segment_index,
                 enabled=self.config.checkpoint_blocks,
             )
-        raw_update = self.atom_output.decode(atoms, active_atom_mask)
-        raw_update = F.pad(raw_update, (0, 0, 0, 0, 0, residue_count - active_residues))
-        aatype_logits = self.aatype_output(atoms, active_atom_mask, residue_count)
+        raw_update = self.atom_output.decode(atoms, atom_mask)
+        aatype_logits = self.aatype_output(atoms, atom_mask, residue_count)
         secondary_structure_logits = (
             None
             if self.secondary_structure_output is None

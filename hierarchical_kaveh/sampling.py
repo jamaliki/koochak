@@ -14,6 +14,7 @@ from .diffusion.corruption import (
     aligned_random_rigid_augmentation,
 )
 from .diffusion.schedules import sigma_from_probability
+from .model.patch import bucket_patch_capacity
 from .types import DenoiserInput, Prediction
 
 
@@ -25,6 +26,7 @@ class SampleTopology:
     atom_mask: Tensor
     chain_lengths: tuple[int, ...]
     secondary_structure_input: Tensor
+    patch_capacity: int
 
 
 @dataclass(frozen=True)
@@ -94,8 +96,15 @@ def build_topology(
         ):
             raise ValueError("secondary_structure values must be H/E/L/X encoded as [0, 4)")
     return SampleTopology(
-        residue_index, chain_index, chain_break, atom_mask, chain_lengths,
-        secondary_structure_input,
+        residue_index=residue_index,
+        chain_index=chain_index,
+        chain_break=chain_break,
+        atom_mask=atom_mask,
+        chain_lengths=chain_lengths,
+        secondary_structure_input=secondary_structure_input,
+        patch_capacity=bucket_patch_capacity(
+            sum((length + 3) // 4 for length in chain_lengths)
+        ),
     )
 
 
@@ -350,13 +359,24 @@ def sample(
                 chain_break=topology.chain_break,
                 atom_mask=topology.atom_mask,
                 aatype_input=unknown_aatype,
-                self_conditioned_coordinates=aligned_self_conditioning,
+                self_conditioned_coordinates=(
+                    aligned_self_conditioning
+                    if aligned_self_conditioning is not None
+                    else torch.zeros_like(coordinates_hat)
+                ),
+                self_conditioning_mask=torch.full(
+                    (coordinates_hat.shape[0],),
+                    aligned_self_conditioning is not None,
+                    dtype=torch.bool,
+                    device=device,
+                ),
                 secondary_structure_input=topology.secondary_structure_input,
                 self_conditioned_secondary_structure=(
                     None
                     if last_prediction is None
                     else last_prediction.secondary_structure_logits
                 ),
+                patch_capacity=topology.patch_capacity,
             )
             with autocast():
                 last_prediction = model(

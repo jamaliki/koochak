@@ -25,6 +25,13 @@ annotations are absent, indexing fails rather than scanning coordinates at
 training startup. Materialization is a one-time dataset preparation step and
 does not rewrite the compressed coordinate shards.
 
+The same pass writes `consecutive_patch_counts`, one integer per sample. It is
+computed from resolved C-alpha residues using only chain identity and
+consecutive residue numbering. After applying the configured quality filters,
+the loader takes the maximum count in each length bucket and rounds it to a
+multiple of four. That integer is fixed for every batch in the bucket, so the
+compiled coarse shape never depends on the samples drawn into a batch.
+
 ## NPZ arrays
 
 Required arrays are ragged-concatenated over residues:

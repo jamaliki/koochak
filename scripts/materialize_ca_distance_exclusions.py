@@ -15,6 +15,8 @@ from hierarchical_kaveh.data.shards import (
     CA_DISTANCE_EXCLUSIONS_KEY,
     CA_DISTANCE_VALIDATION_KEY,
     MAX_CONSECUTIVE_CA_DISTANCE,
+    PATCH_COUNT_KEY,
+    consecutive_patch_counts,
     invalid_ca_distance_samples,
 )
 
@@ -59,9 +61,16 @@ def materialize_metadata(metadata_path: Path, output_path: Path) -> dict[str, in
                 payload["res_idx"],
                 offsets,
             )
+            patch_counts = consecutive_patch_counts(
+                payload["mask"],
+                payload["chain_idx"],
+                payload["res_idx"],
+                offsets,
+            )
         result = dict(entry)
         result[CA_DISTANCE_VALIDATION_KEY] = MAX_CONSECUTIVE_CA_DISTANCE
         result[CA_DISTANCE_EXCLUSIONS_KEY] = excluded.tolist()
+        result[PATCH_COUNT_KEY] = patch_counts.tolist()
         annotated.append(result)
         total_samples += len(offsets) - 1
         total_excluded += len(excluded)

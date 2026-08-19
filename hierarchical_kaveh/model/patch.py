@@ -12,6 +12,7 @@ from .layers import RMSNorm, init_linear
 
 
 PATCH_SIZE = 4
+PATCH_CAPACITY_GRANULARITY = 4
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,6 @@ class PatchLayout:
     patch_lengths: Tensor
     slot_chain_index: Tensor
     slot_residue_index: Tensor
-    regular_contiguous: bool
 
     @property
     def pair_mask(self) -> Tensor:
@@ -39,14 +39,8 @@ class PatchLayout:
         if values.shape[:2] != self.residue_to_patch.shape:
             raise ValueError("values do not match this patch layout")
         trailing = (1,) * (values.ndim - 2)
-        if self.regular_contiguous:
-            width = self.slot_mask.shape[1] * PATCH_SIZE
-            cropped = values[:, :width]
-            cropped = F.pad(cropped, (0, 0) * (values.ndim - 2) + (0, width - cropped.shape[1]))
-            packed = cropped.reshape(values.shape[0], self.slot_mask.shape[1], PATCH_SIZE, *values.shape[2:])
-        else:
-            batch = torch.arange(values.shape[0], device=values.device)[:, None, None]
-            packed = values[batch, self.patch_residue_index.clamp_min(0)]
+        batch = torch.arange(values.shape[0], device=values.device)[:, None, None]
+        packed = values[batch, self.patch_residue_index.clamp_min(0)]
         return packed * self.slot_mask.reshape(*self.slot_mask.shape, *trailing).to(values.dtype)
 
     def unpack(self, values: Tensor) -> Tensor:
@@ -55,20 +49,12 @@ class PatchLayout:
         if values.shape[:3] != self.slot_mask.shape:
             raise ValueError("values do not match this patch layout")
         trailing = (1,) * (values.ndim - 3)
-        if self.regular_contiguous:
-            residue_count = self.residue_to_patch.shape[1]
-            unpacked = values.flatten(1, 2)[:, :residue_count]
-            unpacked = F.pad(
-                unpacked,
-                (0, 0) * (unpacked.ndim - 2) + (0, residue_count - unpacked.shape[1]),
-            )
-        else:
-            batch = torch.arange(values.shape[0], device=values.device)[:, None]
-            unpacked = values[
-                batch,
-                self.residue_to_patch.clamp_min(0),
-                self.residue_slot.clamp_min(0),
-            ]
+        batch = torch.arange(values.shape[0], device=values.device)[:, None]
+        unpacked = values[
+            batch,
+            self.residue_to_patch.clamp_min(0),
+            self.residue_slot.clamp_min(0),
+        ]
         valid = (self.residue_to_patch >= 0).reshape(*self.residue_to_patch.shape, *trailing)
         return unpacked * valid.to(values.dtype)
 
@@ -77,15 +63,22 @@ def build_patch_layout(
     residue_mask: Tensor,
     chain_index: Tensor,
     residue_index: Tensor,
+    *,
+    patch_capacity: int | None = None,
 ) -> PatchLayout:
-    """Chunk consecutive residues from each chain into patches of four."""
+    """Chunk consecutive residues from each chain into patches of four.
+
+    Compiled callers provide one fixed capacity for the residue-length bucket.
+    Eager callers may omit it to request the exact compact layout.
+    """
 
     if residue_mask.ndim != 2 or any(
         tensor.shape != residue_mask.shape for tensor in (chain_index, residue_index)
     ):
         raise ValueError("patch layout inputs must have matching [B,N] shapes")
     valid = residue_mask.bool()
-    if not bool(valid.any()):
+    compiling = torch.compiler.is_compiling()
+    if not compiling and not bool(valid.any()):
         raise ValueError("a batch must contain at least one valid residue")
     batch_size, residue_count = valid.shape
     positions = torch.arange(residue_count, device=valid.device)[None].expand(batch_size, -1)
@@ -99,7 +92,9 @@ def build_patch_layout(
         | (residue_index != previous_residue + 1)
     )
     segment_index = starts.long().cumsum(1) - 1
-    segment_capacity = max(int(starts.sum(1).max()), 1)
+    # The N-sized scratch axis is small relative to the coarse pair tensor and
+    # prevents a data-dependent CUDA scalar from entering Python.
+    segment_capacity = residue_count if compiling else max(int(starts.sum(1).max()), 1)
     safe_segment = segment_index.clamp(0, segment_capacity - 1)
 
     start_positions = torch.where(starts, positions, torch.full_like(positions, -1))
@@ -115,7 +110,18 @@ def build_patch_layout(
     residue_slot = torch.where(valid, residue_slot, -1)
 
     patch_lengths = patches_per_segment.sum(1)
-    max_patches = int(patch_lengths.max())
+    if patch_capacity is None:
+        if compiling:
+            raise ValueError("compiled patch layouts require patch_capacity")
+        max_patches = int(patch_lengths.max())
+    else:
+        if isinstance(patch_capacity, bool) or not isinstance(patch_capacity, int):
+            raise TypeError("patch_capacity must be an integer")
+        if patch_capacity <= 0:
+            raise ValueError("patch_capacity must be positive")
+        max_patches = patch_capacity
+        if not compiling and bool((patch_lengths > max_patches).any()):
+            raise ValueError("patch_capacity is smaller than the required patch layout")
     patch_mask = torch.arange(max_patches, device=valid.device)[None] < patch_lengths[:, None]
     flat_width = max_patches * PATCH_SIZE
     flat_slot = residue_to_patch.clamp_min(0) * PATCH_SIZE + residue_slot.clamp_min(0)
@@ -128,8 +134,6 @@ def build_patch_layout(
 
     batch = torch.arange(batch_size, device=valid.device)[:, None, None]
     safe_residue = patch_residue_index.clamp_min(0)
-    prefix = positions < valid.sum(1, keepdim=True)
-    regular = segment_capacity == 1 and bool(torch.all(valid == prefix))
     return PatchLayout(
         residue_to_patch=residue_to_patch,
         residue_slot=residue_slot,
@@ -140,7 +144,18 @@ def build_patch_layout(
         patch_lengths=patch_lengths,
         slot_chain_index=chain_index[batch, safe_residue],
         slot_residue_index=residue_index[batch, safe_residue],
-        regular_contiguous=regular,
+    )
+
+
+def bucket_patch_capacity(required: int) -> int:
+    """Round an offline-audited patch count to one stable coarse shape."""
+
+    if isinstance(required, bool) or not isinstance(required, int) or required <= 0:
+        raise ValueError("required patch count must be a positive integer")
+    return (
+        (required + PATCH_CAPACITY_GRANULARITY - 1)
+        // PATCH_CAPACITY_GRANULARITY
+        * PATCH_CAPACITY_GRANULARITY
     )
 
 

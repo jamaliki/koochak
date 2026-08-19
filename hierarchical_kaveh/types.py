@@ -23,8 +23,10 @@ class DenoiserInput:
     atom_mask: Tensor
     aatype_input: Tensor | None = None
     self_conditioned_coordinates: Tensor | None = None
+    self_conditioning_mask: Tensor | None = None
     secondary_structure_input: Tensor | None = None
     self_conditioned_secondary_structure: Tensor | None = None
+    patch_capacity: int | None = None
 
     @property
     def residue_mask(self) -> Tensor:
@@ -52,12 +54,22 @@ class DenoiserInput:
         if prediction is None:
             return replace(
                 self,
-                self_conditioned_coordinates=None,
+                self_conditioned_coordinates=torch.zeros_like(self.coordinates),
+                self_conditioning_mask=torch.zeros(
+                    self.coordinates.shape[0],
+                    dtype=torch.bool,
+                    device=self.coordinates.device,
+                ),
                 self_conditioned_secondary_structure=None,
             )
         return replace(
             self,
             self_conditioned_coordinates=prediction.coordinates.detach(),
+            self_conditioning_mask=torch.ones(
+                self.coordinates.shape[0],
+                dtype=torch.bool,
+                device=self.coordinates.device,
+            ),
             self_conditioned_secondary_structure=(
                 None
                 if prediction.secondary_structure_logits is None
