@@ -43,6 +43,33 @@ def _emit(
     hooks_lib.emit(hooks, event, *args, suppress_exceptions=suppress_exceptions, **kwargs)
 
 
+def _total_gradient_norm(parameters: list[nn.Parameter]) -> torch.Tensor | None:
+    grads = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    if not grads:
+        return None
+    try:
+        norms = torch._foreach_norm(grads, 2.0)
+    except (AttributeError, RuntimeError):
+        norms = [gradient.float().norm(2) for gradient in grads]
+    return torch.linalg.vector_norm(torch.stack(norms), 2.0)
+
+
+def _clip_gradients_with_norm(
+    parameters: list[nn.Parameter], max_norm: float, total_norm: torch.Tensor | None
+) -> None:
+    grads = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    if not grads or total_norm is None:
+        return
+    clip_coef = torch.as_tensor(max_norm, device=total_norm.device, dtype=total_norm.dtype)
+    clip_coef = clip_coef / (total_norm + 1e-6)
+    clip_coef = torch.clamp(clip_coef, max=1.0)
+    try:
+        torch._foreach_mul_(grads, clip_coef)
+    except (AttributeError, RuntimeError):
+        for gradient in grads:
+            gradient.mul_(clip_coef.to(device=gradient.device, dtype=gradient.dtype))
+
+
 def _parameter_counts(module: nn.Module) -> Dict[str, int]:
     base = getattr(module, "module", module)
     total = sum(p.numel() for p in base.parameters())
@@ -587,16 +614,31 @@ def training_loop(
                                 msg += f": {preview_nans}"
                         warnings.warn(msg, RuntimeWarning)
 
+            clip_parameters: list[nn.Parameter] | None = None
+            clip_total_norm: torch.Tensor | None = None
+            if grad_clip_norm is not None and hooks and hooks.get("on_pre_clip"):
+                clip_parameters = list(model.parameters())
+                clip_total_norm = _total_gradient_norm(clip_parameters)
+
             if hooks and hooks.get("on_pre_clip"):
+                pre_clip_payload = {
+                    "model": getattr(model, "module", model),
+                    "step": step,
+                }
+                if clip_total_norm is not None:
+                    pre_clip_payload["global_norm"] = clip_total_norm
                 _emit(
                     hooks,
                     "on_pre_clip",
-                    {"model": getattr(model, "module", model), "step": step},
+                    pre_clip_payload,
                     {**ctx, "step": step},
                 )
 
             if grad_clip_norm is not None:
-                clip_grad_norm_(model.parameters(), float(grad_clip_norm), foreach=True)
+                if clip_parameters is None:
+                    clip_grad_norm_(model.parameters(), float(grad_clip_norm), foreach=True)
+                else:
+                    _clip_gradients_with_norm(clip_parameters, float(grad_clip_norm), clip_total_norm)
 
             scaler.step(optimizer)
             scaler.update()

@@ -115,6 +115,7 @@ def create_integration(
         weight_log_freq=int(_get(config, "weight_log_freq", 100)),
         weight_bins=int(_get(config, "weight_bins", 32)),
         max_weight_tensors=int(_get(config, "max_weight_tensors", 64)),
+        max_weight_sample_values=int(_get(config, "max_weight_sample_values", 256)),
         weight_reduction=str(_get(config, "weight_reduction", "sidecar")),
         metadata={"koochak_out_dir": out_dir, "morbo_identity_path": identity.identity_path},
     )
