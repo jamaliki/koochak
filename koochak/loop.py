@@ -587,6 +587,14 @@ def training_loop(
                                 msg += f": {preview_nans}"
                         warnings.warn(msg, RuntimeWarning)
 
+            if hooks and hooks.get("on_pre_clip"):
+                _emit(
+                    hooks,
+                    "on_pre_clip",
+                    {"model": getattr(model, "module", model), "step": step},
+                    {**ctx, "step": step},
+                )
+
             if grad_clip_norm is not None:
                 clip_grad_norm_(model.parameters(), float(grad_clip_norm), foreach=True)
 
