@@ -20,6 +20,14 @@ class MorboIdentity:
     identity_path: str
 
 
+@dataclass(frozen=True)
+class MorboIntegration:
+    hooks: dict[str, list[Any]]
+    client: Any
+    telemetry: Any
+    identity: MorboIdentity
+
+
 def _get(config: Mapping[str, Any] | Any, key: str, default: Any = None) -> Any:
     if isinstance(config, Mapping):
         return config.get(key, default)
@@ -75,15 +83,15 @@ def resolve_identity(
     return MorboIdentity(project_id, str(run_id), str(attempt_id), run_name, str(identity_path))
 
 
-def create_hooks(
+def create_integration(
     config: Mapping[str, Any] | Any,
     train_config: Mapping[str, Any] | Any,
     checkpoint: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, list[Any]], Any, MorboIdentity] | tuple[None, None, None]:
-    """Create Morbo hooks only when the optional config section is enabled."""
+) -> MorboIntegration | None:
+    """Create the complete Morbo integration when the config section is enabled."""
 
     if not bool(_get(config, "enabled", False)):
-        return None, None, None
+        return None
     try:
         from morbo.client import MorboClient
         from morbo.koochak import KoochakTelemetry
@@ -110,4 +118,4 @@ def create_hooks(
         weight_reduction=str(_get(config, "weight_reduction", "sidecar")),
         metadata={"koochak_out_dir": out_dir, "morbo_identity_path": identity.identity_path},
     )
-    return telemetry.hooks(), client, identity
+    return MorboIntegration(telemetry.hooks(), client, telemetry, identity)

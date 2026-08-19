@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from koochak.integrations.morbo import create_hooks, resolve_identity
+from koochak.integrations.morbo import create_integration, resolve_identity
 
 
 def test_morbo_identity_keeps_run_and_rotates_attempt(tmp_path) -> None:
@@ -25,10 +25,9 @@ def test_morbo_identity_prefers_checkpoint_run_id(tmp_path) -> None:
 
 
 def test_create_hooks_is_optional_and_uses_configured_identity(tmp_path) -> None:
-    disabled = create_hooks({"enabled": False}, {"out_dir": str(tmp_path)})
-    assert disabled == (None, None, None)
+    assert create_integration({"enabled": False}, {"out_dir": str(tmp_path)}) is None
 
-    hooks, client, identity = create_hooks(
+    integration = create_integration(
         {
             "enabled": True,
             "project_id": "project/test",
@@ -41,10 +40,10 @@ def test_create_hooks_is_optional_and_uses_configured_identity(tmp_path) -> None
         {"out_dir": str(tmp_path)},
     )
     try:
-        assert "on_train_start" in hooks
-        assert client.project_id == "project/test"
-        assert client.run_id == "run-explicit"
-        assert client.attempt_id == "attempt-explicit"
-        assert identity.run_name == "test-run"
+        assert "on_train_start" in integration.hooks
+        assert integration.client.project_id == "project/test"
+        assert integration.client.run_id == "run-explicit"
+        assert integration.client.attempt_id == "attempt-explicit"
+        assert integration.identity.run_name == "test-run"
     finally:
-        client.close()
+        integration.client.close()

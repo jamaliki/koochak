@@ -15,7 +15,7 @@ from ..optim.build import build_optimizer, build_scheduler
 from ..utils.seed import set_all_seeds
 from .. import config as config_lib
 from ..storage import checkpoint as checkpoint_lib
-from ..integrations.morbo import create_hooks as create_morbo_hooks
+from ..integrations.morbo import create_integration as create_morbo_integration
 
 
 def _import_obj(path: str):
@@ -96,17 +96,16 @@ def main():
         hooks = hooks_lib.merge(hooks, make_jsonl_hooks(jsonl_path))
     if cfg_wandb and getattr(cfg_wandb, "enabled", False):
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(cfg_wandb))
-    morbo_client = None
-    morbo_hooks, morbo_client, morbo_identity = create_morbo_hooks(cfg_morbo, cfg_train, ckpt)
-    if morbo_hooks is not None:
-        hooks = hooks_lib.merge(hooks, morbo_hooks)
+    morbo = create_morbo_integration(cfg_morbo, cfg_train, ckpt)
+    if morbo is not None:
+        hooks = hooks_lib.merge(hooks, morbo.hooks)
         config_json.setdefault("morbo", {}).update(
             {
-                "project_id": morbo_identity.project_id,
-                "run_id": morbo_identity.run_id,
-                "attempt_id": morbo_identity.attempt_id,
-                "run_name": morbo_identity.run_name,
-                "identity_path": morbo_identity.identity_path,
+                "project_id": morbo.identity.project_id,
+                "run_id": morbo.identity.run_id,
+                "attempt_id": morbo.identity.attempt_id,
+                "run_name": morbo.identity.run_name,
+                "identity_path": morbo.identity.identity_path,
             }
         )
 
@@ -126,8 +125,8 @@ def main():
             hooks=hooks,
         )
     finally:
-        if morbo_client is not None:
-            morbo_client.close()
+        if morbo is not None:
+            morbo.client.close()
 
 
 if __name__ == "__main__":
