@@ -51,6 +51,7 @@ train:
     config = load_config(config_file)
     assert config.data.batch_size == 8
     assert config.data.length_buckets == (64, 96, 128)
+    assert config.data.patch_capacities is None
     assert config.model.coarse_depth == 4
     assert config.model.node_dim == 768
     assert config.train.ema.decay == 0.995
@@ -78,6 +79,15 @@ def test_training_and_quality_filter_probabilities_are_bounded() -> None:
         DataConfig(loop_length_max=-1)
     with pytest.raises(ValueError, match="packing_density_min"):
         DataConfig(packing_density_min=1.1)
+    assert DataConfig(
+        max_length=128,
+        length_buckets=(64, 96, 128),
+        patch_capacities=(16, 24, 32),
+    ).patch_capacities == (16, 24, 32)
+    with pytest.raises(ValueError, match="one value per effective length bucket"):
+        DataConfig(patch_capacities=(16, 24))
+    with pytest.raises(ValueError, match="multiples of four"):
+        DataConfig(patch_capacities=(16, 24, 31))
 
 
 def test_sequence_loss_schedule_validation_and_defaults() -> None:

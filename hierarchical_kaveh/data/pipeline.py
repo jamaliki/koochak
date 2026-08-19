@@ -171,8 +171,29 @@ def collate_samples(
     batch["lengths"] = lengths
     if patch_capacity is None:
         patch_capacity = bucket_patch_capacity((target + 3) // 4)
+    required_capacity = max(_sample_patch_count(sample) for sample in samples)
+    if required_capacity > patch_capacity:
+        raise ValueError(
+            f"patch capacity {patch_capacity} is smaller than required layout "
+            f"{required_capacity}; calibrate data.patch_capacities"
+        )
     batch["patch_capacity"] = patch_capacity
     return batch
+
+
+def _sample_patch_count(sample: Mapping[str, Tensor]) -> int:
+    """Count four-residue patches directly from chain and residue indices."""
+
+    chains = sample["chain_idx"]
+    residues = sample["res_idx"]
+    if not len(residues):
+        return 0
+    starts = torch.ones(len(residues), dtype=torch.bool, device=residues.device)
+    starts[1:] = (chains[1:] != chains[:-1]) | (residues[1:] != residues[:-1] + 1)
+    start_positions = torch.nonzero(starts, as_tuple=False).flatten()
+    stop = torch.tensor([len(residues)], device=residues.device)
+    segment_lengths = torch.diff(torch.cat((start_positions, stop)))
+    return int(((segment_lengths + 3) // 4).sum().item())
 
 
 class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
@@ -203,20 +224,11 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
             )
         )
         self.length_buckets = data.effective_length_buckets
-        required_by_bucket = {edge: 0 for edge in self.length_buckets}
-        for reference in self.references:
-            edge = next(
-                edge for edge in self.length_buckets if reference.resolved_length <= edge
-            )
-            required_by_bucket[edge] = max(
-                required_by_bucket[edge], reference.patch_count
-            )
-        self.patch_capacities = {
-            edge: bucket_patch_capacity(
-                max(required_by_bucket[edge], (edge + 3) // 4)
-            )
+        capacities = data.patch_capacities or tuple(
+            bucket_patch_capacity((edge + 3) // 4)
             for edge in self.length_buckets
-        }
+        )
+        self.patch_capacities = dict(zip(self.length_buckets, capacities, strict=True))
         mark_sharded(self)
 
     def set_global_step(self, step: int) -> None:

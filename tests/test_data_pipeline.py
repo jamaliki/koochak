@@ -58,7 +58,6 @@ def _ragged_fixture(tmp_path):
                     "cond_feature_names": ["mean_plddt", "loop_content"],
                     "ca_distance_validation_max": 4.0,
                     "excluded_ca_distance_samples": [],
-                    "consecutive_patch_counts": [2, 2, 1],
                 }
             ]
         )
@@ -69,7 +68,6 @@ def _ragged_fixture(tmp_path):
 def test_ragged_reader_preserves_multichain_non_divisible_by_four(tmp_path) -> None:
     references = index_shards(_ragged_fixture(tmp_path), min_length=4)
     assert [reference.length for reference in references] == [5, 7]
-    assert [reference.patch_count for reference in references] == [2, 2]
     sample = load_sample(references[0])
     assert sample["atom14_coordinates"].shape == (5, 14, 3)
     assert sample["model_atom_mask"].all()
@@ -174,12 +172,15 @@ def test_index_excludes_sample_with_overlong_consecutive_ca_step(tmp_path) -> No
     # its chain or consecutive residue number.
     arrays["pos"][7, :, 0] += 10.0
     np.savez_compressed(shard, **arrays)
+    contents = json.loads(metadata.read_text())
+    contents[0].pop("ca_distance_validation_max")
+    contents[0].pop("excluded_ca_distance_samples")
+    metadata.write_text(json.dumps(contents))
 
     validated_metadata = tmp_path / "metadata_ca4.json"
     materialize_metadata(metadata, validated_metadata)
     references = index_shards(validated_metadata, min_length=1)
     assert [reference.index for reference in references] == [0, 2]
-    assert [reference.patch_count for reference in references] == [2, 1]
 
 
 def test_ca_filter_is_strict_and_ignores_topological_discontinuities(tmp_path) -> None:
@@ -195,6 +196,10 @@ def test_ca_filter_is_strict_and_ignores_topological_discontinuities(tmp_path) -
     arrays["res_idx"][7:12] += 100
     arrays["pos"][7:12, :, 0] += 200.0
     np.savez_compressed(shard, **arrays)
+    contents = json.loads(metadata.read_text())
+    contents[0].pop("ca_distance_validation_max")
+    contents[0].pop("excluded_ca_distance_samples")
+    metadata.write_text(json.dumps(contents))
 
     validated_metadata = tmp_path / "metadata_ca4.json"
     materialize_metadata(metadata, validated_metadata)
@@ -219,6 +224,29 @@ def test_index_uses_precomputed_ca_distance_exclusions(tmp_path, monkeypatch) ->
     monkeypatch.setattr(shard_module, "invalid_ca_distance_samples", unexpected_scan)
     references = index_shards(metadata, min_length=1)
     assert [reference.index for reference in references] == [0, 2]
+
+
+def test_materializer_reuses_existing_ca_validation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    contents = json.loads(metadata.read_text())
+    contents[0]["excluded_ca_distance_samples"] = [1]
+    metadata.write_text(json.dumps(contents))
+
+    def unexpected_coordinate_scan(*_args, **_kwargs):
+        raise AssertionError("prevalidated CA exclusions must not be recomputed")
+
+    monkeypatch.setattr(
+        "scripts.materialize_ca_distance_exclusions.invalid_ca_distance_samples",
+        unexpected_coordinate_scan,
+    )
+    output = tmp_path / "metadata_ca4_copy.json"
+    summary = materialize_metadata(metadata, output)
+    annotated = json.loads(output.read_text())
+    assert annotated[0]["excluded_ca_distance_samples"] == [1]
+    assert summary["reused_ca_validation_shards"] == 1
 
 
 def test_index_requires_offline_ca_distance_validation(tmp_path) -> None:
@@ -437,3 +465,28 @@ def test_loader_buckets_and_prefix_pads(tmp_path) -> None:
     assert batch["data_cached_shard_count"].item() == 1
     assert batch["data_cache_miss_count"].item() == 1
     assert batch["data_cache_hit_count"].item() >= 2
+
+
+def test_collation_checks_index_derived_patch_capacity(tmp_path) -> None:
+    metadata = _ragged_fixture(tmp_path)
+    data = DataConfig(
+        metadata_path=str(metadata),
+        min_length=4,
+        max_length=8,
+        batch_size=2,
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
+        length_buckets=(8,),
+        patch_capacities=(4,),
+    )
+    loader = build_train_dataloader(data, DiffusionConfig(), sigma_data=16.0)
+    assert next(iter(loader))["patch_capacity"] == 4
+
+    shard = tmp_path / "shard.npz"
+    with np.load(shard) as payload:
+        arrays = {key: payload[key].copy() for key in payload.files}
+    arrays["chain_idx"][5:12] = np.arange(7) % 2
+    np.savez_compressed(shard, **arrays)
+    with pytest.raises(ValueError, match="calibrate data.patch_capacities"):
+        next(iter(build_train_dataloader(data, DiffusionConfig(), sigma_data=16.0)))

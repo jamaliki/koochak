@@ -25,12 +25,13 @@ annotations are absent, indexing fails rather than scanning coordinates at
 training startup. Materialization is a one-time dataset preparation step and
 does not rewrite the compressed coordinate shards.
 
-The same pass writes `consecutive_patch_counts`, one integer per sample. It is
-computed from resolved C-alpha residues using only chain identity and
-consecutive residue numbering. After applying the configured quality filters,
-the loader takes the maximum count in each length bucket and rounds it to a
-multiple of four. That integer is fixed for every batch in the bucket, so the
-compiled coarse shape never depends on the samples drawn into a batch.
+Patch layout needs no per-sample metadata. It is computed directly from the
+loaded sample's `chain_idx` and `res_idx`: patches contain at most four residues
+and restart at a chain or numbering discontinuity. Production configs carry
+one offline-calibrated capacity for each length bucket. Collation verifies the
+exact index-derived count against that constant before the compiled model runs,
+so an overflow fails eagerly instead of creating another graph or silently
+mixing discontinuous residues.
 
 ## NPZ arrays
 

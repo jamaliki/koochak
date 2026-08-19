@@ -36,9 +36,10 @@ Patchify groups four residues without crossing a chain boundary,
 residue-index discontinuity, or padding. Diffusion coordinates and historical
 geometry break flags never affect the layout. Learned masked pooling again sits
 on an exact mean residual. A tail of one to three residues forms a masked
-partial patch rather than being dropped. Offline per-sample counts determine
-one fixed coarse capacity per filtered length bucket; pack and unpack always
-use the same gather/scatter path.
+partial patch rather than being dropped. An offline population audit determines
+one calibrated coarse capacity per filtered length bucket; the layout itself
+comes directly from chain and residue indices. Pack and unpack always use the
+same gather/scatter path.
 
 The stable pair initializer keeps the 4x4 ordered C-alpha distance matrix for
 every patch pair. Sixteen RBF distance channels per slot pair preserve more

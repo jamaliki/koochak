@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 from pathlib import Path
 
@@ -12,6 +13,16 @@ import numpy as np
 from hierarchical_kaveh.config import load_config
 from hierarchical_kaveh.data import index_shards
 from hierarchical_kaveh.model.patch import bucket_patch_capacity
+
+
+def _patch_count(chains: np.ndarray, residues: np.ndarray) -> int:
+    if not len(residues):
+        return 0
+    starts = np.ones(len(residues), dtype=np.bool_)
+    starts[1:] = (chains[1:] != chains[:-1]) | (residues[1:] != residues[:-1] + 1)
+    segment_starts = np.flatnonzero(starts)
+    segment_ends = np.concatenate((segment_starts[1:], [len(residues)]))
+    return int(np.sum((segment_ends - segment_starts + 3) // 4))
 
 
 def audit(config_file: Path) -> dict[str, object]:
@@ -27,9 +38,29 @@ def audit(config_file: Path) -> dict[str, object]:
     )
     buckets = config.data.effective_length_buckets
     counts: dict[int, list[int]] = {edge: [] for edge in buckets}
+    by_shard = defaultdict(list)
     for reference in references:
-        edge = next(edge for edge in buckets if reference.resolved_length <= edge)
-        counts[edge].append(reference.patch_count)
+        by_shard[reference.shard].append(reference)
+    discontinuous_samples = 0
+    for shard, shard_references in by_shard.items():
+        with np.load(shard, allow_pickle=False) as payload:
+            mask = payload["mask"]
+            chain_index = payload["chain_idx"]
+            residue_index = payload["res_idx"]
+            for reference in shard_references:
+                resolved = mask[reference.start:reference.stop, 1].astype(
+                    np.bool_, copy=False
+                )
+                count = _patch_count(
+                    chain_index[reference.start:reference.stop][resolved],
+                    residue_index[reference.start:reference.stop][resolved],
+                )
+                compact = (reference.resolved_length + 3) // 4
+                discontinuous_samples += count > compact
+                edge = next(
+                    edge for edge in buckets if reference.resolved_length <= edge
+                )
+                counts[edge].append(count)
 
     distributions: dict[str, object] = {}
     capacities: list[int] = []
@@ -50,6 +81,7 @@ def audit(config_file: Path) -> dict[str, object]:
         }
     return {
         "eligible_samples": len(references),
+        "discontinuous_samples": discontinuous_samples,
         "length_buckets": list(buckets),
         "patch_capacities": capacities,
         "distributions": distributions,

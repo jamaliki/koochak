@@ -132,6 +132,10 @@ class DataConfig:
     secondary_structure_mask_probability: float = 0.5
     seed: int = 42
     length_buckets: tuple[int, ...] = (64, 96, 128)
+    # One calibrated coarse capacity per effective length bucket. Without an
+    # explicit calibration, use the compact single-segment capacity and reject
+    # discontinuous overflows eagerly instead of recompiling the model.
+    patch_capacities: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.min_length <= 0 or self.max_length < self.min_length:
@@ -152,6 +156,22 @@ class DataConfig:
             raise ValueError("data.packing_density_min must lie in [0, 1]")
         if any(a >= b for a, b in zip(self.length_buckets, self.length_buckets[1:])):
             raise ValueError("length_buckets must be strictly increasing")
+        if self.patch_capacities is not None:
+            edges = self.effective_length_buckets
+            if len(self.patch_capacities) != len(edges):
+                raise ValueError(
+                    "data.patch_capacities must contain one value per effective length bucket"
+                )
+            for capacity, edge in zip(self.patch_capacities, edges, strict=True):
+                if (
+                    isinstance(capacity, bool)
+                    or not isinstance(capacity, int)
+                    or capacity < (edge + 3) // 4
+                    or capacity % 4
+                ):
+                    raise ValueError(
+                        "data.patch_capacities must be multiples of four covering each bucket"
+                    )
 
     @property
     def effective_length_buckets(self) -> tuple[int, ...]:
@@ -385,7 +405,7 @@ def load_config(file: str | Path) -> RunConfig:
         if not isinstance(values, Mapping):
             raise ValueError(f"configuration section {name!r} must be a mapping")
         normalized = dict(values)
-        for key in ("length_buckets", "betas", "tags"):
+        for key in ("length_buckets", "patch_capacities", "betas", "tags"):
             if key in normalized and isinstance(normalized[key], list):
                 normalized[key] = tuple(normalized[key])
         return _strict_construct(cls, normalized)

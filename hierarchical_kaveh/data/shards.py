@@ -19,8 +19,6 @@ from hierarchical_kaveh.residue_constants import physical_atom14_mask
 MAX_CONSECUTIVE_CA_DISTANCE = 4.0
 CA_DISTANCE_VALIDATION_KEY = "ca_distance_validation_max"
 CA_DISTANCE_EXCLUSIONS_KEY = "excluded_ca_distance_samples"
-PATCH_COUNT_KEY = "consecutive_patch_counts"
-PATCH_SIZE = 4
 
 
 @dataclass(frozen=True)
@@ -32,7 +30,6 @@ class SampleReference:
     start: int
     stop: int
     resolved_length: int
-    patch_count: int
 
     @property
     def length(self) -> int:
@@ -108,53 +105,6 @@ def invalid_ca_distance_samples(
     return np.unique(np.searchsorted(sample_offsets[1:], invalid_edges, side="right"))
 
 
-def consecutive_patch_counts(
-    atom_mask: np.ndarray,
-    chain_index: np.ndarray,
-    residue_index: np.ndarray,
-    sample_offsets: np.ndarray,
-) -> np.ndarray:
-    """Count four-residue patches within consecutive chain segments."""
-
-    atom_mask = np.asarray(atom_mask)
-    chain_index = np.asarray(chain_index)
-    residue_index = np.asarray(residue_index)
-    sample_offsets = np.asarray(sample_offsets, dtype=np.int64)
-    total_residues = len(atom_mask)
-    if (
-        atom_mask.shape != (total_residues, 14)
-        or chain_index.shape != (total_residues,)
-        or residue_index.shape != (total_residues,)
-        or sample_offsets.ndim != 1
-        or len(sample_offsets) < 2
-        or sample_offsets[0] != 0
-        or sample_offsets[-1] != total_residues
-        or np.any(sample_offsets[1:] < sample_offsets[:-1])
-    ):
-        raise ValueError("invalid arrays for consecutive patch counting")
-
-    counts = np.zeros(len(sample_offsets) - 1, dtype=np.int64)
-    for sample_idx, (start, stop) in enumerate(
-        zip(sample_offsets[:-1], sample_offsets[1:], strict=True)
-    ):
-        resolved = atom_mask[start:stop, 1].astype(np.bool_, copy=False)
-        chains = chain_index[start:stop][resolved]
-        residues = residue_index[start:stop][resolved]
-        if not len(residues):
-            continue
-        starts = np.ones(len(residues), dtype=np.bool_)
-        starts[1:] = (
-            (chains[1:] != chains[:-1])
-            | (residues[1:] != residues[:-1] + 1)
-        )
-        segment_starts = np.flatnonzero(starts)
-        segment_ends = np.concatenate((segment_starts[1:], [len(residues)]))
-        counts[sample_idx] = int(
-            np.sum((segment_ends - segment_starts + PATCH_SIZE - 1) // PATCH_SIZE)
-        )
-    return counts
-
-
 def _precomputed_ca_distance_exclusions(
     entry: dict[str, Any],
     *,
@@ -178,24 +128,6 @@ def _precomputed_ca_distance_exclusions(
         or len(np.unique(result)) != len(result)
     ):
         raise ValueError(f"invalid {CA_DISTANCE_EXCLUSIONS_KEY}")
-    return result
-
-
-def _precomputed_patch_counts(
-    entry: dict[str, Any],
-    *,
-    sample_count: int,
-) -> np.ndarray:
-    values = entry.get(PATCH_COUNT_KEY)
-    if not isinstance(values, list) or len(values) != sample_count:
-        raise ValueError(
-            f"{PATCH_COUNT_KEY} must contain one precomputed count per sample"
-        )
-    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
-        raise ValueError(f"{PATCH_COUNT_KEY} must contain integer counts")
-    result = np.asarray(values, dtype=np.int64)
-    if np.any(result < 0):
-        raise ValueError(f"{PATCH_COUNT_KEY} must be non-negative")
     return result
 
 
@@ -307,10 +239,6 @@ def index_shards(
                 )
             excluded = np.zeros(len(offsets) - 1, dtype=np.bool_)
             excluded[excluded_samples] = True
-            patch_counts = _precomputed_patch_counts(
-                entry,
-                sample_count=len(offsets) - 1,
-            )
             conditions = None
             if any(bound is not None for bound in requested_features.values()):
                 conditions = np.asarray(payload["cond"], dtype=np.float32)
@@ -338,11 +266,6 @@ def index_shards(
                     continue
                 if max_length is not None and resolved_length > max_length:
                     continue
-                patch_count = int(patch_counts[sample_idx])
-                if patch_count <= 0 or patch_count > resolved_length:
-                    raise ValueError(
-                        f"invalid {PATCH_COUNT_KEY} value for sample {sample_idx} in {shard}"
-                    )
                 if conditions is not None:
                     if plddt_index is not None:
                         mean_plddt = conditions[sample_idx, plddt_index]
@@ -373,7 +296,6 @@ def index_shards(
                         int(start),
                         int(stop),
                         resolved_length,
-                        patch_count,
                     )
                 )
     if not references:
