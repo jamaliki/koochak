@@ -56,6 +56,8 @@ train:
     assert config.train.ema.decay == 0.995
     assert config.train.compile.enabled
     assert not config.train.compile.dynamic
+    assert config.data.loop_length_max is None
+    assert config.data.packing_density_min is None
 
     config_file.write_text(
         "data: {metadata_path: /data/metadata.json}\nmodel: {legacy_mode: true}\n",
@@ -72,6 +74,10 @@ def test_training_and_quality_filter_probabilities_are_bounded() -> None:
         DataConfig(mean_plddt_min=101.0)
     with pytest.raises(ValueError, match="loop_content_max"):
         DataConfig(loop_content_max=-0.1)
+    with pytest.raises(ValueError, match="loop_length_max"):
+        DataConfig(loop_length_max=-1)
+    with pytest.raises(ValueError, match="packing_density_min"):
+        DataConfig(packing_density_min=1.1)
 
 
 def test_sequence_loss_schedule_validation_and_defaults() -> None:

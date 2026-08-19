@@ -195,8 +195,11 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
             index_shards(
                 data.metadata_path,
                 min_length=data.min_length,
+                max_length=data.max_length,
                 mean_plddt_min=data.mean_plddt_min,
+                loop_length_max=data.loop_length_max,
                 loop_content_max=data.loop_content_max,
+                packing_density_min=data.packing_density_min,
             )
         )
         self.length_buckets = data.effective_length_buckets

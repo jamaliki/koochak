@@ -116,7 +116,9 @@ class DataConfig:
     max_length: int = 128
     min_length: int = 4
     mean_plddt_min: float | None = None
+    loop_length_max: int | None = None
     loop_content_max: float | None = None
+    packing_density_min: float | None = None
     batch_size: int = 32
     num_workers: int = 16
     pin_memory: bool = True
@@ -142,8 +144,12 @@ class DataConfig:
             raise ValueError("secondary_structure_mask_probability must lie in [0, 1]")
         if self.mean_plddt_min is not None and not 0.0 <= self.mean_plddt_min <= 100.0:
             raise ValueError("data.mean_plddt_min must lie in [0, 100]")
+        if self.loop_length_max is not None and self.loop_length_max < 0:
+            raise ValueError("data.loop_length_max must be nonnegative")
         if self.loop_content_max is not None and not 0.0 <= self.loop_content_max <= 1.0:
             raise ValueError("data.loop_content_max must lie in [0, 1]")
+        if self.packing_density_min is not None and not 0.0 <= self.packing_density_min <= 1.0:
+            raise ValueError("data.packing_density_min must lie in [0, 1]")
         if any(a >= b for a, b in zip(self.length_buckets, self.length_buckets[1:])):
             raise ValueError("length_buckets must be strictly increasing")
 

@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import hierarchical_kaveh.data.shards as shard_module
+import hierarchical_kaveh.data.pipeline as pipeline_module
 from hierarchical_kaveh.config import DataConfig, DiffusionConfig
 from hierarchical_kaveh.data import (
     ShardCache,
@@ -132,6 +133,36 @@ def test_quality_filters_are_strict_and_applied_before_partition(tmp_path) -> No
         loop_content_max=0.5,
     )
     assert [reference.index for reference in references] == [2]
+
+
+def test_training_dataset_forwards_all_data_filters(monkeypatch) -> None:
+    captured = {}
+
+    def fake_index_shards(metadata_path, **filters):
+        captured.update(metadata_path=metadata_path, **filters)
+        return []
+
+    monkeypatch.setattr(pipeline_module, "index_shards", fake_index_shards)
+    data = DataConfig(
+        metadata_path="/data/metadata.json",
+        min_length=32,
+        max_length=256,
+        mean_plddt_min=80.0,
+        loop_length_max=15,
+        loop_content_max=0.4,
+        packing_density_min=0.3,
+    )
+    pipeline_module.TrainingBatchDataset(data, DiffusionConfig(), sigma_data=1.0)
+
+    assert captured == {
+        "metadata_path": "/data/metadata.json",
+        "min_length": 32,
+        "max_length": 256,
+        "mean_plddt_min": 80.0,
+        "loop_length_max": 15,
+        "loop_content_max": 0.4,
+        "packing_density_min": 0.3,
+    }
 
 
 def test_index_excludes_sample_with_overlong_consecutive_ca_step(tmp_path) -> None:
