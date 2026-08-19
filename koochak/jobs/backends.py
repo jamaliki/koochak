@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import shlex
 import inspect
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +105,17 @@ def submit_scruffy(
     except ImportError as exc:
         raise RuntimeError("submit_scruffy requires the optional scruffy-gpu package") from exc
 
+    signature = inspect.signature(submit_job)
+    accepts_wait_for = "wait_for" in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if wait_for and not accepts_wait_for:
+        raise RuntimeError(
+            "the installed Scruffy client cannot express artifact wait_for gates; "
+            "upgrade Scruffy before submitting this workflow"
+        )
+
     stage_run(prepared)
     submit_kwargs = {
         "argv": prepared.runner_argv(),
@@ -118,14 +129,6 @@ def submit_scruffy(
         "task_id": task_id,
         "needs": needs,
     }
-    # Current Scruffy expresses dependencies through ``needs``; older clients
-    # also exposed a separate ``wait_for`` keyword. Avoid passing an obsolete
-    # keyword into a newer client while preserving older-client compatibility.
-    signature = inspect.signature(submit_job)
-    accepts_kwargs = any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    if wait_for is not None and ("wait_for" in signature.parameters or accepts_kwargs):
+    if wait_for is not None and accepts_wait_for:
         submit_kwargs["wait_for"] = wait_for
     return submit_job(Path(root), **submit_kwargs)

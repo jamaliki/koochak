@@ -121,3 +121,95 @@ def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(
             "artifact_id": "checkpoint/step000000007.pt",
         }
     ]
+
+
+def test_scruffy_adapter_rejects_artifact_gates_unsupported_by_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _prepared(tmp_path)
+    called = False
+
+    def legacy_submit(
+        root,
+        *,
+        argv,
+        name,
+        cwd,
+        environment,
+        request,
+        request_id,
+        project_id,
+        workflow_id,
+        task_id,
+        needs,
+    ):
+        nonlocal called
+        called = True
+        return {"job_id": "job-1"}
+
+    module = types.ModuleType("scruffy")
+    module.submit_job = legacy_submit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    with pytest.raises(RuntimeError, match="cannot express artifact wait_for gates"):
+        submit_scruffy(
+            prepared,
+            root=tmp_path / "queue",
+            resources=object(),
+            request_id="campaign/sample/attempt-1",
+            project_id="project",
+            workflow_id="campaign",
+            task_id="sample",
+            wait_for=[
+                {
+                    "kind": "artifact",
+                    "task_id": "train",
+                    "artifact_id": "checkpoint/step000000007.pt",
+                }
+            ],
+        )
+
+    assert not called
+    assert not Path(prepared.manifest_path).exists()
+
+
+def test_scruffy_adapter_allows_legacy_client_without_artifact_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _prepared(tmp_path)
+    seen = {}
+
+    def legacy_submit(
+        root,
+        *,
+        argv,
+        name,
+        cwd,
+        environment,
+        request,
+        request_id,
+        project_id,
+        workflow_id,
+        task_id,
+        needs,
+    ):
+        seen.update(root=root, argv=argv, workflow_id=workflow_id, task_id=task_id)
+        return {"job_id": "job-1"}
+
+    module = types.ModuleType("scruffy")
+    module.submit_job = legacy_submit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    result = submit_scruffy(
+        prepared,
+        root=tmp_path / "queue",
+        resources=object(),
+        request_id="campaign/train/attempt-1",
+        project_id="project",
+        workflow_id="campaign",
+        task_id="train",
+    )
+
+    assert result == {"job_id": "job-1"}
+    assert seen["task_id"] == "train"
+    assert Path(prepared.manifest_path).is_file()
