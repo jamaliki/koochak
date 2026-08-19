@@ -619,6 +619,14 @@ def training_loop(
                         d = float(min(max(d, 0.0), 0.999999))
                     ema.update(getattr(model, "module", model)) if d is None else ema.update(getattr(model, "module", model), decay=d)
 
+            if ema is not None and hooks and hooks.get("on_ema_update"):
+                _emit(
+                    hooks,
+                    "on_ema_update",
+                    {"ema": ema, "step": step},
+                    {**ctx, "step": step},
+                )
+
             if scheduler is not None and scheduler_step_policy == "step":
                 try:
                     scheduler.step()

@@ -1,6 +1,22 @@
 from __future__ import annotations
 from typing import Dict, Optional
+import threading
 import torch
+
+class SnapshotLease:
+    """Read-only ownership of one completed CPU snapshot bank."""
+
+    def __init__(self, owner: "EMA", bank_index: int, tensors: Dict[str, torch.Tensor]) -> None:
+        self._owner = owner
+        self._bank_index = bank_index
+        self.tensors = tensors
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._owner._release_snapshot(self._bank_index)
 
 class EMA:
     """
@@ -33,9 +49,15 @@ class EMA:
         self.pin_memory = bool(pin_memory)
         self.update_every = int(update_every)
         self.shadow: Dict[str, torch.Tensor] = {}
-        self.staging: Dict[str, torch.Tensor] = {}         # pinned CPU buffers
-        self.pending_event: Dict[str, Optional[torch.cuda.Event]] = {}
-        self.pending_decay: Dict[str, float] = {}          # decay used when launching copy
+        self._banks: list[Dict[str, torch.Tensor]] = []
+        self._bank_states: list[str] = []
+        self._bank_events: list[Dict[str, Optional[torch.cuda.Event]]] = []
+        self._bank_decays: list[Dict[str, float]] = []
+        self._ready_banks: list[int] = []
+        self._bank_lock = threading.Lock()
+        self.staging: Dict[str, torch.Tensor] = {}         # compatibility alias for bank 0
+        self.pending_event: Dict[str, Optional[torch.cuda.Event]] = {}  # compatibility alias
+        self.pending_decay: Dict[str, float] = {}          # compatibility alias
         self.num_updates: int = 0
         self._step_counter: int = 0
         self._backup: Optional[Dict[str, torch.Tensor]] = None  # for store/restore
@@ -78,18 +100,25 @@ class EMA:
 
     def _build_from_model(self, model: torch.nn.Module) -> None:
         # Track only trainable params
+        self._banks = [{}, {}]
+        self._bank_states = ["free", "free"]
+        self._bank_events = []
+        self._bank_decays = []
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
             # shadow on CPU, fp32
             self.shadow[name] = p.detach().to("cpu", dtype=self.dtype).clone()
-            # pinned staging buffer for async copies
-            if self.offload and p.is_cuda and self.pin_memory:
-                self.staging[name] = torch.empty_like(self.shadow[name], device="cpu", pin_memory=True)
-            else:
-                self.staging[name] = torch.empty_like(self.shadow[name], device="cpu")
-            self.pending_event[name] = None
-            self.pending_decay[name] = self.decay
+            for bank in self._banks:
+                if self.offload and p.is_cuda and self.pin_memory:
+                    bank[name] = torch.empty_like(self.shadow[name], device="cpu", pin_memory=True)
+                else:
+                    bank[name] = torch.empty_like(self.shadow[name], device="cpu")
+        self._bank_events = [{name: None for name in bank} for bank in self._banks]
+        self._bank_decays = [{name: self.decay for name in bank} for bank in self._banks]
+        self.staging = self._banks[0]
+        self.pending_event = self._bank_events[0]
+        self.pending_decay = self._bank_decays[0]
 
     # ---- public API ----
     @torch.no_grad()
@@ -101,29 +130,47 @@ class EMA:
         d = float(self._current_decay() if decay is None else decay)
         self.num_updates += 1
 
-        # 1) consume any finished copies from prior step and apply EMA math on CPU
+        # Release ready banks that were not leased by the observer, then apply
+        # completed D2H copies before claiming the next bank.
+        self._release_unoffered_ready()
         self._apply_ready_staged()
-
-        # 2) launch new nonblocking copies of current params into pinned CPU buffers
-        for name, p in model.named_parameters():
-            if not p.requires_grad or name not in self.shadow:
-                continue
-            if p.is_cuda and self.offload:
-                src_gpu = p.detach()
-                if src_gpu.dtype is not self.dtype:
-                    src_gpu = src_gpu.to(dtype=self.dtype)  # cast on GPU
-                # enqueue D2H into pinned buffer
-                self.staging[name].copy_(src_gpu, non_blocking=True)
-                # record event so we can test readiness next call
-                ev = self.pending_event[name] or torch.cuda.Event(blocking=False)
-                ev.record(torch.cuda.current_stream())
-                self.pending_event[name] = ev
-                self.pending_decay[name] = d
+        bank_index = self._claim_free_bank()
+        if self.offload and any(p.is_cuda for p in model.parameters()):
+            if bank_index is None:
+                return
+            bank = self._banks[bank_index]
+            try:
+                for name, p in model.named_parameters():
+                    if not p.requires_grad or name not in self.shadow:
+                        continue
+                    src_gpu = p.detach()
+                    if src_gpu.dtype is not self.dtype:
+                        src_gpu = src_gpu.to(dtype=self.dtype)  # cast on GPU
+                    bank[name].copy_(src_gpu, non_blocking=True)
+                    ev = self._bank_events[bank_index][name] or torch.cuda.Event(blocking=False)
+                    ev.record(torch.cuda.current_stream())
+                    self._bank_events[bank_index][name] = ev
+                    self._bank_decays[bank_index][name] = d
+            except BaseException:
+                self._mark_bank_free(bank_index)
+                raise
+        else:
+            if bank_index is not None:
+                bank = self._banks[bank_index]
+                for name, p in model.named_parameters():
+                    if not p.requires_grad or name not in self.shadow:
+                        continue
+                    src_cpu = p.detach().to("cpu", dtype=self.dtype)
+                    bank[name].copy_(src_cpu)
+                    self.shadow[name].mul_(d).add_(bank[name], alpha=(1.0 - d))
+                self._mark_bank_ready(bank_index)
             else:
-                # model on CPU or offload disabled: do EMA immediately on CPU
-                dst = self.shadow[name]
-                src_cpu = p.detach().to("cpu", dtype=self.dtype)
-                dst.mul_(d).add_(src_cpu, alpha=(1.0 - d))
+                for name, p in model.named_parameters():
+                    if not p.requires_grad or name not in self.shadow:
+                        continue
+                    dst = self.shadow[name]
+                    src_cpu = p.detach().to("cpu", dtype=self.dtype)
+                    dst.mul_(d).add_(src_cpu, alpha=(1.0 - d))
 
     def state_dict(self, clone: bool = False) -> Dict[str, object]:
         # ensure latest staged copies are applied so we save fresh EMA
@@ -182,30 +229,79 @@ class EMA:
         self._backup = None
 
     # ---- internals ----
+    def offer_snapshot(self) -> Optional[SnapshotLease]:
+        """Claim one completed bank for a background observer, without waiting."""
+        with self._bank_lock:
+            if not self._ready_banks:
+                return None
+            bank_index = self._ready_banks.pop(0)
+            if self._bank_states[bank_index] != "ready":
+                return None
+            self._bank_states[bank_index] = "leased"
+            return SnapshotLease(self, bank_index, self._banks[bank_index])
+
+    def _claim_free_bank(self) -> Optional[int]:
+        with self._bank_lock:
+            for bank_index, state in enumerate(self._bank_states):
+                if state == "free":
+                    self._bank_states[bank_index] = "pending"
+                    self.staging = self._banks[bank_index]
+                    self.pending_event = self._bank_events[bank_index]
+                    self.pending_decay = self._bank_decays[bank_index]
+                    return bank_index
+        return None
+
+    def _mark_bank_ready(self, bank_index: int) -> None:
+        with self._bank_lock:
+            self._bank_states[bank_index] = "ready"
+            if bank_index not in self._ready_banks:
+                self._ready_banks.append(bank_index)
+
+    def _mark_bank_free(self, bank_index: int) -> None:
+        with self._bank_lock:
+            self._bank_states[bank_index] = "free"
+            if bank_index in self._ready_banks:
+                self._ready_banks.remove(bank_index)
+            for name in self._bank_events[bank_index]:
+                self._bank_events[bank_index][name] = None
+
+    def _release_unoffered_ready(self) -> None:
+        with self._bank_lock:
+            ready = list(self._ready_banks)
+            self._ready_banks.clear()
+        for bank_index in ready:
+            self._mark_bank_free(bank_index)
+
+    def _release_snapshot(self, bank_index: int) -> None:
+        self._mark_bank_free(bank_index)
+
     @torch.no_grad()
     def _apply_ready_staged(self) -> None:
-        # apply any staged values whose copies have finished
-        for name, ev in self.pending_event.items():
-            if ev is None:
+        for bank_index, state in enumerate(self._bank_states):
+            if state != "pending":
                 continue
-            if not ev.query():
-                continue  # copy still in flight; leave it for next call
-            dst = self.shadow[name]
-            d_used = self.pending_decay.get(name, self.decay)
-            src_cpu = self.staging[name]  # already CPU fp32
-            dst.mul_(d_used).add_(src_cpu, alpha=(1.0 - d_used))
-            self.pending_event[name] = None
+            events = self._bank_events[bank_index]
+            if any(event is None or not event.query() for event in events.values()):
+                continue
+            self._apply_bank(bank_index)
+            self._mark_bank_ready(bank_index)
+
+    @torch.no_grad()
+    def _apply_bank(self, bank_index: int) -> None:
+        bank = self._banks[bank_index]
+        for name, source in bank.items():
+            destination = self.shadow[name]
+            decay = self._bank_decays[bank_index].get(name, self.decay)
+            destination.mul_(decay).add_(source, alpha=(1.0 - decay))
+            self._bank_events[bank_index][name] = None
 
     @torch.no_grad()
     def flush(self) -> None:
-        # wait for any in-flight copies and apply them
-        if any(ev is not None for ev in self.pending_event.values()):
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            for name, ev in self.pending_event.items():
-                if ev is None:
-                    continue
-                dst = self.shadow[name]
-                d_used = self.pending_decay.get(name, self.decay)
-                dst.mul_(d_used).add_(self.staging[name], alpha=(1.0 - d_used))
-                self.pending_event[name] = None
+        pending = [index for index, state in enumerate(self._bank_states) if state == "pending"]
+        if not pending:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        for bank_index in pending:
+            self._apply_bank(bank_index)
+            self._mark_bank_ready(bank_index)
