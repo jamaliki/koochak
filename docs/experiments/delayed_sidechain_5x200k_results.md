@@ -29,6 +29,9 @@ These are fixed-panel, single-training-seed results. Clash counts and bond
 thresholds are diagnostic geometry proxies, not chemistry-qualified structure
 validation or foldability evidence.
 
+The subsequent 24-arm compact offset-clock campaign is recorded in
+[Delayed-sidechain compact offset clock: 24-arm results](delayed_sidechain_offset_24x200k_results.md).
+
 ## Fixed training and sampling contract
 
 All arms use architecture `3/3/8/3/3`, local-center pair geometry, coordinate
