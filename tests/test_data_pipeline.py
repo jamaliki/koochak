@@ -16,6 +16,7 @@ from hierarchical_kaveh.data import (
     shard_references,
 )
 from hierarchical_kaveh.diffusion import corrupt_structure
+from hierarchical_kaveh.residue_constants import ATOM14_NAMES, RESTYPES, physical_atom14_mask
 from scripts.materialize_ca_distance_exclusions import materialize_metadata
 
 
@@ -63,6 +64,15 @@ def _ragged_fixture(tmp_path):
         )
     )
     return metadata
+
+
+def test_cysteine_has_one_sulfur_and_no_phantom_atom14_slot() -> None:
+    cysteine = RESTYPES.index("C")
+
+    assert ATOM14_NAMES[cysteine] == ("N", "CA", "C", "O", "CB", "SG")
+    assert physical_atom14_mask(torch.tensor([cysteine])).tolist() == [
+        [True, True, True, True, True, True, False, False, False, False, False, False, False, False]
+    ]
 
 
 def test_ragged_reader_preserves_multichain_non_divisible_by_four(tmp_path) -> None:

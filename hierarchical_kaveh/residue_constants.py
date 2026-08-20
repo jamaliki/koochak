@@ -16,7 +16,7 @@ ATOM14_NAMES = (
     ("N", "CA", "C", "O", "CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"),
     ("N", "CA", "C", "O", "CB", "CG", "OD1", "ND2"),
     ("N", "CA", "C", "O", "CB", "CG", "OD1", "OD2"),
-    ("N", "CA", "C", "O", "CB", "CG", "SG"),
+    ("N", "CA", "C", "O", "CB", "SG"),
     ("N", "CA", "C", "O", "CB", "CG", "CD", "OE1", "NE2"),
     ("N", "CA", "C", "O", "CB", "CG", "CD", "OE1", "OE2"),
     ("N", "CA", "C", "O"),

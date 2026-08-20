@@ -11,35 +11,9 @@ from torch import Tensor, nn
 from koochak.storage import checkpoint as checkpoint_lib
 
 from .config import RunConfig
+from .residue_constants import ATOM14_NAMES, RESTYPE_3, RESTYPES
 
 
-RESTYPES = "ARNDCQEGHILKMFPSTWYV"
-RESTYPE_3 = (
-    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
-    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
-)
-ATOM14_NAMES = (
-    ("N", "CA", "C", "O", "CB"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"),
-    ("N", "CA", "C", "O", "CB", "CG", "OD1", "ND2"),
-    ("N", "CA", "C", "O", "CB", "CG", "OD1", "OD2"),
-    ("N", "CA", "C", "O", "CB", "SG"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD", "OE1", "NE2"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD", "OE1", "OE2"),
-    ("N", "CA", "C", "O"),
-    ("N", "CA", "C", "O", "CB", "CG", "ND1", "CD2", "CE1", "NE2"),
-    ("N", "CA", "C", "O", "CB", "CG1", "CG2", "CD1"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD1", "CD2"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD", "CE", "NZ"),
-    ("N", "CA", "C", "O", "CB", "CG", "SD", "CE"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD"),
-    ("N", "CA", "C", "O", "CB", "OG"),
-    ("N", "CA", "C", "O", "CB", "OG1", "CG2"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "NE1", "CE2", "CE3", "CZ2", "CZ3", "CH2"),
-    ("N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"),
-    ("N", "CA", "C", "O", "CB", "CG1", "CG2"),
-)
 CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _STATE_WRAPPER_PREFIXES = ("module.", "_orig_mod.")
 
