@@ -1,0 +1,26 @@
+version: 1
+id: hierarchical-kaveh-esmfold-ledger-cpu-koochak-48384ce
+python: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python
+environment:
+  set:
+    PATH: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin:/usr/local/bin:/usr/bin:/bin
+    PYTHONPATH: "{cwd}/external/koochak:{cwd}"
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    PYTHONUNBUFFERED: "1"
+    KOOCHAK_GPU_HEALTH_SLURM_ACTION: exit
+    KOOCHAK_EXPECTED_SOURCE_COMMIT: 48384ceae5e986b849eaa8b5b0ed1012b2f65a7c
+  secrets: []
+  create_directories:
+    - "{run_dir}"
+requirements:
+  executables: []
+  files:
+    - "{cwd}/pyproject.toml"
+    - "{cwd}/scripts/audit_esmfold_history.py"
+    - "{cwd}/scripts/esmfold_plddt.py"
+    - "{cwd}/external/koochak/koochak/jobs/runner.py"
+  packages:
+    koochak: "*"
+preflight: []
