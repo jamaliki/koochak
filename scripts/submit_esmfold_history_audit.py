@@ -115,7 +115,6 @@ def main() -> None:
             workflow_id=workflow,
             task_id="audit",
             needs=[],
-            wait_for=[],
         )
     print(json.dumps({
         "workflow_id": workflow,
