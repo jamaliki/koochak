@@ -25,8 +25,12 @@ import koochak  # noqa: E402
 
 KOOCHAK_COMMIT = "48384ceae5e986b849eaa8b5b0ed1012b2f65a7c"
 REMOTE_CODE_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code")
-INPUT_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/hierarchical-kaveh-runs")
-OUTPUT_BASE = INPUT_ROOT / "esmfold-plddt-ledger-audit"
+GBI_INPUT_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/hierarchical-kaveh-runs")
+LUSTRE_INPUT_ROOT = Path(
+    "/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs"
+)
+INPUT_ROOTS = {"gbi": GBI_INPUT_ROOT, "lustre": LUSTRE_INPUT_ROOT}
+OUTPUT_BASE = GBI_INPUT_ROOT / "esmfold-plddt-ledger-audit"
 PROFILE = REPO_ROOT / "environments/tokyo-esmfold-ledger-cpu.yaml"
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path(
@@ -44,7 +48,7 @@ def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
     ).stdout.strip()
 
 
-def _validate_checkout() -> str:
+def _validate_checkout(input_root: Path) -> str:
     expected_koochak = (REPO_ROOT / "external" / "koochak").resolve()
     if not Path(koochak.__file__).resolve().is_relative_to(expected_koochak):
         raise RuntimeError("loaded Koochak from the wrong checkout")
@@ -56,22 +60,22 @@ def _validate_checkout() -> str:
     expected_repo = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{commit[:7]}"
     if REPO_ROOT.resolve() != expected_repo:
         raise RuntimeError(f"run from the independent checkout {expected_repo}")
-    for required in (INPUT_ROOT, SCRUFFY_ROOT, SCRUFFY_SITE):
+    for required in (input_root, SCRUFFY_ROOT, SCRUFFY_SITE):
         if not required.exists():
             raise FileNotFoundError(required)
     return commit
 
 
-def _prepare(commit: str):
+def _prepare(commit: str, *, input_label: str, input_root: Path):
     short = commit[:7]
     remote_cwd = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"
-    output_root = OUTPUT_BASE / commit / "v1"
+    output_root = OUTPUT_BASE / commit / f"{input_label}-v1"
     prepared = prepare_run(
         name=f"hk-esmfold-ledger-audit-{short}",
         profile=load_environment_profile(PROFILE),
         python_args=[
             "{cwd}/scripts/audit_esmfold_history.py",
-            "--root", str(INPUT_ROOT),
+            "--root", str(input_root),
             "--output-dir", str(output_root),
             "--workers", "16",
         ],
@@ -79,7 +83,7 @@ def _prepare(commit: str):
         run_dir=str(output_root),
         base_config=None,
     )
-    return f"hk-esmfold-ledger-audit-{short}-v1", output_root, prepared
+    return f"hk-esmfold-ledger-audit-{input_label}-{short}-v1", output_root, prepared
 
 
 def main() -> None:
@@ -87,9 +91,13 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--stage-only", action="store_true")
+    parser.add_argument("--input", choices=tuple(INPUT_ROOTS), default="gbi")
     args = parser.parse_args()
-    commit = _validate_checkout()
-    workflow, output_root, prepared = _prepare(commit)
+    input_root = INPUT_ROOTS[args.input]
+    commit = _validate_checkout(input_root)
+    workflow, output_root, prepared = _prepare(
+        commit, input_label=args.input, input_root=input_root
+    )
     if args.dry_run:
         result = {"dry_run": True}
     elif args.stage_only:
@@ -119,7 +127,7 @@ def main() -> None:
     print(json.dumps({
         "workflow_id": workflow,
         "commit": commit,
-        "input_root": str(INPUT_ROOT),
+        "input_root": str(input_root),
         "output_root": str(output_root),
         "result": result,
     }, indent=2, sort_keys=True))
