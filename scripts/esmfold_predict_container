@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+if [ -n "${ESMFOLD_SIF:-}" ]; then
+  SIF="$ESMFOLD_SIF"
+elif [ -f "/mnt/lustre/users/$USER/containers/esmfold-ngc25.01.sif" ]; then
+  SIF="/mnt/lustre/users/$USER/containers/esmfold-ngc25.01.sif"
+else
+  SIF="$HOME/containers/esmfold-ngc25.01.sif"
+fi
+
+if [ ! -f "$SIF" ]; then
+  echo "ESMFold container not found: $SIF" >&2
+  exit 1
+fi
+
+if [ -d "/mnt/lustre/users/$USER" ]; then
+  export HF_HOME="${HF_HOME:-/mnt/lustre/users/$USER/.cache/huggingface}"
+  export TORCH_HOME="${TORCH_HOME:-/mnt/lustre/users/$USER/.cache/torch}"
+fi
+
+mkdir -p "${HF_HOME:-$HOME/.cache/huggingface}" "${TORCH_HOME:-$HOME/.cache/torch}"
+
+apptainer exec --nv \
+  --bind /mnt/lustre:/mnt/lustre \
+  --bind /mnt/gbi-shared:/mnt/gbi-shared \
+  --env "HF_HOME=${HF_HOME:-$HOME/.cache/huggingface}" \
+  --env "TORCH_HOME=${TORCH_HOME:-$HOME/.cache/torch}" \
+  --env "HF_HUB_DISABLE_XET=1" \
+  "$SIF" \
+  esmfold_predict "$@"
+
+exec /usr/bin/python3 "$SCRIPT_DIR/esmfold_plddt.py" "$@"
