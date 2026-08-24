@@ -26,11 +26,36 @@ The corrected evidence changes the working diagnosis:
 4. **Training maturity matters.** In the four original offset arms, corrected
    strict designability rises from 0%-1% at 50k to 9.4%-22.9% at 200k. The old
    claim that longer training did not improve designability is invalid.
+5. **The missing old-Kaveh effect is primarily in sampling, not architecture.**
+   In the balanced old-Kaveh factorial, the no-tricks `f0000` model changes
+   from 2/48 (4.2%) with the current sampler to 26/48 (54.2%) with the recovered
+   old structural sampler. The paired difference is +50.0 percentage points
+   (bootstrap 95% interval +35.4 to +64.6 points).
 
 Taken together, the dominant gap is now **raw sequence/structure co-design and
 sampler-scale calibration**, not evidence that nearly all generated backbones
 are intrinsically unfoldable. The backbone is not fully exonerated: direct
 Kaveh success remains 36.5% at best and falls strongly with length.
+
+## Recovered old-Kaveh sampler effect
+
+The complete balanced-factorial analysis is in
+[the dedicated old-Kaveh ledger entry](old_kaveh_training_factorial_18x200k_rescore.md).
+The decisive cell is `f0000`, which has none of mixed-noise training, deep
+supervision, amino-acid-token recycling, or SS/3Di recycling:
+
+| Sampler | Strict designability | RMSD <2 A | pLDDT >80 | Corrected mean pLDDT |
+| --- | ---: | ---: | ---: | ---: |
+| Current | 2/48 (4.2%) | 24/48 (50.0%) | 2/48 (4.2%) | 63.92 |
+| Old structure | **26/48 (54.2%)** | 39/48 (81.2%) | 26/48 (54.2%) | 79.43 |
+
+Both samplers retain churn at `gamma=0.2`. The recovered sampler jointly
+changes the integration from 200 to 300 steps, rho from 5 to 3, sigma endpoints
+from 0.003-200 to 0.1-320, constant scale 2.25 to a cosine 2.25-4.5 ramp, and
+continuous recurrence to high/low-noise recurrence windows. This comparison
+therefore localizes the missing mechanism to that bundle; it does not yet
+identify which individual change is causal. The next useful experiment is a
+paired sampler ablation of those components, not another architecture sweep.
 
 ## Released Pallatom calibration
 
@@ -105,6 +130,25 @@ The new leader is `ratio2_offset0p1_onset5` at 28/96 (29.2%), versus 18/96
 percentage points with a 95% interval of 0.0 to +20.8 points, so this is a
 numerical leader rather than a decisive training-arm win.
 
+## Legacy-quadrature training families
+
+Correcting the separate length-128 legacy-quadrature training campaigns also
+changes their interpretation. Each aggregate below pools 16 paired samples at
+lengths 64, 96, and 128.
+
+| Campaign | Sampler/training cell | Corrected strict | RMSD <2 A |
+| --- | --- | ---: | ---: |
+| Original family | `p1_n5_slot4`, legacy scalar | **11/48 (22.9%)** | 30/48 (62.5%) |
+| Original family | `p1_n5_slot4`, paired current | 8/48 (16.7%) | 32/48 (66.7%) |
+| Expansion | `p1_n2p5_slot4`, legacy scalar | **11/48 (22.9%)** | 28/48 (58.3%) |
+| Expansion | `p0p5_n8_slot5`, legacy scalar | 10/48 (20.8%) | 26/48 (54.2%) |
+| Expansion | `p0p25_n8_slot5`, legacy scalar | 10/48 (20.8%) | 26/48 (54.2%) |
+
+The leading matched original-family cell favours legacy scalar over paired
+current by 3/48. This is descriptive one-seed evidence, not a powered sampler
+comparison, but it is directionally consistent with the much larger recovered
+old-Kaveh sampler effect.
+
 ## Length-256 campaign status
 
 There is no production length-256 ESMFold result to rescore. A targeted audit
@@ -123,16 +167,21 @@ workflow `hk-esmfold-ledger-audit-length256-506c4e9-v1`, and successful job
 
 ## Historical campaign inventory
 
-The GBI audit covers all 409 discovered ESMFold panels and 21,907 predictions
-with zero panel errors. The pooled counts below are an inventory, not one
-binomial experiment: campaigns contain different panel sizes, deliberate
-hyperparameter sweeps, and reused controls. Exact panel rows and duplicate
+The two read-only filesystem audits cover 835 discovered ESMFold panels and
+30,508 predictions with zero panel errors. Global signature deduplication
+leaves 680 distinct panels, 25,557 predictions, and 125 duplicate-signature
+groups. The pooled counts below are an inventory, not one binomial experiment:
+campaigns contain different panel sizes, deliberate hyperparameter sweeps, and
+reused controls. Exact panel rows, factorial reductions, and duplicate
 signatures are retained in the machine-readable ledger artifact.
 
 | Campaign | Unique panels | Predictions | Old strict | Corrected strict | Best corrected panel |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Current sampler step scale | 91 | 8,736 | 82 | 510 | 35/96 (36.5%) |
+| Coarse relative-position batch-256 | 12 | 384 | 0 | 6 | 1/32 (3.1%) |
 | L128 offset clocks | 108 | 3,456 | 60 | 436 | 15/32 (46.9%) length slice |
+| Legacy-quadrature training family | 18 | 288 | 4 | 37 | 6/16 (37.5%) length slice |
+| Legacy-quadrature L128 expansion | 90 | 1,440 | 17 | 137 | 6/16 (37.5%) length slice |
 | Delayed-sidechain sampler screen | 13 | 480 | 23 | 111 | 46/64 (71.9%), MPNN |
 | EDM causal screen | 18 | 1,728 | 33 | 180 | 59/96 (61.5%), MPNN |
 | EDM two-stage screen | 12 | 1,152 | 78 | 325 | 75/96 (78.1%), MPNN |
@@ -140,6 +189,7 @@ signatures are retained in the machine-readable ledger artifact.
 | Legacy quadrature late milestones | 8 | 256 | 4 | 14 | 6/32 (18.8%) |
 | Legacy quadrature maturation | 56 | 1,792 | 1 | 16 | 7/32 (21.9%) |
 | Legacy quadrature noise caps | 8 | 256 | 0 | 0 | 0/32 |
+| Old-Kaveh training factorial | 189 | 3,024 | 37 | 211 | 10/16 (62.5%) length slice |
 | Pallatom initial-noise screen | 1 | 32 | 10 | 28 | 28/32 (87.5%) |
 | Pallatom reference lengths | 3 | 96 | 6 | 79 | 28/32 (87.5%) |
 | Pallatom release hyperparameters | 5 | 160 | 26 | 128 | 30/32 (93.8%) |
@@ -149,6 +199,7 @@ signatures are retained in the machine-readable ledger artifact.
 | Sampler recurrence | 5 | 320 | 4 | 30 | 9/64 (14.1%) |
 | Early step-scale screen | 7 | 224 | 3 | 15 | 6/32 (18.8%) |
 | ProteinMPNN step-scale rescue | 7 | 896 | 181 | 554 | 110/128 (85.9%) |
+| Recycling-stability factorial | 8 | 256 | 0 | 0 | 0/32 |
 
 Within-campaign duplicate panels are counted once in this inventory. In
 particular, mirrored legacy-quadrature controls do not create extra evidence.
@@ -163,6 +214,9 @@ particular, mirrored legacy-quadrature controls do not create extra evidence.
   zero-success cap screen remains zero after correction.
 - The combined lDDT/self-conditioning offset arm remains a geometric failure.
 - Raw Kaveh remains below released Pallatom, although the gulf is much smaller.
+- The current sampler is not a neutral evaluation choice: the recovered old
+  sampler changes strict designability by +50 points on the same `f0000`
+  checkpoint.
 
 The invalidated claims are those based on the old pLDDT averages: that no arm
 had material designability, that training maturity barely helped, that
@@ -180,6 +234,22 @@ commit `df86846e19847c33e01109db5f63eddffaf28d54`, workflow
 - `audit.json`: `618c2404aa599c028636295c5ae1832fc106816088fa2a456c8522369a5a1ffb`
 - `rows.jsonl`: `77879cd18e45be7821fdacad5017939fdb691e08efd0fce073abca3ee5c4d320`
 
+The Lustre read-only audit used commit
+`905d7820c3c61257e86c0a43bc03ce72be64493b`, workflow
+`hk-esmfold-ledger-audit-lustre-905d782-v1`, and job
+`job-c43ae6ba83aa5cf651ba`. It also completed with zero errors. Audit artifact
+hashes:
+
+- `audit.json`: `36e271af05769d1222cfb4ac6a0cc58991527008b2b0cdc9d4f7c67919273907`
+- `rows.jsonl`: `1703efeb541a5ab62deaaaede4be06904ec740df84f2cd8b0a00ca98e6c09cf6`
+
 Historical output directories were not modified. Strict designability remains
 defined as CA Kabsch RMSD <2 A **and** canonical mean predicted-atom pLDDT >80.
 It is an ESMFold self-consistency surrogate, not experimental fold validation.
+
+The complete reduced panel inventory, corrected length-128 bootstrap,
+ProteinMPNN best-of-four mapping, old-Kaveh factorial, and legacy-quadrature
+group reductions are committed as
+[`artifacts/esmfold_designability_rescore_20260824.json`](artifacts/esmfold_designability_rescore_20260824.json)
+(SHA-256
+`90afb891dd26ffdb945982995869d859178c4cec811c8528ad2d985ccd0e60ad`).

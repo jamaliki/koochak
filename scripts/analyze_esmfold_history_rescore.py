@@ -14,6 +14,8 @@ import re
 from statistics import fmean, median
 from typing import Any, Iterable
 
+from scripts.esmfold_rescore_factorials import legacy_quadrature_groups, old_kaveh_factorial
+
 
 def _read_jsonl(file: Path) -> list[dict[str, Any]]:
     with file.open(encoding="utf-8") as handle:
@@ -110,7 +112,7 @@ def _length128(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if row["campaign"] != "delayed-sidechain-offset-length128-esmfold":
             continue
         match = pattern.search(row["panel"])
-        if match:
+        if match and row["ca_rmsd_a"] is not None:
             groups[(int(match[1]), match[2])].append((int(match[3]), row))
     summarized: dict[str, Any] = {}
     for (step, arm), items in groups.items():
@@ -263,16 +265,29 @@ def analyze(bundles: list[Path], metadata_root: Path) -> dict[str, Any]:
     for row in rows:
         rows_by_panel[(row["audit_root"], row["panel"])].append(row)
     campaign_summary, leaderboard = _panel_tables(panels, rows_by_panel)
+    signature_counts: dict[str, int] = defaultdict(int)
+    unique_rows: list[dict[str, Any]] = []
+    for panel in panels:
+        if panel.get("status") != "ok":
+            continue
+        signature = str(panel["panel_signature"])
+        signature_counts[signature] += 1
+        if signature_counts[signature] == 1:
+            unique_rows.extend(rows_by_panel[(panel["audit_root"], panel["panel"])])
     return {
         "audit_roots": [audit["root"] for audit in audits],
         "summary_file_count": sum(audit["summary_file_count"] for audit in audits),
         "esmfold_panel_count": sum(audit["esmfold_panel_count"] for audit in audits),
         "prediction_count": sum(audit["prediction_count"] for audit in audits),
-        "duplicate_panel_group_count": sum(len(audit["duplicate_panel_groups"]) for audit in audits),
+        "unique_esmfold_panel_count": len(signature_counts),
+        "unique_prediction_count": len(unique_rows),
+        "duplicate_panel_group_count": sum(count > 1 for count in signature_counts.values()),
         "campaigns": campaign_summary,
         "unique_panel_leaderboard": leaderboard,
-        "length128_offset": _length128(rows),
-        "proteinmpnn": _mpnn(rows, metadata_root),
+        "length128_offset": _length128(unique_rows),
+        "proteinmpnn": _mpnn(unique_rows, metadata_root),
+        "old_kaveh_factorial": old_kaveh_factorial(unique_rows),
+        "legacy_quadrature_training": legacy_quadrature_groups(unique_rows),
     }
 
 

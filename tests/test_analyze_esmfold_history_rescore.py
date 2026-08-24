@@ -7,6 +7,9 @@ from pathlib import Path
 from scripts.analyze_esmfold_history_rescore import analyze
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _row(panel: str, identifier: str, *, rmsd: float, old: float, corrected: float) -> dict:
     rmsd_pass = int(rmsd < 2)
     return {
@@ -139,3 +142,39 @@ def test_analyze_groups_proteinmpnn_best_of_four(tmp_path: Path) -> None:
     result = analyze([bundle], tmp_path / "metadata")
     assert result["proteinmpnn"]["scale2"]["per_sequence"]["new_designable_count"] == 30
     assert result["proteinmpnn"]["scale2"]["best_of_4"]["designable_backbone_count"] == 30
+
+
+def test_committed_rescore_artifact_matches_ledger_headlines() -> None:
+    artifact = json.loads(
+        (REPO_ROOT / "docs/experiments/artifacts/esmfold_designability_rescore_20260824.json")
+        .read_text(encoding="utf-8")
+    )
+    assert artifact["length128_offset"]["final_ranking"][0] == "ratio2_offset0p1_onset5"
+    leader = artifact["length128_offset"]["steps"]["200000"]["ratio2_offset0p1_onset5"]
+    assert leader["aggregate"]["new_designable_count"] == 28
+    mpnn = artifact["proteinmpnn"]["scale2p25"]
+    assert mpnn["per_sequence"]["new_designable_count"] == 110
+    assert mpnn["best_of_4"]["designable_backbone_count"] == 31
+    assert artifact["esmfold_panel_count"] == 835
+    assert artifact["prediction_count"] == 30_508
+    assert artifact["unique_esmfold_panel_count"] == 680
+    assert artifact["unique_prediction_count"] == 25_557
+    old_factorial = artifact["old_kaveh_factorial"]
+    assert old_factorial["panels"]["200000:current:f0000"]["new_designable_count"] == 2
+    assert old_factorial["panels"]["200000:old_struct:f0000"]["new_designable_count"] == 26
+    assert old_factorial["old_struct_vs_current"]["200000:f0000"]["difference"] == 0.5
+    legacy = artifact["legacy_quadrature_training"]
+    family = legacy["delayed-sidechain-legacy-quadrature-family-12x200k"]["panels"]
+    assert family["200000:l128_p1_n5_slot4__legacy_scalar"]["new_designable_count"] == 11
+    assert family["200000:l128_p1_n5_slot4__paired_current"]["new_designable_count"] == 8
+    report = (
+        REPO_ROOT / "docs/experiments/esmfold_designability_rescore_20260824.md"
+    ).read_text(encoding="utf-8")
+    for headline in (
+        "35/96 (36.5%)",
+        "110/128 (85.9%)",
+        "31/32 (96.9%)",
+        "26/48 (54.2%)",
+        "25,557 predictions",
+    ):
+        assert headline in report
