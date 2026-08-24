@@ -45,34 +45,41 @@ running length-256 training campaign.
 
 ## Decision summary
 
-**No variant has high strict designability on this panel.** The nominal leader,
-`ratio2_offset0p05`, has 6/96 designable samples (6.25%; Wilson 95% interval
-2.90%-12.97%). The no-delay `ratio1_control` has 2/96 (2.08%). The paired
-bootstrap difference is +4.13 percentage points, but its 95% interval is
--1.04 to +10.42 points, so this panel does not establish a statistically clear
-improvement over the control.
+**Corrected result (2026-08-24): designability was substantially understated.**
+The original ESMFold wrapper averaged the full `[L, 37]` confidence tensor,
+including zero-filled slots for atoms absent from each residue. Recomputing
+mean pLDDT over atoms actually present in the predicted PDB changes every
+pLDDT-dependent endpoint below; RMSD values are unchanged.
+
+The corrected nominal leader is `ratio2_offset0p1_onset5`, with 28/96 strict
+designable samples (29.17%; Wilson 95% interval 21.02%-38.92%). The no-delay
+`ratio1_control` has 18/96 (18.75%). The observed difference is +10.42
+percentage points, with a paired-bootstrap 95% interval of 0.00 to +20.83
+points. The leader receives 60.5% `P(best)`, but the interval touches zero, so
+one panel does not establish a statistically decisive training-arm winner.
 
 The failure modes are informative:
 
-- Backbone self-consistency is already moderate: 14 arms have median CA RMSD
+- Backbone self-consistency remains moderate: 14 arms have median CA RMSD
   below 2 A, and `ratio2_offset0p4` and `ratio2_offset0p1` each pass RMSD <2 A
   for 63.5% of samples.
-- High ESMFold confidence is the bottleneck. The best pLDDT >80 rate is only
-  6.25%, and the best mean pLDDT over a variant is 65.40.
-- The diversity-leading clock-gated lDDT arm has 2.08% designability, equal to
-  the no-delay control. Its additional sequence diversity does not translate
-  into higher ESMFold confidence on this fixed panel.
+- Confidence is still more selective than geometry, but not catastrophically
+  so. The leader passes RMSD for 60.4%, pLDDT for 32.3%, and both for 29.2%; its
+  corrected mean pLDDT is 70.99.
+- The diversity-leading clock-gated lDDT arm has 13/96 (13.54%) designability,
+  below the 18/96 control. Its sequence-diversity advantage still does not
+  improve this endpoint.
 - The combined lDDT/self-conditioning gate remains a clear failure: zero RMSD
-  passes, median CA RMSD 19.04 A, and mean pLDDT 46.31.
-- Training from 50k to 200k strongly improves backbone self-consistency and
-  mean pLDDT for every first-wave arm, but strict designability remains at only
-  1.04%-2.08% at 200k. Longer training alone is therefore unlikely to close
-  the confidence gap.
+  passes, median CA RMSD 19.04 A, and corrected mean pLDDT 47.88.
+- Training maturity is important. The four first-wave arms rise from 0%-1% at
+  50k to 9.4%-22.9% at 200k. The earlier claim that longer training did not
+  improve strict designability is invalidated.
 
-No length slice is highly designable either. The maximum is 3/32 (9.38%) at
-length 64 (`ratio2_offset0p05` and `ratio3_offset0p1_onset5`), 2/32 (6.25%) at
-length 96 (`ratio1_control` and `ratio3_offset0p1_onset20`), and 2/32 (6.25%)
-at length 128 (`ratio2_offset0p05` and `ratio3_offset0p1_selfcond`).
+There is a strong length gradient. The maximum is 15/32 (46.88%) at length 64
+for `ratio2_offset0p1`, 8/32 (25.0%) at length 96 for
+`ratio2_offset0p1_onset5`, and 6/32 (18.75%) at length 128 for the same onset-5
+arm. This is meaningful partial designability, but still below the corrected
+released-Pallatom calibration recorded in the ledger-wide rescore.
 
 ## Complete 200k ranking
 
@@ -81,39 +88,39 @@ probability within this panel, not an absolute measure of designability.
 
 | Rank | Arm | Designable | RMSD<2 | pLDDT>80 | Median RMSD (A) | Mean pLDDT | P(best) |
 |---:|---|---:|---:|---:|---:|---:|---:|
-| 1 | `ratio2_offset0p05` | 6/96 (6.2%) | 52.1% | 6.2% | 1.792 | 63.27 | 45.2% |
-| 2 | `ratio3_offset0p1_onset5` | 5/96 (5.2%) | 54.2% | 5.2% | 1.803 | 63.34 | 24.8% |
-| 3 | `ratio4_offset0p05` | 4/96 (4.2%) | 44.8% | 4.2% | 2.089 | 60.96 | 11.1% |
-| 4 | `ratio2_offset0p1_onset5` | 3/96 (3.1%) | 60.4% | 4.2% | 1.637 | 65.40 | 4.4% |
-| 5 | `ratio3_offset0p1_onset20` | 3/96 (3.1%) | 59.4% | 4.2% | 1.748 | 63.44 | 4.4% |
-| 6 | `ratio2_offset0p1_cbdelayed` | 3/96 (3.1%) | 52.1% | 4.2% | 1.917 | 64.16 | 0.5% |
-| 7 | `ratio1p5_offset0p05` | 3/96 (3.1%) | 52.1% | 3.1% | 1.918 | 65.11 | 2.0% |
-| 8 | `ratio3_offset0p05` | 3/96 (3.1%) | 49.0% | 3.1% | 2.050 | 62.60 | 2.3% |
-| 9 | `ratio3_offset0p1_selfcond` | 3/96 (3.1%) | 44.8% | 3.1% | 2.110 | 60.45 | 2.8% |
-| 10 | `ratio2_offset0p2` | 2/96 (2.1%) | 59.4% | 2.1% | 1.729 | 65.40 | 0.3% |
-| 11 | `ratio3_offset0p2` | 2/96 (2.1%) | 53.1% | 2.1% | 1.864 | 62.81 | 0.1% |
-| 12 | `ratio2_offset0p1_onset20` | 2/96 (2.1%) | 52.1% | 2.1% | 1.948 | 62.37 | 0.3% |
-| 13 | `ratio3_offset0p1` | 2/96 (2.1%) | 50.0% | 2.1% | 1.982 | 62.68 | 0.4% |
-| 14 | `ratio1_control` | 2/96 (2.1%) | 46.9% | 2.1% | 2.137 | 63.30 | 0.7% |
-| 15 | `ratio3_offset0p1_lddt` | 2/96 (2.1%) | 44.8% | 2.1% | 2.212 | 63.12 | 0.8% |
-| 16 | `ratio2_offset0p4` | 1/96 (1.0%) | 63.5% | 1.0% | 1.638 | 64.21 | 0.0% |
-| 17 | `ratio2_offset0p1` | 1/96 (1.0%) | 63.5% | 2.1% | 1.647 | 63.96 | 0.0% |
-| 18 | `ratio2_offset0p2_cbdelayed` | 1/96 (1.0%) | 58.3% | 1.0% | 1.764 | 64.21 | 0.0% |
-| 19 | `ratio3_offset0p1_cbdelayed` | 1/96 (1.0%) | 51.0% | 1.0% | 1.980 | 62.13 | 0.0% |
-| 20 | `ratio3_offset0p1_lddt_narrow` | 1/96 (1.0%) | 49.0% | 1.0% | 2.048 | 64.28 | 0.0% |
-| 21 | `ratio3_offset0p2_cbdelayed` | 1/96 (1.0%) | 39.6% | 1.0% | 2.217 | 59.75 | 0.0% |
-| 22 | `ratio1p5_offset0p4` | 0/96 (0.0%) | 55.2% | 0.0% | 1.799 | 62.60 | 0.0% |
-| 23 | `ratio3_offset0p1_lddt_wide` | 0/96 (0.0%) | 38.5% | 0.0% | 2.313 | 62.77 | 0.0% |
-| 24 | `ratio3_offset0p1_both` | 0/96 (0.0%) | 0.0% | 0.0% | 19.038 | 46.31 | 0.0% |
+| 1 | `ratio2_offset0p1_onset5` | 28/96 (29.2%) | 60.4% | 32.3% | 1.637 | 70.99 | 60.5% |
+| 2 | `ratio1p5_offset0p05` | 25/96 (26.0%) | 52.1% | 28.1% | 1.918 | 70.72 | 27.1% |
+| 3 | `ratio2_offset0p2` | 22/96 (22.9%) | 59.4% | 24.0% | 1.729 | 71.03 | 5.0% |
+| 4 | `ratio2_offset0p05` | 20/96 (20.8%) | 52.1% | 24.0% | 1.792 | 68.42 | 1.2% |
+| 5 | `ratio2_offset0p1_cbdelayed` | 20/96 (20.8%) | 52.1% | 30.2% | 1.917 | 69.41 | 2.3% |
+| 6 | `ratio2_offset0p1` | 19/96 (19.8%) | 63.5% | 24.0% | 1.647 | 69.35 | 0.6% |
+| 7 | `ratio2_offset0p4` | 18/96 (18.8%) | 63.5% | 20.8% | 1.638 | 69.63 | 0.8% |
+| 8 | `ratio3_offset0p1_onset5` | 18/96 (18.8%) | 54.2% | 21.9% | 1.803 | 68.45 | 0.4% |
+| 9 | `ratio3_offset0p1_cbdelayed` | 18/96 (18.8%) | 51.0% | 19.8% | 1.980 | 67.10 | 0.7% |
+| 10 | `ratio3_offset0p05` | 18/96 (18.8%) | 49.0% | 19.8% | 2.050 | 67.68 | 0.5% |
+| 11 | `ratio1_control` | 18/96 (18.8%) | 46.9% | 25.0% | 2.137 | 68.41 | 0.5% |
+| 12 | `ratio3_offset0p1_lddt_narrow` | 17/96 (17.7%) | 49.0% | 24.0% | 2.048 | 69.67 | 0.4% |
+| 13 | `ratio2_offset0p2_cbdelayed` | 15/96 (15.6%) | 58.3% | 17.7% | 1.764 | 69.67 | 0.0% |
+| 14 | `ratio4_offset0p05` | 15/96 (15.6%) | 44.8% | 18.8% | 2.089 | 65.55 | 0.0% |
+| 15 | `ratio1p5_offset0p4` | 14/96 (14.6%) | 55.2% | 17.7% | 1.799 | 67.79 | 0.0% |
+| 16 | `ratio3_offset0p1` | 14/96 (14.6%) | 50.0% | 20.8% | 1.982 | 67.66 | 0.0% |
+| 17 | `ratio3_offset0p1_lddt` | 13/96 (13.5%) | 44.8% | 17.7% | 2.212 | 68.29 | 0.0% |
+| 18 | `ratio3_offset0p1_selfcond` | 12/96 (12.5%) | 44.8% | 15.6% | 2.110 | 64.92 | 0.0% |
+| 19 | `ratio3_offset0p1_onset20` | 11/96 (11.5%) | 59.4% | 15.6% | 1.748 | 68.65 | 0.0% |
+| 20 | `ratio3_offset0p2` | 9/96 (9.4%) | 53.1% | 15.6% | 1.864 | 68.01 | 0.0% |
+| 21 | `ratio2_offset0p1_onset20` | 9/96 (9.4%) | 52.1% | 10.4% | 1.948 | 67.30 | 0.0% |
+| 22 | `ratio3_offset0p2_cbdelayed` | 9/96 (9.4%) | 39.6% | 12.5% | 2.217 | 64.14 | 0.0% |
+| 23 | `ratio3_offset0p1_lddt_wide` | 8/96 (8.3%) | 38.5% | 15.6% | 2.313 | 67.90 | 0.0% |
+| 24 | `ratio3_offset0p1_both` | 0/96 (0.0%) | 0.0% | 1.0% | 19.038 | 47.88 | 0.0% |
 
 ## First-wave training trajectory
 
 | Arm | 50k design. | 100k | 150k | 200k | 50k RMSD<2 | 200k RMSD<2 | 50k mean pLDDT | 200k mean pLDDT |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `ratio2_offset0p1` | 0.0% | 2.1% | 1.0% | 1.0% | 10.4% | 63.5% | 51.32 | 63.96 |
-| `ratio2_offset0p2` | 0.0% | 1.0% | 2.1% | 2.1% | 13.5% | 59.4% | 52.75 | 65.40 |
-| `ratio3_offset0p1` | 0.0% | 0.0% | 2.1% | 2.1% | 2.1% | 50.0% | 50.29 | 62.68 |
-| `ratio3_offset0p2` | 0.0% | 0.0% | 1.0% | 2.1% | 8.3% | 53.1% | 49.15 | 62.81 |
+| `ratio2_offset0p1` | 0.0% | 4.2% | 12.5% | 19.8% | 10.4% | 63.5% | 53.46 | 69.35 |
+| `ratio2_offset0p2` | 1.0% | 5.2% | 13.5% | 22.9% | 13.5% | 59.4% | 55.18 | 71.03 |
+| `ratio3_offset0p1` | 1.0% | 4.2% | 13.5% | 14.6% | 2.1% | 50.0% | 51.95 | 67.66 |
+| `ratio3_offset0p2` | 0.0% | 4.2% | 9.4% | 9.4% | 8.3% | 53.1% | 50.64 | 68.01 |
 
 ## Interpretation limits
 
@@ -126,11 +133,23 @@ probability within this panel, not an absolute measure of designability.
 - Twenty-four arms are compared, so nominal rank and `P(best)` should not be
   read as a confirmatory multiple-testing result. The control-relative interval
   for the leading arm crosses zero.
-- The strict pLDDT >80 threshold is intentionally demanding. Reporting the
-  RMSD and pLDDT components separately shows that confidence, rather than only
-  geometric self-consistency, is the dominant failure mode.
+- The strict pLDDT >80 threshold is intentionally demanding. Correct Atom37
+  masking is part of the endpoint definition; averaging absent atom slots is
+  not a conservative alternative and must not be used.
 
 ## Launch record
+
+### Canonical-pLDDT correction
+
+The corrected table was generated by source commit
+`df86846e19847c33e01109db5f63eddffaf28d54` in Scruffy workflow
+`hk-esmfold-ledger-audit-df86846-v1`, job `job-9c2bca96039f3f2235b2`.
+The read-only audit parsed the B factors in every predicted PDB and completed
+with zero panel errors. Its immutable artifacts have SHA-256 values
+`618c2404aa599c028636295c5ae1832fc106816088fa2a456c8522369a5a1ffb`
+(`audit.json`) and
+`77879cd18e45be7821fdacad5017939fdb691e08efd0fce073abca3ee5c4d320`
+(`rows.jsonl`). The original artifacts remain unchanged for provenance.
 
 The first launch used source commit `4abf61b6c9bf2220d0e9eca622bd7c2eaf65f175`
 and workflow

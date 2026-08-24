@@ -29,7 +29,17 @@ GBI_INPUT_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/hierarchical-kaveh-ru
 LUSTRE_INPUT_ROOT = Path(
     "/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs"
 )
-INPUT_ROOTS = {"gbi": GBI_INPUT_ROOT, "lustre": LUSTRE_INPUT_ROOT}
+LENGTH256_INPUT_ROOT = (
+    LUSTRE_INPUT_ROOT
+    / "delayed-sidechain-offset-best8-length256-200k"
+    / "9b7ca2f3c7e6a2f7dceeaf3b359b548e7568ab64"
+    / "v1"
+)
+INPUT_ROOTS = {
+    "gbi": GBI_INPUT_ROOT,
+    "lustre": LUSTRE_INPUT_ROOT,
+    "length256": LENGTH256_INPUT_ROOT,
+}
 OUTPUT_BASE = GBI_INPUT_ROOT / "esmfold-plddt-ledger-audit"
 PROFILE = REPO_ROOT / "environments/tokyo-esmfold-ledger-cpu.yaml"
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")

@@ -53,6 +53,18 @@ are explicitly paper-only.
 | reference run | batch 32, crop 128, 300,000 steps, 100% self-conditioning |
 | sampler | 200 coherent perturbed-time Euler steps, one denoiser call per step, previous-step coordinate self-conditioning, `tmin=0.01`, `tmax=1`, `gamma=0.2`, noise scale `1.003`, step scale `2.25`, and final temperature-0.1 softmax/argmax sequence decoding; churn uses Pallatom's released inclusive gate on the perturbed normalized time |
 
+## Evaluation conformance
+
+ESMFold strict designability uses CA Kabsch RMSD below 2 A and mean pLDDT
+above 80. Mean pLDDT is averaged only over atoms present in the predicted PDB;
+zero-filled entries for nonexistent Atom37 slots are excluded. A historical
+wrapper violated this contract and understated all pLDDT-dependent results.
+The canonical rescore is recorded in
+[`docs/experiments/esmfold_designability_rescore_20260824.md`](experiments/esmfold_designability_rescore_20260824.md).
+With the corrected evaluator, the released Pallatom checkpoint reaches 29/32
+(90.6%) at `gamma=0.2`, step scale 2.25 and 30/32 (93.8%) at scale 3.25,
+consistent with the published hyperparameter screen.
+
 Protenix independently confirms the scaled log-normal training noise, rigid
 augmentation, FP32 stopped-gradient target alignment, and EDM scaling. It is a
 cross-check, not a source of substituted AF3 objectives.
