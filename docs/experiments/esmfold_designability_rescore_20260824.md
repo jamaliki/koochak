@@ -105,6 +105,22 @@ The new leader is `ratio2_offset0p1_onset5` at 28/96 (29.2%), versus 18/96
 percentage points with a 95% interval of 0.0 to +20.8 points, so this is a
 numerical leader rather than a decisive training-arm win.
 
+## Length-256 campaign status
+
+There is no production length-256 ESMFold result to rescore. A targeted audit
+of the authoritative campaign root found one `summary.csv`, containing only
+the one-sequence ESMFold canary. Scruffy's authoritative workflow state shows
+the 50k-150k sampling and ESMFold tasks still blocked and no 200k ESMFold tasks
+in that workflow. The `designability/analysis` directories contain launch
+manifests but no milestone or campaign result JSON. Therefore the previously
+planned eight-arm length-256 comparison remains **not measured** and must not
+be used in model selection.
+
+The targeted check used commit `506c4e935cacff86dae7f649f58b4f070daa92e3`,
+workflow `hk-esmfold-ledger-audit-length256-506c4e9-v1`, and successful job
+`job-26ca5555104602b7b1dc`. Its `audit.json` SHA-256 is
+`28c3d28300d0d4a0b49a7f6dc103261c8337d04d926fcbbfe489ce670d00a52e`.
+
 ## Historical campaign inventory
 
 The GBI audit covers all 409 discovered ESMFold panels and 21,907 predictions

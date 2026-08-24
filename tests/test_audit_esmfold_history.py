@@ -26,6 +26,9 @@ def test_audit_recomputes_thresholds_without_mutating_inputs(tmp_path: Path) -> 
         f"id,length,mean_plddt,pdb\nsample_00000,1,42.000,{pdb_file}\n"
     )
     summary_file.write_text(original_summary)
+    ignored = tmp_path / "campaign/samples/raw/predictions"
+    ignored.mkdir(parents=True)
+    (ignored / "summary.csv").write_text("this tree must be pruned\n")
     (panel / "per_sample.json").write_text(json.dumps([{
         "id": "sample_00000",
         "mean_plddt": 42.0,
@@ -37,6 +40,7 @@ def test_audit_recomputes_thresholds_without_mutating_inputs(tmp_path: Path) -> 
     document, rows = audit(tmp_path, workers=1)
 
     assert summary_file.read_text() == original_summary
+    assert document["summary_file_count"] == 1
     assert document["prediction_count"] == 1
     assert document["campaigns"]["campaign"]["old_designable_count"] == 0
     assert document["campaigns"]["campaign"]["new_designable_count"] == 1

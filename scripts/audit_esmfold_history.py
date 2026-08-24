@@ -8,11 +8,36 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 import hashlib
 import json
+import os
 from pathlib import Path
 from statistics import fmean
 from typing import Any
 
 from scripts.esmfold_plddt import mean_atom_plddt
+
+
+_PRUNED_DIRECTORIES = {
+    ".git",
+    "analysis",
+    "checkpoints",
+    "redesign",
+    "samples",
+    "train",
+    "wandb",
+}
+
+
+def _summary_files(root: Path) -> list[Path]:
+    summaries: list[Path] = []
+    for directory, child_directories, files in os.walk(root, topdown=True):
+        child_directories[:] = [
+            name for name in child_directories if name not in _PRUNED_DIRECTORIES
+        ]
+        current = Path(directory)
+        if current.name == "predictions" and "summary.csv" in files:
+            summaries.append(current / "summary.csv")
+            child_directories[:] = []
+    return sorted(summaries)
 
 
 def _prediction_file(summary_file: Path, value: str) -> Path:
@@ -147,7 +172,7 @@ def _campaigns(panels: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def audit(root: Path, *, workers: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    summary_files = sorted(root.rglob("summary.csv"))
+    summary_files = _summary_files(root)
     panels: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
 
