@@ -100,6 +100,8 @@ class TrainConfig:
     throughput_guard_max_median_step_time_s: float = 2.5
     throughput_guard_max_median_batch_wait_s: float = 0.15
     throughput_guard_bad_windows: int = 2
+    # Optional pre-step DDP hang watchdog; zero disables it.
+    startup_progress_timeout_s: float = 0.0
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)
     ema_enabled: Optional[bool] = None
