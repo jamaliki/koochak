@@ -197,6 +197,12 @@ class _TrainSettings:
     ddp_bucket_cap_mb: Optional[int]
     ddp_bucket_cap_mb_list: Optional[tuple[int, ...]]
     ddp_broadcast_buffers: bool
+    throughput_guard_enabled: bool
+    throughput_guard_warmup_steps: int
+    throughput_guard_window_steps: int
+    throughput_guard_max_median_step_time_s: float
+    throughput_guard_max_median_batch_wait_s: float
+    throughput_guard_bad_windows: int
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_TrainSettings":
@@ -216,6 +222,28 @@ class _TrainSettings:
             not ddp_bucket_cap_list or any(value <= 0 for value in ddp_bucket_cap_list)
         ):
             raise ValueError("train.ddp_bucket_cap_mb_list must contain positive values")
+        throughput_guard_enabled = bool(get(train_cfg, "throughput_guard_enabled", False))
+        throughput_guard_warmup_steps = int(get(train_cfg, "throughput_guard_warmup_steps", 100))
+        throughput_guard_window_steps = int(get(train_cfg, "throughput_guard_window_steps", 100))
+        throughput_guard_max_median_step_time_s = float(
+            get(train_cfg, "throughput_guard_max_median_step_time_s", 2.5)
+        )
+        throughput_guard_max_median_batch_wait_s = float(
+            get(train_cfg, "throughput_guard_max_median_batch_wait_s", 0.15)
+        )
+        throughput_guard_bad_windows = int(get(train_cfg, "throughput_guard_bad_windows", 2))
+        positive_guard_values = {
+            "throughput_guard_warmup_steps": throughput_guard_warmup_steps,
+            "throughput_guard_window_steps": throughput_guard_window_steps,
+            "throughput_guard_max_median_step_time_s": throughput_guard_max_median_step_time_s,
+            "throughput_guard_max_median_batch_wait_s": throughput_guard_max_median_batch_wait_s,
+            "throughput_guard_bad_windows": throughput_guard_bad_windows,
+        }
+        invalid_guard_values = [name for name, value in positive_guard_values.items() if value <= 0]
+        if invalid_guard_values:
+            raise ValueError(
+                "Throughput guard settings must be positive: " + ", ".join(invalid_guard_values)
+            )
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -254,6 +282,12 @@ class _TrainSettings:
             ),
             ddp_bucket_cap_mb_list=ddp_bucket_cap_list,
             ddp_broadcast_buffers=bool(get(train_cfg, "ddp_broadcast_buffers", True)),
+            throughput_guard_enabled=throughput_guard_enabled,
+            throughput_guard_warmup_steps=throughput_guard_warmup_steps,
+            throughput_guard_window_steps=throughput_guard_window_steps,
+            throughput_guard_max_median_step_time_s=throughput_guard_max_median_step_time_s,
+            throughput_guard_max_median_batch_wait_s=throughput_guard_max_median_batch_wait_s,
+            throughput_guard_bad_windows=throughput_guard_bad_windows,
         )
 
 
@@ -418,6 +452,82 @@ class _MicroStepStats:
     skip_count_totals: Dict[str, float] = field(default_factory=dict)
 
 
+class _ThroughputGuard:
+    """Launch-relative DDP throughput probation with an emergency-stop path."""
+
+    def __init__(self, settings: _TrainSettings, *, rank: int, world_size: int) -> None:
+        self.enabled = settings.throughput_guard_enabled
+        self.warmup_steps = settings.throughput_guard_warmup_steps
+        self.window_steps = settings.throughput_guard_window_steps
+        self.max_median_step_time_s = settings.throughput_guard_max_median_step_time_s
+        self.max_median_batch_wait_s = settings.throughput_guard_max_median_batch_wait_s
+        self.bad_window_limit = settings.throughput_guard_bad_windows
+        self.rank = rank
+        self.world_size = world_size
+        self.steps_seen = 0
+        self.bad_windows = 0
+        self._step_times: list[float] = []
+        self._batch_waits: list[float] = []
+
+    def observe(
+        self,
+        *,
+        step: int,
+        step_time_s: float,
+        batch_wait_s: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Record one completed step and return a shared failure payload if needed."""
+        if not self.enabled:
+            return None
+        self.steps_seen += 1
+        if self.steps_seen <= self.warmup_steps:
+            return None
+        self._step_times.append(float(step_time_s))
+        self._batch_waits.append(float(batch_wait_s))
+        if len(self._step_times) < self.window_steps:
+            return None
+
+        local = {
+            "rank": self.rank,
+            "median_step_time_s": float(statistics.median(self._step_times)),
+            "median_batch_wait_s": float(statistics.median(self._batch_waits)),
+        }
+        self._step_times.clear()
+        self._batch_waits.clear()
+        rank_metrics: list[Dict[str, Any]]
+        if self.world_size > 1:
+            if not dist_lib.is_initialized():
+                raise RuntimeError("Throughput guard requires an initialized process group for DDP")
+            gathered: list[Optional[Dict[str, Any]]] = [None for _ in range(self.world_size)]
+            torch.distributed.all_gather_object(gathered, local)
+            rank_metrics = [item for item in gathered if isinstance(item, dict)]
+        else:
+            rank_metrics = [local]
+        max_step_median = max(item["median_step_time_s"] for item in rank_metrics)
+        max_batch_wait_median = max(item["median_batch_wait_s"] for item in rank_metrics)
+        failed = (
+            max_step_median > self.max_median_step_time_s
+            or max_batch_wait_median > self.max_median_batch_wait_s
+        )
+        self.bad_windows = self.bad_windows + 1 if failed else 0
+        if self.bad_windows < self.bad_window_limit:
+            return None
+        return {
+            "event": "throughput_guard_failure",
+            "launch_steps_seen": self.steps_seen,
+            "global_step": int(step),
+            "bad_windows": self.bad_windows,
+            "bad_window_limit": self.bad_window_limit,
+            "thresholds": {
+                "max_median_step_time_s": self.max_median_step_time_s,
+                "max_median_batch_wait_s": self.max_median_batch_wait_s,
+            },
+            "max_rank_median_step_time_s": float(max_step_median),
+            "max_rank_median_batch_wait_s": float(max_batch_wait_median),
+            "rank_metrics": sorted(rank_metrics, key=lambda item: int(item["rank"])),
+        }
+
+
 def training_loop(
     *,
     model: nn.Module,
@@ -514,6 +624,11 @@ class _TrainLoop:
         self.gpu_health = GpuHealthWatchdog(
             device=self.device,
             out_dir=self.settings.out_dir,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        self.throughput_guard = _ThroughputGuard(
+            self.settings,
             rank=self.rank,
             world_size=self.world_size,
         )
@@ -1119,6 +1234,47 @@ class _TrainLoop:
         if failures:
             self._handle_health_failure(step, failures)
 
+    def _handle_throughput_failure(self, step: int, diagnostics: Dict[str, Any]) -> None:
+        metrics = {"throughput_guard": diagnostics}
+        summary_path = os.path.join(
+            self.settings.out_dir,
+            "throughput_guard",
+            f"throughput_guard_failure_step{step:09d}.json",
+        )
+        checkpoint_path: Optional[str] = None
+        if self.is_rank0:
+            checkpoint_path, ckpt = self._save_checkpoint(step, metrics=metrics)
+            self.final_ckpt = ckpt
+            os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+            tmp_path = summary_path + f".tmp.{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "step": step,
+                        "checkpoint_path": checkpoint_path,
+                        **diagnostics,
+                    },
+                    handle,
+                    indent=2,
+                    sort_keys=True,
+                )
+                handle.write("\n")
+            os.replace(tmp_path, summary_path)
+            print(
+                "[throughput-guard] FAIL "
+                f"step={step} launch_steps={diagnostics['launch_steps_seen']} "
+                f"max_step_median={diagnostics['max_rank_median_step_time_s']:.3f}s "
+                f"max_batch_wait_median={diagnostics['max_rank_median_batch_wait_s']:.3f}s",
+                flush=True,
+            )
+            print(
+                f"[throughput-guard] checkpoint={checkpoint_path} summary={summary_path}",
+                flush=True,
+            )
+        if dist_lib.is_initialized():
+            dist_lib.barrier()
+        raise SystemExit(86)
+
     # ------------------------------------------------------------------ eval
 
     def _maybe_run_eval(self, step: int) -> None:
@@ -1262,6 +1418,14 @@ class _TrainLoop:
 
         self._profile_sync()
         step_time_s = time.perf_counter() - step_start
+
+        throughput_failure = self.throughput_guard.observe(
+            step=step,
+            step_time_s=step_time_s,
+            batch_wait_s=stats.batch_wait_s,
+        )
+        if throughput_failure is not None:
+            self._handle_throughput_failure(step, throughput_failure)
 
         if collect_rank_timing:
             self._emit_rank_timing(step, stats, step_time_s)
