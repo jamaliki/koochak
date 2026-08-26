@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 import torch
 
-from koochak.loop import _TrainSettings, _ThroughputGuard, training_loop
+from koochak.loop import (
+    _StartupProgressWatchdog,
+    _TrainSettings,
+    _ThroughputGuard,
+    training_loop,
+)
 from koochak.storage import checkpoint as checkpoint_lib
 
 
@@ -48,6 +54,77 @@ def test_guard_is_disabled_by_default():
 def test_guard_settings_must_be_positive():
     with pytest.raises(ValueError, match="must be positive"):
         _TrainSettings.from_cfg(_cfg(throughput_guard_window_steps=0))
+
+
+def test_startup_watchdog_timeout_callback_is_injectable_and_race_safe(tmp_path: Path):
+    failures = []
+    watchdog = _StartupProgressWatchdog(
+        timeout_s=300.0,
+        out_dir=str(tmp_path),
+        rank=2,
+        world_size=4,
+        timeout_callback=failures.append,
+    )
+    watchdog.arm(120_000)
+    watchdog.trigger_timeout_for_test()
+    watchdog.disarm()
+
+    assert failures == [
+        {
+            "event": "startup_progress_timeout",
+            "rank": 2,
+            "world_size": 4,
+            "timeout_s": 300.0,
+            "starting_step": 120_000,
+            "last_step": None,
+            "pid": failures[0]["pid"],
+            "timestamp": failures[0]["timestamp"],
+        }
+    ]
+
+    completed = []
+    watchdog = _StartupProgressWatchdog(
+        timeout_s=300.0,
+        out_dir=str(tmp_path),
+        rank=0,
+        world_size=1,
+        timeout_callback=completed.append,
+    )
+    watchdog.arm(10)
+    watchdog.mark_first_step_complete(10)
+    watchdog.trigger_timeout_for_test()
+    watchdog.disarm()
+    assert completed == []
+
+
+def test_startup_watchdog_timeout_must_be_non_negative():
+    with pytest.raises(ValueError, match="non-negative"):
+        _TrainSettings.from_cfg({"startup_progress_timeout_s": -1})
+
+
+def test_startup_watchdog_exits_when_diagnostic_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    watchdog = _StartupProgressWatchdog(
+        timeout_s=300.0,
+        out_dir=str(tmp_path),
+        rank=0,
+        world_size=4,
+    )
+    exits = []
+
+    def fail_to_create_summary(*_args, **_kwargs):
+        raise OSError("filesystem unavailable")
+
+    loop_module = sys.modules[_StartupProgressWatchdog.__module__]
+    monkeypatch.setattr(loop_module.faulthandler, "dump_traceback", lambda **_kwargs: None)
+    monkeypatch.setattr(loop_module.os, "makedirs", fail_to_create_summary)
+    monkeypatch.setattr(loop_module.os, "_exit", exits.append)
+
+    watchdog._default_timeout_callback({"event": "startup_progress_timeout"})
+
+    assert exits == [watchdog.exit_code]
 
 
 def test_training_loop_writes_resumable_throughput_failure_artifacts(tmp_path: Path):

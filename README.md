@@ -438,6 +438,13 @@ launch (not the resumed global step); a DDP window gathers only per-rank
 medians. On failure rank 0 writes a resumable checkpoint plus a JSON diagnostic
 under `train.out_dir/throughput_guard/`, then all ranks exit nonzero.
 
+For distributed launches that can hang before the first completed step, set
+`train.startup_progress_timeout_s` to a positive value (for example, `300`).
+The watchdog is disabled at zero, writes one rank-specific diagnostic and all
+Python thread stacks without using distributed collectives or checkpointing,
+then exits with code 87. It is armed per process launch, so resumed global
+steps do not bypass it.
+
 Minimal step_fn example:
 
 ```

@@ -12,6 +12,7 @@ This doc tracks incremental design decisions and changes from the initial design
 - Core loop
   - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. Loop returns a resume-ready checkpoint dict.
   - The optional launch-throughput guard samples launch-relative windows, aggregates per-rank medians once per window, and writes a resumable diagnostic checkpoint before a coordinated nonzero exit when configured thresholds fail.
+  - The optional startup progress watchdog detects pre-first-step hangs without collectives, writes rank-specific diagnostics and Python stacks, and exits with code 87; it is disabled when `train.startup_progress_timeout_s` is zero.
   - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner plus warnings when gradients become non-finite.
 
 - Hooks

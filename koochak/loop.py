@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import faulthandler
 import json
 import math
 import os
 import statistics
+import sys
+import threading
 import time
 import warnings
 from contextlib import nullcontext
@@ -203,6 +206,7 @@ class _TrainSettings:
     throughput_guard_max_median_step_time_s: float
     throughput_guard_max_median_batch_wait_s: float
     throughput_guard_bad_windows: int
+    startup_progress_timeout_s: float
 
     @classmethod
     def from_cfg(cls, train_cfg: Any) -> "_TrainSettings":
@@ -244,6 +248,9 @@ class _TrainSettings:
             raise ValueError(
                 "Throughput guard settings must be positive: " + ", ".join(invalid_guard_values)
             )
+        startup_progress_timeout_s = float(get(train_cfg, "startup_progress_timeout_s", 0.0))
+        if startup_progress_timeout_s < 0.0:
+            raise ValueError("train.startup_progress_timeout_s must be non-negative")
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -288,6 +295,7 @@ class _TrainSettings:
             throughput_guard_max_median_step_time_s=throughput_guard_max_median_step_time_s,
             throughput_guard_max_median_batch_wait_s=throughput_guard_max_median_batch_wait_s,
             throughput_guard_bad_windows=throughput_guard_bad_windows,
+            startup_progress_timeout_s=startup_progress_timeout_s,
         )
 
 
@@ -528,6 +536,130 @@ class _ThroughputGuard:
         }
 
 
+class _StartupProgressWatchdog:
+    """Break a pre-first-step hang without entering a potentially stuck collective."""
+
+    exit_code = 87
+
+    def __init__(
+        self,
+        *,
+        timeout_s: float,
+        out_dir: str,
+        rank: int,
+        world_size: int,
+        timeout_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        self.timeout_s = float(timeout_s)
+        self.out_dir = out_dir
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        self._timeout_callback = timeout_callback or self._default_timeout_callback
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._armed = False
+        self._timed_out = False
+        self._starting_step: Optional[int] = None
+        self._last_step: Optional[int] = None
+        self._started_at: Optional[float] = None
+
+    def arm(self, starting_step: int) -> None:
+        if self.timeout_s <= 0.0:
+            return
+        with self._lock:
+            if self._armed:
+                raise RuntimeError("startup progress watchdog is already armed")
+            self._armed = True
+            self._timed_out = False
+            self._starting_step = int(starting_step)
+            self._last_step = None
+            self._started_at = time.time()
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._wait_for_timeout,
+                name="koochak-startup-watchdog",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def mark_first_step_complete(self, step: int) -> None:
+        with self._lock:
+            if not self._armed or self._timed_out:
+                return
+            self._last_step = int(step)
+            self._armed = False
+            self._stop.set()
+
+    def disarm(self) -> None:
+        with self._lock:
+            self._armed = False
+            self._stop.set()
+            thread = self._thread
+            self._thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+
+    def trigger_timeout_for_test(self) -> None:
+        """Synchronously exercise the timeout path without waiting or exiting."""
+        self._check_timeout()
+
+    def _wait_for_timeout(self) -> None:
+        if self._stop.wait(self.timeout_s):
+            return
+        self._check_timeout()
+
+    def _check_timeout(self) -> None:
+        with self._lock:
+            if not self._armed or self._timed_out:
+                return
+            self._timed_out = True
+            payload = self._diagnostic_payload()
+        self._timeout_callback(payload)
+
+    def _diagnostic_payload(self) -> Dict[str, Any]:
+        return {
+            "event": "startup_progress_timeout",
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "timeout_s": self.timeout_s,
+            "starting_step": self._starting_step,
+            "last_step": self._last_step,
+            "pid": os.getpid(),
+            "timestamp": time.time(),
+        }
+
+    def _default_timeout_callback(self, payload: Dict[str, Any]) -> None:
+        summary_dir = os.path.join(self.out_dir, "throughput_guard")
+        summary_path = os.path.join(
+            summary_dir,
+            f"startup_progress_timeout_rank{self.rank}.json",
+        )
+        print(
+            f"[startup-watchdog] FAIL rank={self.rank} step={self._starting_step} "
+            f"timeout={self.timeout_s:.1f}s summary={summary_path}",
+            file=sys.stderr,
+            flush=True,
+        )
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        sys.stderr.flush()
+        try:
+            os.makedirs(summary_dir, exist_ok=True)
+            tmp_path = summary_path + f".tmp.{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(tmp_path, summary_path)
+        except BaseException as exc:
+            print(
+                f"[startup-watchdog] failed to write {summary_path}: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            os._exit(self.exit_code)
+
+
 def training_loop(
     *,
     model: nn.Module,
@@ -629,6 +761,12 @@ class _TrainLoop:
         )
         self.throughput_guard = _ThroughputGuard(
             self.settings,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        self.startup_watchdog = _StartupProgressWatchdog(
+            timeout_s=self.settings.startup_progress_timeout_s,
+            out_dir=self.settings.out_dir,
             rank=self.rank,
             world_size=self.world_size,
         )
@@ -1325,11 +1463,17 @@ class _TrainLoop:
             start_step = self._resume_from_checkpoint()
             it = self._make_iterator()
             train_ended_normally = False
-            for step in range(start_step, self.settings.max_steps):
-                if not self._run_step(step, it):
-                    break
-            else:
-                train_ended_normally = True
+            self.startup_watchdog.arm(start_step)
+            try:
+                for step in range(start_step, self.settings.max_steps):
+                    completed = self._run_step(step, it)
+                    self.startup_watchdog.mark_first_step_complete(step)
+                    if not completed:
+                        break
+                else:
+                    train_ended_normally = True
+            finally:
+                self.startup_watchdog.disarm()
             if train_ended_normally or start_step >= self.settings.max_steps:
                 _emit(self.hooks, "on_train_end", self.ctx)
         except Exception as exc:
