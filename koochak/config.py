@@ -93,6 +93,13 @@ class TrainConfig:
     prefetch_threaded: bool = False
     autocast_in_step_fn: bool = False
     scalarize_loss_every_step: bool = True
+    # Optional launch-throughput probation.  Disabled unless explicitly enabled.
+    throughput_guard_enabled: bool = False
+    throughput_guard_warmup_steps: int = 100
+    throughput_guard_window_steps: int = 100
+    throughput_guard_max_median_step_time_s: float = 2.5
+    throughput_guard_max_median_batch_wait_s: float = 0.15
+    throughput_guard_bad_windows: int = 2
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)
     ema_enabled: Optional[bool] = None

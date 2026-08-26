@@ -430,6 +430,14 @@ training_loop(
 - Non-finite gradients are zeroed and skipped with a rank-0 warning instead of crashing the run.
 - Returns a plain checkpoint dict sufficient to resume.
 
+For cluster runs, an optional launch-throughput guard can stop a misconfigured
+launch before it burns a long allocation. Set `train.throughput_guard_enabled`
+and its positive `warmup_steps`, `window_steps`, median step-time, median
+batch-wait, and `bad_windows` thresholds. Windows are counted from process
+launch (not the resumed global step); a DDP window gathers only per-rank
+medians. On failure rank 0 writes a resumable checkpoint plus a JSON diagnostic
+under `train.out_dir/throughput_guard/`, then all ranks exit nonzero.
+
 Minimal step_fn example:
 
 ```
