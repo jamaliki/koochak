@@ -31,8 +31,9 @@ def _prepared(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("status_field", ["returncode", "exit_code"])
 def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_field: str
 ) -> None:
     prepared = _prepared(tmp_path)
 
@@ -51,7 +52,7 @@ def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
 
         async def run(self, command, *, stdin, timeout):
             self.staged.append((command, stdin, timeout))
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(**{status_field: 0}, stdout="", stderr="")
 
         async def submit_slurm(self, job):
             self.job = job
