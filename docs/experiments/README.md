@@ -19,6 +19,11 @@ estimates, or confidence intervals.
 
 ## Current synthesis and cross-campaign entries
 
+The durable end-to-end Atom4 plus residue-latent record is maintained in the
+[experimental-ledger directory](../experimental-ledger/README.md), including
+the exact codec objectives, architecture contract, continuation tables, and
+provenance for completed and incomplete stages.
+
 | Entry | Status | Main conclusion |
 | --- | --- | --- |
 | [Canonical ESMFold designability rescore](esmfold_designability_rescore_20260824.md) | Complete | Corrected pLDDT changes model and sampler conclusions; mature Kaveh is often MPNN-saveable but still trails released Pallatom in raw co-design |
