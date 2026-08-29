@@ -1,0 +1,72 @@
+{
+  "campaign": "atom4-latent-filtered-recycling-best2-400k",
+  "source_commit": "a5728e6d5b578b4f61df409a09faae642c521180",
+  "checkpoint_step": 100000,
+  "remote_root": "/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/atom4-latent-filtered-recycling-best2-400k/a5728e6d5b578b4f61df409a09faae642c521180",
+  "filters": {
+    "loop_content_max": 0.5,
+    "loop_length_max": 15,
+    "packing_density_min": 0.3
+  },
+  "sampling": {
+    "lengths": [64, 96, 128],
+    "samples_per_length": 32,
+    "schedule": "constant_k3",
+    "sample_count_per_arm": 96
+  },
+  "arms": [
+    {
+      "arm": "r1_z4_b0p03_c0p25",
+      "latent_dim": 4,
+      "designable_count": 40,
+      "designability_rate": 0.4166666666666667,
+      "mean_plddt": 76.73335406602274,
+      "ca_rmsd_mean_a": 1.7607706721316374,
+      "backbone_rmsd_mean_a": 1.745830871448451,
+      "all_atom_rmsd_symmetry_mean_a": 2.1806012738638194,
+      "by_length": {
+        "64": {"designable_count": 20, "designability_rate": 0.625, "mean_plddt": 80.10053963146893, "ca_rmsd_mean_a": 1.398450477444533, "all_atom_rmsd_symmetry_mean_a": 1.8980816663935165},
+        "96": {"designable_count": 6, "designability_rate": 0.1875, "mean_plddt": 71.58678420208695, "ca_rmsd_mean_a": 1.7986990555730518, "all_atom_rmsd_symmetry_mean_a": 2.175874493749852},
+        "128": {"designable_count": 14, "designability_rate": 0.4375, "mean_plddt": 78.51273836451237, "ca_rmsd_mean_a": 2.0851624833773275, "all_atom_rmsd_symmetry_mean_a": 2.46784766144809}
+      }
+    },
+    {
+      "arm": "r2_z2_b0p03_c0",
+      "latent_dim": 2,
+      "designable_count": 34,
+      "designability_rate": 0.3541666666666667,
+      "mean_plddt": 73.72817718080661,
+      "ca_rmsd_mean_a": 2.908144497493813,
+      "backbone_rmsd_mean_a": 2.894787633270891,
+      "all_atom_rmsd_symmetry_mean_a": 3.455172315981873,
+      "by_length": {
+        "64": {"designable_count": 14, "designability_rate": 0.4375, "mean_plddt": 76.57522817276391, "ca_rmsd_mean_a": 2.479498632850672, "all_atom_rmsd_symmetry_mean_a": 3.043232191515286},
+        "96": {"designable_count": 9, "designability_rate": 0.28125, "mean_plddt": 68.61597919475139, "ca_rmsd_mean_a": 3.190016128842762, "all_atom_rmsd_symmetry_mean_a": 3.703918308423489},
+        "128": {"designable_count": 11, "designability_rate": 0.34375, "mean_plddt": 75.99332417490452, "ca_rmsd_mean_a": 3.0549187307880032, "all_atom_rmsd_symmetry_mean_a": 3.618366448006844}
+      }
+    }
+  ],
+  "esmfold_panel": {
+    "step": 100000,
+    "sample_count": 192,
+    "designable_count": 74,
+    "designability_rate": 0.3854166666666667,
+    "mean_plddt": 75.23076562341468,
+    "mean_ca_rmsd_a": 2.334457584812725,
+    "rmsd_lt_2_rate": 0.6770833333333334,
+    "plddt_gt_80_rate": 0.4322916666666667
+  },
+  "quality_control": {
+    "all_atom_ca_regression_max_abs_error_a": 0.0000930934726341981,
+    "all_atom_symmetry_correction": "ASP/GLU/PHE/TYR terminal naming ambiguities corrected",
+    "primary_endpoint": "CA RMSD < 2 A AND mean ESMFold pLDDT > 80"
+  },
+  "maturity": {
+    "training": "complete at 100000 for both arms; 400000 not yet produced",
+    "sampling": "complete at 100000 for both arms",
+    "sample_analysis": "complete at 100000 for both arms",
+    "esmfold": "complete at 100000 for both arms",
+    "all_atom_rmsd": "complete at 100000 for both arms",
+    "higher_checkpoints": "launch manifests exist, but no verified checkpoint or downstream output"
+  }
+}

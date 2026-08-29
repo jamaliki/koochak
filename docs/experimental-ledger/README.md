@@ -8,6 +8,7 @@ than silently treating them as zeroes.
 ## Entries
 
 - [Atom4 plus latent codec and diffusion campaign](atom4-latent-codec-and-diffusion.md)
+- [Filtered latent recycling-best2 at 100k](filtered-recycling-best2-step100k.md)
 
 The older, broad ESMFold rescore remains the canonical machine-readable
 inventory for historical panels:
