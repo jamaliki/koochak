@@ -1,0 +1,34 @@
+{
+  "recorded_utc": "2026-08-29T09:00:00Z",
+  "endpoint": "ca_kabsch_rmsd_A_lt_2_and_mean_plddt_gt_80",
+  "campaigns": {
+    "filtered_recycling_best2": {
+      "dataset": "filtered",
+      "architecture": "recycling",
+      "sampling_variant": "constant_k3",
+      "arms": ["r1_z4_b0p03_c0p25", "r2_z2_b0p03_c0"],
+      "aggregate": [
+        {"step": 100000, "n": 192, "designable": 74, "designability": 0.3854166667, "mean_plddt": 75.2307656234, "mean_ca_rmsd_A": 2.3344575848},
+        {"step": 150000, "n": 192, "designable": 56, "designability": 0.2916666667, "mean_plddt": 70.0283722577, "mean_ca_rmsd_A": 2.9565429453},
+        {"step": 200000, "n": 192, "designable": 44, "designability": 0.2291666667, "mean_plddt": 66.1107847734, "mean_ca_rmsd_A": 3.9587275097},
+        {"step": 250000, "n": 192, "designable": 43, "designability": 0.2239583333, "mean_plddt": 64.7052160510, "mean_ca_rmsd_A": 3.7542578112}
+      ]
+    },
+    "selected4_500k_unfiltered": {
+      "dataset": "unfiltered",
+      "architecture": "selected4_continuation",
+      "sampling_variant": "constant_k3",
+      "arms": ["r1_z3_b0p01_c0p125", "r1_z4_b0p03_c0p25", "r0_z3_b0p3_c0p125", "r2_z2_b0p1_c0p125"],
+      "aggregate": [
+        {"step": 250000, "n": 288, "designable": 117, "designability": 0.40625, "mean_plddt": 75.92, "mean_ca_rmsd_A": 2.26},
+        {"step": 300000, "n": 384, "designable": 171, "designability": 0.4453125, "mean_plddt": 77.7438010699, "mean_ca_rmsd_A": 2.1742973676},
+        {"step": 350000, "n": 384, "designable": 208, "designability": 0.5416666667, "mean_plddt": 79.3112848046, "mean_ca_rmsd_A": 2.0001814432},
+        {"step": 400000, "n": 384, "designable": 195, "designability": 0.5078125, "mean_plddt": 78.6697801167, "mean_ca_rmsd_A": 1.7489486229}
+      ]
+    }
+  },
+  "notes": [
+    "Recycling aggregate mean pLDDT and CA RMSD at 200k are rounded in the source snapshot; per-arm/per-length values remain in the ledger entry.",
+    "Selected-4 values are ESMFold-only; no all-atom summaries were present."
+  ]
+}
