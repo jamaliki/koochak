@@ -82,13 +82,25 @@ The 100k arm-level records are complete:
 - ESMFold: 192 successful predictions and per-cell summaries;
 - all-atom RMSD: 192 rows, summary, and report.
 
-The 150k-400k directories currently contain launch manifests but no verified
+The 150k checkpoint has since completed for both arms, but its descendants have
+not yet run:
+
+| Checkpoint | Training | Sampling | Sample analysis | ESMFold | All-atom RMSD |
+| ---: | --- | --- | --- | --- | --- |
+| 150k | **2/2 checkpoints** | 0/2 | 0/2 | 0 panels | 0 summaries |
+
+The 200k-400k directories currently contain launch manifests but no verified
 training checkpoints for this campaign. They must not be reported as completed
 results. The separate filtered all-16 400k campaign is also manifest-only at
 the inspected 400k milestone; it has no verified checkpoint, sample panel,
-ESMFold summary, or all-atom summary. No new repair submission was made in
-this pass because there was no active latent job and no safely identifiable
-failed downstream task with a durable producer checkpoint.
+ESMFold summary, or all-atom summary.
+
+The repair submission was not completed in the 2026-08-29 monitoring pass:
+Pazuzu reported `authentication_required` because the SSH provider was waiting
+on browser reauthorisation. No uncertain submission was retried. The next
+monitoring pass should resubmit the existing committed workflow using its
+stable task IDs once Tokyo authentication is restored, then analyse the 150k
+panel before claiming a 150k result.
 
 ## Next decision
 
