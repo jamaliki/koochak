@@ -38,6 +38,7 @@ provenance for completed and incomplete stages.
 | [Latent recovery monitor 2026-08-30 07:22](latent_recovery_monitor_20260830_0722.md) | Active | Queue is healthy; an unrelated active 4-GPU run is ahead of latent jobs, with no active latent failures |
 | [Latent recovery monitor 2026-08-30 08:23](latent_recovery_monitor_20260830_0823.md) | Active | The unrelated 4-GPU run is still progressing; no new latent endpoint or failure landed |
 | [New latent sample analyses 2026-08-30](latent_analysis_new_panels_20260830.md) | Complete | Nine new durable panels show sane geometry, selected-4 arm collapse differences, and stronger latent utilization in selected-16 z8 arms |
+| [ESMFold panel summaries 2026-08-30](latent_esmfold_panel_summary_20260830.md) | Complete snapshot | 101 durable panels show selected-4 r1_z4 reaching 46.4% at 350k; filtered results remain arm- and checkpoint-dependent |
 
 ## Delayed side-chain diffusion
 
