@@ -33,6 +33,7 @@ provenance for completed and incomplete stages.
 | [Recycling, sampling, and geometry lessons](recycling_sampling_and_geometry_lessons_20260825.md) | Mixed | Records the quadrature alignment bug, oxygen clash attribution, AF2 clip30 result, steric status, and length-bucket evidence gap |
 | [Hierarchy recycling throughput probe](hierarchy_recycling_throughput.md) | Complete engineering screen | All-stage recycling costs about 12% p50; intermediate supervision adds a smaller cost and little memory |
 | [Fixed-sampler feature architecture screen](fixed_sampler_feature_architecture_screen.md) | Complete | Compares feature architectures under one controlled sampler |
+| [Filtered all-16 ESMFold recovery v2](filtered_all16_esmfold_recovery_v2_20260830.md) | Partial endpoint | Corrected replay has 18 completed panels; early pLDDT is modest and strongly length-dependent |
 
 ## Delayed side-chain diffusion
 
