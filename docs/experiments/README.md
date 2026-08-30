@@ -36,6 +36,7 @@ provenance for completed and incomplete stages.
 | [Filtered all-16 ESMFold recovery v2](filtered_all16_esmfold_recovery_v2_20260830.md) | Partial endpoint | Corrected replay has 18 completed panels; early pLDDT is modest and strongly length-dependent |
 | [Latent recovery monitor 2026-08-30 06:22](latent_recovery_monitor_20260830_0622.md) | Active | b256 replacement training has verified 250k and 50k checkpoints; no active workflow failures |
 | [Latent recovery monitor 2026-08-30 07:22](latent_recovery_monitor_20260830_0722.md) | Active | Queue is healthy; an unrelated active 4-GPU run is ahead of latent jobs, with no active latent failures |
+| [Latent recovery monitor 2026-08-30 08:23](latent_recovery_monitor_20260830_0823.md) | Active | The unrelated 4-GPU run is still progressing; no new latent endpoint or failure landed |
 
 ## Delayed side-chain diffusion
 
