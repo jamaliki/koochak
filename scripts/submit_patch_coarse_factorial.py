@@ -60,9 +60,12 @@ VARIANTS = (
     ("flat_before_attention_pair_transition", "flat_linear", "before_attention", True),
 )
 LENGTHS = (128, 256)
+TRAIN_BATCH_SIZE = 256
+TRAIN_NUM_WORKERS = 8
+TRAIN_GRAD_ACCUM = 1
 
 RESOURCES = {
-    "train": {"nodes": 1, "gpus_per_node": 8, "cpus_per_node": 112, "memory_gb_per_node": 512, "time_limit_seconds": 259_200},
+    "train": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 240, "time_limit_seconds": 259_200},
     "sample": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 128, "time_limit_seconds": 21_600},
     "esmfold": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 8, "memory_gb_per_node": 128, "time_limit_seconds": 43_200},
     "analysis": {"nodes": 1, "gpus_per_node": 0, "cpus_per_node": 8, "memory_gb_per_node": 32, "time_limit_seconds": 14_400},
@@ -86,7 +89,7 @@ def _tag(step: int) -> str:
 
 def _patches(
     *, variant: tuple[str, str, str, bool], length: int, run_dir: Path, workflow: str,
-    batch_size: int, grad_accum: int, max_steps: int = 500_000,
+    max_steps: int = 500_000,
 ) -> list[ConfigPatch]:
     name, patchify, pair_position, pair_transition = variant
     patch_capacity = (length + 3) // 4
@@ -98,8 +101,10 @@ def _patches(
         ConfigPatch("data.max_length", length),
         ConfigPatch("data.length_buckets", [length]),
         ConfigPatch("data.patch_capacities", [patch_capacity]),
-        ConfigPatch("data.batch_size", batch_size),
-        ConfigPatch("train.grad_accum", grad_accum),
+        ConfigPatch("data.batch_size", TRAIN_BATCH_SIZE),
+        ConfigPatch("data.num_workers", TRAIN_NUM_WORKERS),
+        ConfigPatch("train.grad_accum", TRAIN_GRAD_ACCUM),
+        ConfigPatch("train.ddp", False),
         ConfigPatch("train.max_steps", max_steps),
         ConfigPatch("train.ckpt_every", 50_000),
         ConfigPatch("train.keep_last_k", 12),
@@ -186,16 +191,14 @@ def build_workflow(code_commit: str, lengths: tuple[int, ...]) -> PreparedWorkfl
             train_id = f"train-{name}-L{length}"
             train_ids[(name, length)] = train_id
             train_dir = output_root / "train" / f"L{length}" / name
-            batch_size, grad_accum = (32, 1) if length == 128 else (8, 4)
             patches = _patches(
                 variant=variant, length=length, run_dir=train_dir,
-                workflow=workflow, batch_size=batch_size, grad_accum=grad_accum,
+                workflow=workflow,
             )
             train = prepare_run(
                 name=f"hk-factorial-train-{name}-L{length}-{short}",
                 profile=profiles["gpu"],
                 python_args=[
-                    "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=8",
                     "-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto",
                 ],
                 cwd=str(remote_cwd), run_dir=str(train_dir), base_config=BASE_CONFIG,
