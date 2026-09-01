@@ -24,7 +24,7 @@ from koochak.jobs import (
 )
 from koochak.storage import checkpoint
 
-SCRUFFY_COMMIT = "fe568317a947a71d67eb74aed51d1f28ae83928c"
+SCRUFFY_COMMIT = "07fe2a660bf9ab2da0e956ee43fc3572d51d5cd1"
 WORKFLOW_ID = "koochak-scruffy-acceptance"
 PROJECT_ID = "koochak-acceptance"
 TRAIN_ARTIFACT_ID = "checkpoint/step000000003.pt"
