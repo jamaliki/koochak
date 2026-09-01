@@ -93,6 +93,9 @@ class TrainConfig:
     prefetch_threaded: bool = False
     autocast_in_step_fn: bool = False
     scalarize_loss_every_step: bool = True
+    resume: str = "none"
+    evacuation_enabled: bool = False
+    evacuation_signal: str = "USR1"
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)
     ema_enabled: Optional[bool] = None

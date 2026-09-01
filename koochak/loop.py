@@ -23,13 +23,14 @@ from .core.precision import Scaler as make_scaler, autocast_context, prepare_com
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
 from .health.gpu import GpuHealthWatchdog, summarize_failures_for_stdout
+from .interruption import EVACUATION_EXIT_CODE, EvacuationController
 from .storage import checkpoint as checkpoint_lib
 from .utils import config as config_lib
 from .utils import flags as flags_lib
 from .utils.device import ensure_process_device, get_device, get_lr
 from .utils.ema import EMA
 from .utils.paths import canonical_dir
-from .utils.seed import get_rng_state
+from .utils.seed import get_rng_state, set_rng_state
 
 # Type aliases per design
 StepFn = Callable[[nn.Module, Any, Mapping[str, Any]], Dict[str, Any]]
@@ -432,6 +433,8 @@ def training_loop(
     eval_fn: Optional[EvalFn] = None,
     prepare_batch_fn: Optional[BatchPrepareFn] = None,
     hooks: Optional[Dict[str, list[Callable]]] = None,
+    resume: Optional[str] = None,
+    evacuation: Optional[EvacuationController | bool] = None,
 ) -> Dict[str, Any]:
     """Runs training until `train.max_steps` or dataset exhaustion.
 
@@ -450,6 +453,8 @@ def training_loop(
         eval_fn=eval_fn,
         prepare_batch_fn=prepare_batch_fn,
         hooks=hooks,
+        resume=resume,
+        evacuation=evacuation,
     )
     return loop.run()
 
@@ -472,6 +477,8 @@ class _TrainLoop:
         eval_fn: Optional[EvalFn],
         prepare_batch_fn: Optional[BatchPrepareFn],
         hooks: Optional[Dict[str, list[Callable]]],
+        resume: Optional[str],
+        evacuation: Optional[EvacuationController | bool],
     ) -> None:
         train_config, config_json = _resolve_train_config(train_cfg, config_json)
         self.train_cfg = train_config
@@ -486,6 +493,22 @@ class _TrainLoop:
         self.prepare_batch_fn = prepare_batch_fn
         self.hooks = hooks
         self.checkpoint_dict = checkpoint_dict
+        self.resume_mode = str(
+            resume if resume is not None else config_lib.get(train_config, "resume", "none")
+        ).lower()
+        if self.resume_mode not in {"none", "auto"}:
+            raise ValueError("resume must be 'none' or 'auto'")
+        if evacuation is None:
+            self.evacuation = EvacuationController(
+                bool(config_lib.get(train_config, "evacuation_enabled", False)),
+                signal_name=config_lib.get(train_config, "evacuation_signal", "USR1"),
+            )
+        elif isinstance(evacuation, bool):
+            self.evacuation = EvacuationController(evacuation)
+        else:
+            self.evacuation = evacuation
+        self.evacuation_requested = False
+        self._gather_checkpoint_rng = False
 
         self.device = ensure_process_device(get_device(train_config))
         model.to(self.device)
@@ -507,6 +530,7 @@ class _TrainLoop:
             "config_json": self.cfg_json,
             "train_cfg": train_config,
             "model": self.model,
+            "evacuation_requested": False,
         }
         self.ema: Optional[EMA] = None
         self.ema_dual: list[EMA] = []
@@ -663,7 +687,6 @@ class _TrainLoop:
         ckpt = self.checkpoint_dict
         if not (ckpt and isinstance(ckpt, dict)):
             return 0
-
         sd = ckpt.get("model")
         if sd is not None:
             matched = checkpoint_lib.match_state_dict_to_model(self.model, sd)
@@ -701,6 +724,17 @@ class _TrainLoop:
 
         self._restore_ema(ckpt.get("ema"), ckpt.get("ema_dual"))
 
+        rng = ckpt.get("rng")
+        if isinstance(rng, Mapping) and "per_rank" in rng:
+            states = rng.get("per_rank")
+            if isinstance(states, Sequence) and self.rank < len(states):
+                rng = states[self.rank]
+        if isinstance(rng, Mapping):
+            try:
+                set_rng_state(dict(rng))
+            except (RuntimeError, TypeError, ValueError, KeyError) as exc:
+                warnings.warn(f"Failed to restore RNG state from checkpoint: {exc}", RuntimeWarning)
+
         try:
             if "next_step" in ckpt:
                 return int(ckpt["next_step"])
@@ -714,6 +748,13 @@ class _TrainLoop:
             return saved_step if saved_step == saved_max_steps else saved_step + 1
         except (AttributeError, TypeError, ValueError):
             return 0
+
+    def _load_auto_resume(self) -> None:
+        if self.checkpoint_dict is not None or self.resume_mode != "auto":
+            return
+        path = checkpoint_lib.highest_valid_published(self.settings.out_dir)
+        if path is not None:
+            self.checkpoint_dict = checkpoint_lib.load(path)
 
     def _restore_one_ema(
         self,
@@ -814,7 +855,16 @@ class _TrainLoop:
     ) -> Dict[str, Any]:
         model_to_save = self._module_for_state()
         try:
-            rng_record = get_rng_state()
+            rng_record: Any = get_rng_state()
+            if (
+                self._gather_checkpoint_rng
+                and torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                and self.world_size > 1
+            ):
+                gathered: list[Any] = [None for _ in range(self.world_size)]
+                torch.distributed.all_gather_object(gathered, rng_record)
+                rng_record = {"per_rank": gathered}
         except RuntimeError:
             rng_record = None
         ckpt: Dict[str, Any] = {
@@ -1174,6 +1224,7 @@ class _TrainLoop:
     def run(self) -> Dict[str, Any]:
         it: Iterator[Any] | None = None
         try:
+            self.evacuation.install()
             self._shard_datasets()
             _emit(self.hooks, "on_train_start", self.ctx, suppress_exceptions=False)
             self._apply_compile()
@@ -1186,27 +1237,53 @@ class _TrainLoop:
                     f"trainable: {counts['trainable']:,} | frozen: {counts['frozen']:,}"
                 )
 
+            self._load_auto_resume()
             start_step = self._resume_from_checkpoint()
             next_step = start_step
             it = self._make_iterator()
+            interrupted = False
             for step in range(start_step, self.settings.max_steps):
                 if not self._run_step(step, it):
                     break
                 next_step = step + 1
+                if self.evacuation_requested:
+                    interrupted = True
+                    break
+
+            if not interrupted:
+                interrupted = self.evacuation.reconcile()
+                self.evacuation_requested = interrupted
+                self.ctx["evacuation_requested"] = interrupted
 
             # A terminal checkpoint is a completed-update cursor, unlike a
             # periodic checkpoint whose step is the zero-based update index.
             # Persist it before announcing completion so downstream consumers
             # can immediately resolve the final immutable artifact.
+            self._gather_checkpoint_rng = True
             if self.is_rank0:
                 _, self.final_ckpt = self._save_checkpoint(next_step, next_step=next_step)
             else:
                 self.final_ckpt = self._build_checkpoint(next_step, next_step=next_step)
+            self._gather_checkpoint_rng = False
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                dist_lib.barrier()
+            if interrupted:
+                if self.is_rank0:
+                    _emit(
+                        self.hooks,
+                        "on_evacuation",
+                        os.path.join(self.settings.out_dir, f"step{next_step:09d}.pt"),
+                        self.final_ckpt,
+                        self._step_ctx(next_step),
+                    )
+                _emit(self.hooks, "on_train_end", self.ctx)
+                raise SystemExit(EVACUATION_EXIT_CODE)
             _emit(self.hooks, "on_train_end", self.ctx)
         except Exception as exc:
             _emit(self.hooks, "on_exception", exc, self.ctx)
             raise
         finally:
+            self.evacuation.uninstall()
             close_iterator = getattr(it, "close", None) if it is not None else None
             if callable(close_iterator):
                 close_iterator()
@@ -1319,6 +1396,11 @@ class _TrainLoop:
         eval_start = self._profile_start()
         self._maybe_run_eval(step)
         self._profile_add(stats.profile_timing_totals, "profile_loop_eval_time_s", eval_start)
+
+        self.evacuation_requested = self.evacuation.reconcile()
+        self.ctx["evacuation_requested"] = self.evacuation_requested
+        if self.evacuation_requested:
+            return True
 
         checkpoint_start = self._profile_start()
         if step > 0 and (step % self.settings.ckpt_every == 0) and self.is_rank0:

@@ -12,7 +12,6 @@ from .main import (
     build_dataloaders,
 )
 from koochak.loop import training_loop
-from koochak.storage import checkpoint as checkpoint_lib
 from koochak.core import hooks as hooks_lib
 from koochak.logging.stdout import make_stdout_hooks
 from koochak.logging.csv import make_csv_hooks
@@ -86,9 +85,6 @@ def main():
 
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(cfg_wandb))
 
-    latest = checkpoint_lib.latest(str(cfg_train.out_dir))
-    ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
-
     try:
         training_loop(
             model=model,
@@ -98,7 +94,7 @@ def main():
             scheduler=sched,
             train_cfg=cfg_train,
             config_json=config_lib.as_dict(cfg_all),
-            checkpoint_dict=ckpt,
+            resume="auto",
             eval_dataset=test_loader,
             eval_fn=eval_fn,
             hooks=hooks,

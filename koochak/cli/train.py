@@ -14,7 +14,6 @@ from ..logging.wandb_logger import make_wandb_hooks
 from ..optim.build import build_optimizer, build_scheduler
 from ..utils.seed import set_all_seeds
 from .. import config as config_lib
-from ..storage import checkpoint as checkpoint_lib
 
 
 def _import_obj(path: str):
@@ -39,6 +38,12 @@ def _maybe_add_scruffy_hooks(hooks):
 def main():
     parser = argparse.ArgumentParser(description="Koochak generic training CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument(
+        "--resume",
+        choices=("auto", "none"),
+        default="auto",
+        help="Resume from the highest valid numbered checkpoint (default: auto)",
+    )
     args = parser.parse_args()
 
     cfg_all = config_lib.load_config(args.config)
@@ -97,10 +102,6 @@ def main():
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(cfg_wandb))
     hooks = _maybe_add_scruffy_hooks(hooks)
 
-    # Resume
-    latest = checkpoint_lib.latest(str(cfg_train.out_dir))
-    ckpt = checkpoint_lib.load(latest) if latest and os.path.exists(latest) else None
-
     # Train
     training_loop(
         model=model,
@@ -110,7 +111,7 @@ def main():
         scheduler=sched,
         train_cfg=cfg_train,
         config_json=config_lib.as_dict(cfg_all),
-        checkpoint_dict=ckpt,
+        resume=args.resume,
         eval_dataset=eval_dataset,
         eval_fn=eval_fn,
         hooks=hooks,

@@ -14,6 +14,8 @@ import torch
 __all__ = [
     "add_module_prefix",
     "best",
+    "highest_valid_published",
+    "latest_valid",
     "latest",
     "load",
     "match_state_dict_to_model",
@@ -101,6 +103,78 @@ def _copy_latest(step_path: str, latest_path: str) -> Optional[str]:
 
 
 _STEP_RE = re.compile(r"step(\d+)\.pt$")
+
+
+def _valid_published_numbered_checkpoint(path: str) -> bool:
+    """Fail closed unless a numbered checkpoint and its exact manifest agree."""
+
+    absolute = os.path.abspath(path)
+    name = os.path.basename(absolute)
+    match = re.fullmatch(r"step(\d+)\.pt", name)
+    if match is None or not os.path.isfile(absolute) or os.path.islink(absolute):
+        return False
+    manifest_path = publication_path(absolute)
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            record = json.load(handle)
+        expected = {"v", "artifact_id", "path", "size_bytes", "sha256", "manifest_path"}
+        if not isinstance(record, dict) or set(record) != expected:
+            return False
+        if record["v"] != 1:
+            return False
+        if record["artifact_id"] != f"checkpoint/{name}":
+            return False
+        if record["path"] != absolute or record["manifest_path"] != manifest_path:
+            return False
+        size = os.path.getsize(absolute)
+        if type(record["size_bytes"]) is not int or record["size_bytes"] != size:
+            return False
+        digest = hashlib.sha256()
+        with open(absolute, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if record["sha256"] != digest.hexdigest():
+            return False
+        checkpoint = load(absolute)
+        if not isinstance(checkpoint, dict):
+            return False
+        step = checkpoint.get("step")
+        next_step = checkpoint.get("next_step")
+        if type(step) is not int or type(next_step) is not int or next_step < 0:
+            return False
+        if step != int(match.group(1)):
+            return False
+        # Periodic checkpoints store the last zero-based update; terminal
+        # checkpoints store the completed-update cursor.  Both are valid.
+        if next_step not in (step, step + 1):
+            return False
+    except (OSError, EOFError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def highest_valid_published(directory: str) -> Optional[str]:
+    """Return the highest numbered checkpoint with valid immutable evidence.
+
+    ``latest.pt`` and directories that merely look like checkpoint scaffolding
+    are intentionally ignored.  Invalid candidates do not poison a lower,
+    valid checkpoint.
+    """
+
+    if not os.path.isdir(directory):
+        return None
+    candidates = []
+    for name in os.listdir(directory):
+        match = re.fullmatch(r"step(\d+)\.pt", name)
+        if match is not None:
+            candidates.append((int(match.group(1)), os.path.join(directory, name)))
+    for _step, path in sorted(candidates, reverse=True):
+        if _valid_published_numbered_checkpoint(path):
+            return os.path.abspath(path)
+    return None
+
+
+latest_valid = highest_valid_published
 
 
 def save(ckpt: Dict[str, Any], path: str, keep_last_k: int = 3) -> str:

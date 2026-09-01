@@ -163,7 +163,10 @@ Done recently
 - Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).
 - Generic CLI: `python -m koochak.cli.train --config ...` with strict validation and standard hooks.
 - Generic CLI automatically attaches Scruffy workload-event hooks when both `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID` identify a managed worker; Scruffy remains an optional lazy import.
+- Safe evacuation is opt-in through `train.evacuation_enabled` or the `training_loop(..., evacuation=...)` API. `SIGUSR1` only sets an in-memory flag; after a completed optimizer update, DDP ranks reconcile the request, publish a numbered terminal checkpoint and event, finish hooks, and exit with reserved code 75.
+- `resume: auto` (the generic CLI default) selects only the highest numbered checkpoint with a valid ready manifest, exact path/size/SHA256, and valid resume cursor; `latest.pt` is never resume evidence.
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
+- Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
 
 Open TODOs (authoritative)
 - CLI: support entry kwargs [TODO]
