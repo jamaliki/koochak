@@ -216,11 +216,35 @@ def make_event_hooks(
 
     def on_train_end(ctx: Mapping[str, Any]) -> None:
         current_step = remember_step(ctx)
-        data: Dict[str, object] = {"phase": "training", "status": "completed"}
+        evacuation = bool(ctx.get("evacuation_requested", False))
+        data: Dict[str, object] = {
+            "phase": "training",
+            "status": "evacuated" if evacuation else "completed",
+        }
         terminal_step = current_step if current_step is not None else last_step
         if terminal_step is not None:
             data["step"] = terminal_step
         send("workload.phase", data)
+
+    def on_evacuation(
+        checkpoint_path: str,
+        _checkpoint: Mapping[str, Any],
+        ctx: Mapping[str, Any],
+    ) -> None:
+        current_step = remember_step(ctx)
+        data: Dict[str, object] = {
+            "name": "evacuation_checkpointed",
+            "phase": "training",
+            "status": "checkpointed",
+            "location": _short_text(checkpoint_path, _MAX_PATH_CHARS),
+        }
+        if current_step is not None:
+            data["step"] = current_step
+        try:
+            data["publication"] = checkpoint_lib.publication(checkpoint_path)
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+        send("workload.milestone", data)
 
     def on_exception(exc: Exception, ctx: Mapping[str, Any]) -> None:
         current_step = remember_step(ctx)
@@ -241,6 +265,7 @@ def make_event_hooks(
         "on_eval_end": [rank0_only(on_eval_end)],
         "on_checkpoint": [rank0_only(on_checkpoint)],
         "on_train_end": [rank0_only(on_train_end)],
+        "on_evacuation": [rank0_only(on_evacuation)],
         "on_exception": [rank0_only(on_exception)],
     }
 

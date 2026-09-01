@@ -300,7 +300,7 @@ logging: { csv_path: ..., jsonl_path: ... }
 wandb: { enabled: false, project: ... }
 ```
 
-The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the latest checkpoint under `train.out_dir`, and calls `training_loop` with `train_cfg`.
+The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the highest valid published numbered checkpoint under `train.out_dir` (or starts cleanly), and calls `training_loop` with `train_cfg`. Pass `--resume none` to disable this lookup.
 
 ## Reproducible Job Submission
 
@@ -541,7 +541,26 @@ W&B artifacts:
   `checkpoint/step000100000.pt`, never to the mutable `latest.pt` alias.
 - `koochak.storage.checkpoint.load(path)` loads to CPU.
 - `koochak.storage.checkpoint.latest(dir)` returns `latest.pt` if present or the most recent step checkpoint.
+- `koochak.storage.checkpoint.highest_valid_published(dir)` selects the highest numbered checkpoint whose exact ready manifest, path, size, SHA256, and resume cursor validate. It never treats `latest.pt`, a directory, or incomplete/corrupt scaffolding as evidence.
 - `koochak.storage.checkpoint.best(dir, key)` selects the lowest metric across checkpoints.
+
+### Safe evacuation and resume
+
+Evacuation is opt-in. Set `train.evacuation_enabled: true` (and optionally
+`train.evacuation_signal: USR1`) or pass an `EvacuationController`/`True` through
+the `training_loop(..., evacuation=...)` API. Koochak installs a minimal
+`SIGUSR1` handler that only records an in-memory request. At the end of a
+completed optimizer update, all DDP ranks reconcile that request; rank 0 then
+atomically publishes a numbered terminal checkpoint with `next_step` set to the
+first unexecuted update, emits the artifact and evacuation milestone events,
+finishes hooks, and exits with reserved code `75`. The handler performs no I/O
+or distributed operations.
+
+Use `training_loop(..., resume="auto")` or the CLI's default `--resume auto` to
+load only the highest valid published numbered checkpoint. With no valid
+checkpoint, auto-resume starts from step zero, making the same immutable command
+safe on both a first attempt and a retry. `latest.pt` remains a convenience
+pointer and is not resume evidence.
 
 DDP compatibility:
 - The loop saves the underlying module weights when the model is wrapped in `DistributedDataParallel` (i.e., uses `model.module.state_dict()`), making checkpoints portable across single-GPU and DDP.

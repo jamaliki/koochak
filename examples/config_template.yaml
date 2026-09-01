@@ -33,6 +33,9 @@ train:
   strict_config: true
   config_warn_unknown: true
   autocast_in_step_fn: false
+  resume: none              # none | auto
+  evacuation_enabled: false # opt in to SIGUSR1 checkpoint-and-exit
+  evacuation_signal: USR1
 
   ema:
     enabled: null
