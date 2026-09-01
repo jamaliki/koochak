@@ -63,6 +63,10 @@ LENGTHS = (128, 256)
 TRAIN_BATCH_SIZE = 256
 TRAIN_NUM_WORKERS = 8
 TRAIN_GRAD_ACCUM = 1
+LENGTH_BUCKETS = {
+    128: ((64, 96, 128), (16, 24, 32)),
+    256: ((64, 128, 192, 256), (16, 32, 48, 64)),
+}
 
 RESOURCES = {
     "train": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 240, "time_limit_seconds": 259_200},
@@ -92,15 +96,15 @@ def _patches(
     max_steps: int = 500_000,
 ) -> list[ConfigPatch]:
     name, patchify, pair_position, pair_transition = variant
-    patch_capacity = (length + 3) // 4
+    length_buckets, patch_capacities = LENGTH_BUCKETS[length]
     return [
         ConfigPatch("model.patchify_mode", patchify),
         ConfigPatch("model.coarse_pair_position", pair_position),
         ConfigPatch("model.coarse_pair_transition", pair_transition),
         ConfigPatch("data.metadata_path", str(METADATA)),
         ConfigPatch("data.max_length", length),
-        ConfigPatch("data.length_buckets", [length]),
-        ConfigPatch("data.patch_capacities", [patch_capacity]),
+        ConfigPatch("data.length_buckets", list(length_buckets)),
+        ConfigPatch("data.patch_capacities", list(patch_capacities)),
         ConfigPatch("data.batch_size", TRAIN_BATCH_SIZE),
         ConfigPatch("data.num_workers", TRAIN_NUM_WORKERS),
         ConfigPatch("train.grad_accum", TRAIN_GRAD_ACCUM),
