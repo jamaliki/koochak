@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from koochak.jobs import (  # noqa: E402
 
 PROJECT_ID = "hierarchical-kaveh-reliability-canary"
 KOOCHAK_COMMIT = "63312d0"
+SCRUFFY_COMMIT = "cf4c1d002debf37a7dee234227618d10232b8519"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
 MILESTONE_STEPS = (2, 4)
 CHECKPOINT_ARTIFACTS = tuple(
@@ -208,7 +210,6 @@ def build_workflow(
             "--stage", "sample",
             "--config", str(train_dir / "config.yaml"),
             "--checkpoint", str(train_dir / CHECKPOINT_ARTIFACTS[0].split("/", 1)[1]),
-            "--output-dir", str(sample_dir),
             "--artifact-id", sample_output.artifact_id,
             "--artifact-path", sample_output.path,
             "--kind", sample_output.kind,
@@ -223,7 +224,7 @@ def build_workflow(
             "--precision", "bf16",
         ],
         cwd=str(remote_cwd),
-        run_dir=str(sample_dir / "run"),
+        run_dir=str(run_root / "managed" / "sampler"),
         declared_outputs=[sample_output],
     )
     fold_output = _output(
@@ -343,7 +344,11 @@ def _describe(workflow: PreparedWorkflow, *, code_commit: str) -> dict[str, Any]
         "workflow_id": workflow.workflow_id,
         "request_id": workflow.request_id,
         "project_id": workflow.project_id,
-        "commits": {"hierarchical_kaveh": code_commit, "koochak": KOOCHAK_COMMIT},
+        "commits": {
+            "hierarchical_kaveh": code_commit,
+            "koochak": KOOCHAK_COMMIT,
+            "scruffy": SCRUFFY_COMMIT,
+        },
         "checkpoint_milestones": list(CHECKPOINT_ARTIFACTS),
         "tasks": tasks,
     }
@@ -356,6 +361,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--metadata", type=Path, default=Path("/mnt/lustre/users/kiarash-eitgbi/data/metadata.json"))
     parser.add_argument("--python", default="/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python")
     parser.add_argument("--scruffy-root", type=Path, default=Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105"))
+    parser.add_argument(
+        "--scruffy-commit",
+        default=SCRUFFY_COMMIT,
+        help="Scruffy controller commit verified from controller status before admission.",
+    )
     parser.add_argument("--enable-wandb", action="store_true")
     args = parser.parse_args(argv)
     code_commit = _git_commit()
@@ -378,6 +388,15 @@ def main(argv: list[str] | None = None) -> None:
     ).stdout.strip()
     if observed_koochak != KOOCHAK_COMMIT and not observed_koochak.startswith(KOOCHAK_COMMIT):
         raise RuntimeError(f"canary requires Koochak {KOOCHAK_COMMIT}, found {observed_koochak}")
+    if args.scruffy_commit != SCRUFFY_COMMIT:
+        raise RuntimeError(
+            f"canary requires Scruffy {SCRUFFY_COMMIT}, found {args.scruffy_commit}"
+        )
+    observed_scruffy = os.environ.get("SCRUFFY_CONTROLLER_COMMIT")
+    if observed_scruffy is not None and observed_scruffy != SCRUFFY_COMMIT:
+        raise RuntimeError(
+            f"controller reports Scruffy {observed_scruffy}, expected {SCRUFFY_COMMIT}"
+        )
     result = submit_scruffy_workflow(workflow, root=args.scruffy_root)
     print(json.dumps({"workflow": _describe(workflow, code_commit=code_commit), "submission": result}, indent=2, sort_keys=True))
 
