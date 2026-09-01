@@ -1,0 +1,39 @@
+version: 1
+id: hierarchical-kaveh-factorial-esmfold-koochak-eec841f
+python: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python
+environment:
+  set:
+    PATH: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin:/usr/local/bin:/usr/bin:/bin
+    PYTHONPATH: /mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-mcp-current/site:{cwd}/external/koochak:{cwd}
+    HF_HOME: /mnt/lustre/users/kiarash-eitgbi/.cache/huggingface
+    TORCH_HOME: /mnt/lustre/users/kiarash-eitgbi/.cache/torch
+    ESMFOLD_SIF: /mnt/lustre/users/kiarash-eitgbi/containers/esmfold-ngc25.01.sif
+    APPTAINERENV_HF_HUB_OFFLINE: "1"
+    APPTAINERENV_TRANSFORMERS_OFFLINE: "1"
+    APPTAINERENV_HF_HUB_DISABLE_XET: "1"
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    PYTHONUNBUFFERED: "1"
+    KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS: "30"
+    KOOCHAK_GPU_HEALTH_SLURM_ACTION: exit
+    KOOCHAK_EXPECTED_SOURCE_COMMIT: eec841f0261c77c31d55100b1dd8af1e753903f5
+  secrets: []
+  create_directories:
+    - "{run_dir}"
+requirements:
+  executables:
+    - /usr/bin/apptainer
+  files:
+    - "{cwd}/pyproject.toml"
+    - "{cwd}/scripts/esmfold_predict_container"
+    - "{cwd}/scripts/esmfold_plddt.py"
+    - "{cwd}/scripts/robust_factorial_stage.py"
+    - "{cwd}/scripts/run_esmfold_designability_shard.py"
+    - "{cwd}/external/koochak/koochak/jobs/runner.py"
+    - /mnt/lustre/users/kiarash-eitgbi/containers/esmfold-ngc25.01.sif
+  packages:
+    koochak: "*"
+    scruffy: "*"
+    numpy: 2.2.6
+preflight: [cuda]

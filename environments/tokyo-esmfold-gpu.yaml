@@ -1,0 +1,37 @@
+version: 1
+id: hierarchical-kaveh-esmfold-apptainer-koochak-48384ce
+python: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python
+environment:
+  set:
+    PATH: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin:/usr/local/bin:/usr/bin:/bin
+    PYTHONPATH: "{cwd}/external/koochak:{cwd}"
+    HF_HOME: /mnt/lustre/users/kiarash-eitgbi/.cache/huggingface
+    TORCH_HOME: /mnt/lustre/users/kiarash-eitgbi/.cache/torch
+    ESMFOLD_SIF: /mnt/lustre/users/kiarash-eitgbi/containers/esmfold-ngc25.01.sif
+    APPTAINERENV_HF_HUB_OFFLINE: "1"
+    APPTAINERENV_TRANSFORMERS_OFFLINE: "1"
+    APPTAINERENV_HF_HUB_DISABLE_XET: "1"
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    PYTHONUNBUFFERED: "1"
+    KOOCHAK_GPU_HEALTH_SLURM_ACTION: exit
+    KOOCHAK_EXPECTED_SOURCE_COMMIT: 48384ceae5e986b849eaa8b5b0ed1012b2f65a7c
+  secrets: []
+  create_directories:
+    - "{run_dir}"
+requirements:
+  executables:
+    - /usr/bin/apptainer
+  files:
+    - "{cwd}/pyproject.toml"
+    - "{cwd}/scripts/esmfold_predict_container"
+    - "{cwd}/scripts/esmfold_plddt.py"
+    - "{cwd}/scripts/run_esmfold_designability_shard.py"
+    - "{cwd}/scripts/run_atom4_z4_esmfold_panel.py"
+    - "{cwd}/external/koochak/koochak/jobs/runner.py"
+    - /mnt/lustre/users/kiarash-eitgbi/containers/esmfold-ngc25.01.sif
+  packages:
+    koochak: "*"
+    numpy: 2.2.6
+preflight: [cuda]
