@@ -65,6 +65,8 @@ def _sample(args: argparse.Namespace) -> int:
         "--precision",
         args.precision,
     ]
+    if args.raw:
+        command.append("--raw")
     subprocess.run(command, check=True)
     count = sum(1 for _ in args.artifact_path.glob("L*/sample_*.fasta"))
     if count != args.expected_records:
@@ -132,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20260901)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
+    parser.add_argument("--raw", action="store_true")
     args = parser.parse_args(argv)
     if args.expected_records < 0:
         raise ValueError("expected-records must be non-negative")

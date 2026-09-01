@@ -50,7 +50,9 @@ def _git_commit() -> str:
     ).stdout.strip()
 
 
-def _profile(*, python: str, gpu: bool) -> EnvironmentProfile:
+def _profile(
+    *, python: str, gpu: bool, artifact_ack_timeout_s: int | None = None
+) -> EnvironmentProfile:
     path_entries = [str(Path(python).parent), "/usr/local/cuda/bin", "/usr/local/bin", "/usr/bin", "/bin"]
     variables = {
         "PATH": ":".join(path_entries),
@@ -60,6 +62,8 @@ def _profile(*, python: str, gpu: bool) -> EnvironmentProfile:
     }
     if not gpu:
         variables["WANDB_DISABLED"] = "true"
+    if artifact_ack_timeout_s is not None:
+        variables["KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS"] = str(artifact_ack_timeout_s)
     return EnvironmentProfile(
         profile_id="hierarchical-kaveh-reliability-canary",
         python=python,
@@ -176,7 +180,7 @@ def build_workflow(
     analysis_path = run_root / "analysis" / "analysis.json"
     train = prepare_run(
         name=f"hk-reliability-train-{code_commit[:12]}",
-        profile=_profile(python=python, gpu=True),
+        profile=_profile(python=python, gpu=True, artifact_ack_timeout_s=30),
         python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"],
         cwd=str(remote_cwd),
         run_dir=str(train_dir),
@@ -222,6 +226,7 @@ def build_workflow(
             "--samples-per-length", "1",
             "--device", "cuda",
             "--precision", "bf16",
+            "--raw",
         ],
         cwd=str(remote_cwd),
         run_dir=str(run_root / "managed" / "sampler"),

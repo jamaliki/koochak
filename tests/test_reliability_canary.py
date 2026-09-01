@@ -61,6 +61,10 @@ def test_canary_graph_uses_exact_artifact_edges_and_provenance(tmp_path: Path) -
     assert analysis.needs == () and analysis.wait_for[0]["artifact_id"] == "fold/canary"
     assert trainer.recovery["max_attempts"] == 3
     assert trainer.recovery["evacuation"]["signal"] == "USR1"
+    for task, expected in zip(workflow.tasks, ("30", None, None, None), strict=True):
+        launch = next(item for item in task.run.artifacts if item.path.endswith("launch.json"))
+        environment = json.loads(launch.content)["environment"]["environment"]["set"]
+        assert environment.get("KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS") == expected
     for task in workflow.tasks:
         for output in task.run.declared_outputs:
             assert output.provenance["project_id"] == PROJECT_ID
@@ -192,6 +196,7 @@ def test_sampler_stage_smoke_rejects_no_unknown_argv(tmp_path: Path, monkeypatch
             "--project", PROJECT_ID, "--workflow", "workflow", "--task", "sampler",
             "--code-commit", "a" * 40, "--config", str(tmp_path / "config.yaml"),
             "--checkpoint", str(tmp_path / "step000000002.pt"),
+            "--raw",
         ]
     )
     assert published == [1]
@@ -199,6 +204,7 @@ def test_sampler_stage_smoke_rejects_no_unknown_argv(tmp_path: Path, monkeypatch
     # The wrapper has no --output-dir option; only the delegated scientific
     # sampler receives its supported output flag.
     assert "--output-dir" in calls[0]
+    assert "--raw" in calls[0]
     workflow = build_workflow(
         code_commit="a" * 40,
         run_root=tmp_path / "workflow-runs",
