@@ -33,7 +33,7 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-reliability-canary"
-KOOCHAK_COMMIT = "f48ea84149433ad22b16f97b1c6fd148bcb18d96"
+KOOCHAK_COMMIT = "288c2ad547b396db92de4ffe5eb111873e14a59b"
 SCRUFFY_COMMIT = "d60afabf82693c8c8e2108439696526c6bd2bd32"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
 DEFAULT_METADATA = Path(
