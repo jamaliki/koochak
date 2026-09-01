@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,7 +33,7 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-reliability-canary"
-KOOCHAK_COMMIT = "2c64510098c78a98984fff133d4a2a6de0eda8c4"
+KOOCHAK_COMMIT = "646865e889fd16e89bf7682a89f75b5e0af35f7e"
 SCRUFFY_COMMIT = "d2b7dc2f98794eaf585077f67b9fd3644bb565ab"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
 DEFAULT_METADATA = Path(
@@ -56,12 +57,19 @@ def _git_commit() -> str:
 
 
 def _profile(
-    *, python: str, gpu: bool, artifact_ack_timeout_s: int | None = None
+    *,
+    python: str,
+    gpu: bool,
+    scruffy_source: Path | None,
+    artifact_ack_timeout_s: int | None = None,
 ) -> EnvironmentProfile:
     path_entries = [str(Path(python).parent), "/usr/local/cuda/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    pythonpath = ["{cwd}/external/koochak", "{cwd}"]
+    if scruffy_source is not None:
+        pythonpath.insert(0, str(scruffy_source))
     variables = {
         "PATH": ":".join(path_entries),
-        "PYTHONPATH": "{cwd}/external/koochak:{cwd}",
+        "PYTHONPATH": ":".join(pythonpath),
         "PYTHONUNBUFFERED": "1",
         "WANDB_MODE": "online" if gpu else "disabled",
     }
@@ -73,7 +81,12 @@ def _profile(
         profile_id="hierarchical-kaveh-reliability-canary",
         python=python,
         variables=variables,
-        packages={"koochak": "*", "numpy": "*", "omegaconf": "*"},
+        packages={
+            "koochak": "*",
+            "numpy": "*",
+            "omegaconf": "*",
+            "scruffy": "*",
+        },
     )
 
 
@@ -172,6 +185,7 @@ def build_workflow(
     run_root: Path,
     metadata: Path,
     python: str,
+    scruffy_source: Path | None = None,
     wandb_enabled: bool = True,
 ) -> PreparedWorkflow:
     """Prepare the complete canary DAG without filesystem side effects."""
@@ -185,7 +199,12 @@ def build_workflow(
     analysis_path = run_root / "analysis" / "analysis.json"
     train = prepare_run(
         name=f"hk-reliability-train-{code_commit[:12]}",
-        profile=_profile(python=python, gpu=True, artifact_ack_timeout_s=30),
+        profile=_profile(
+            python=python,
+            gpu=True,
+            scruffy_source=scruffy_source,
+            artifact_ack_timeout_s=30,
+        ),
         python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"],
         cwd=str(remote_cwd),
         run_dir=str(train_dir),
@@ -213,7 +232,7 @@ def build_workflow(
     )
     sample = prepare_run(
         name=f"hk-reliability-sample-{code_commit[:12]}",
-        profile=_profile(python=python, gpu=True),
+        profile=_profile(python=python, gpu=True, scruffy_source=scruffy_source),
         python_args=[
             "{cwd}/scripts/reliability_canary_stage.py",
             "--stage", "sample",
@@ -250,7 +269,7 @@ def build_workflow(
     )
     fold = prepare_run(
         name=f"hk-reliability-fold-{code_commit[:12]}",
-        profile=_profile(python=python, gpu=False),
+        profile=_profile(python=python, gpu=False, scruffy_source=scruffy_source),
         python_args=[
             "{cwd}/scripts/reliability_canary_stage.py", "--stage", "fold",
             "--input-path", str(sample_dir), "--artifact-id", fold_output.artifact_id,
@@ -275,7 +294,7 @@ def build_workflow(
     )
     analysis = prepare_run(
         name=f"hk-reliability-analysis-{code_commit[:12]}",
-        profile=_profile(python=python, gpu=False),
+        profile=_profile(python=python, gpu=False, scruffy_source=scruffy_source),
         python_args=[
             "{cwd}/scripts/reliability_canary_stage.py", "--stage", "analysis",
             "--input-path", fold_output.path, "--artifact-id", analysis_output.artifact_id,
@@ -371,6 +390,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
     parser.add_argument("--python", default="/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python")
     parser.add_argument("--scruffy-root", type=Path, default=Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105"))
+    parser.add_argument(
+        "--scruffy-source",
+        type=Path,
+        default=Path(os.environ["SCRUFFY_SITE"]) if os.environ.get("SCRUFFY_SITE") else None,
+        help="Shared source/site root for the exact Scruffy client used by workers",
+    )
     parser.add_argument("--enable-wandb", action="store_true")
     args = parser.parse_args(argv)
     code_commit = _git_commit()
@@ -379,11 +404,17 @@ def main(argv: list[str] | None = None) -> None:
         run_root=args.run_root,
         metadata=args.metadata,
         python=args.python,
+        scruffy_source=args.scruffy_source,
         wandb_enabled=args.enable_wandb,
     )
     if args.dry_run:
         print(json.dumps(_describe(workflow, code_commit=code_commit), indent=2, sort_keys=True))
         return
+    if args.scruffy_source is None:
+        raise RuntimeError(
+            "online submission requires --scruffy-source or SCRUFFY_SITE so "
+            "workers receive the exact Scruffy client"
+        )
     expected_koochak = (REPO_ROOT / "external" / "koochak").resolve()
     observed_koochak = subprocess.run(
         ["git", "-C", str(expected_koochak), "rev-parse", "HEAD"],

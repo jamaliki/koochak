@@ -80,6 +80,27 @@ def test_canary_graph_uses_exact_artifact_edges_and_provenance(tmp_path: Path) -
             assert output.provenance["code_commit"] == "a" * 40
 
 
+def test_canary_profiles_declare_scruffy_source_for_isolated_workers(tmp_path: Path) -> None:
+    source = tmp_path / "scruffy-site"
+    workflow = build_workflow(
+        code_commit="a" * 40,
+        run_root=tmp_path / "runs",
+        metadata=tmp_path / "metadata.json",
+        python=sys.executable,
+        scruffy_source=source,
+        wandb_enabled=False,
+    )
+    launch = next(
+        item
+        for item in workflow.tasks[0].run.artifacts
+        if item.path.endswith("launch.json")
+    )
+    document = json.loads(launch.content)
+    environment = document["environment"]
+    assert environment["requirements"]["packages"]["scruffy"] == "*"
+    assert environment["environment"]["set"]["PYTHONPATH"].split(":")[0] == str(source)
+
+
 def test_canary_dry_run_is_deterministic_and_does_not_stage(tmp_path: Path) -> None:
     run_root = tmp_path / "runs"
     result = subprocess.run(
@@ -107,7 +128,7 @@ def test_canary_dry_run_is_deterministic_and_does_not_stage(tmp_path: Path) -> N
     assert not run_root.exists()
     assert all(task["needs"] == [] for task in document["tasks"])
     assert document["tasks"][1]["wait_for"][0]["artifact_id"] == CHECKPOINT_ARTIFACTS[0]
-    assert document["commits"]["koochak"] == "2c64510098c78a98984fff133d4a2a6de0eda8c4"
+    assert document["commits"]["koochak"] == "646865e889fd16e89bf7682a89f75b5e0af35f7e"
     assert document["commits"]["scruffy"] == "d2b7dc2f98794eaf585077f67b9fd3644bb565ab"
 
 
@@ -117,6 +138,7 @@ def _online_args(tmp_path: Path) -> list[str]:
         "--metadata", str(tmp_path / "metadata.json"),
         "--python", sys.executable,
         "--scruffy-root", str(tmp_path / "queue"),
+        "--scruffy-source", str(tmp_path / "scruffy-site"),
     ]
 
 
