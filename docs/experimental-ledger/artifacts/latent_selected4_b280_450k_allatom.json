@@ -1,0 +1,29 @@
+{
+  "campaign": "hk-latent-selected4-length256-500k-b280-recovery-v1",
+  "checkpoint_step": 450000,
+  "sample_count": 896,
+  "panel_count": 28,
+  "samples_per_arm": 224,
+  "samples_per_length": 32,
+  "lengths": [64, 96, 128, 160, 192, 224, 256],
+  "metric_contract": "CA Kabsch RMSD < 2 A AND mean ESMFold pLDDT > 80",
+  "all_atom_contract": "matched physical Atom14 heavy atoms after CA alignment with local ASP/GLU/PHE/TYR symmetry correction",
+  "arms": [
+    {"arm": "r1_z3_b0p01_c0p125", "designable_count": 114, "designability_rate": 0.5089285714285714, "mean_plddt": 79.24793685166127, "median_ca_rmsd_a": 1.3359884541647138, "median_atom14_sym_rmsd_a": 1.6964835525165283},
+    {"arm": "r0_z3_b0p3_c0p125", "designable_count": 96, "designability_rate": 0.42857142857142855, "mean_plddt": 75.00108500813396, "median_ca_rmsd_a": 1.5683696640740052, "median_atom14_sym_rmsd_a": 1.8636780452773496},
+    {"arm": "r1_z4_b0p03_c0p25", "designable_count": 93, "designability_rate": 0.41517857142857145, "mean_plddt": 73.32925773847403, "median_ca_rmsd_a": 1.5438361931859372, "median_atom14_sym_rmsd_a": 1.8443411558167435},
+    {"arm": "r2_z2_b0p1_c0p125", "designable_count": 70, "designability_rate": 0.3125, "mean_plddt": 69.31379414859973, "median_ca_rmsd_a": 2.2965563435047707, "median_atom14_sym_rmsd_a": 2.7730502557019285}
+  ],
+  "source_panel_root": "/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/atom4-latent-selected4-length256-500k-b280-recovery-v1/4c1bcee851284174442833c8fea43d6b2e4652f6/esmfold/step0450000",
+  "analysis_root": "/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs/hk-latent-selected4-length256-500k-b280-allatom-repair-v2/1a3f4e607d214bb2865426c7c61e255a92ef090d/all-atom-rmsd/step0450000",
+  "immutable_code_commit": "1a3f4e607d214bb2865426c7c61e255a92ef090d",
+  "koochak_commit": "8fb52161350460e2a12a92a37be235d103125f71",
+  "completion_state": "verified_complete",
+  "durable_outputs": ["panel_summary.json", "PDB files", "summary.json", "rows.jsonl", "report.md"],
+  "disaggregated_artifact": "latent_selected4_b280_450k_allatom.csv",
+  "notes": [
+    "All four ESMFold panels and 896 PDB-backed rows were read from durable outputs.",
+    "The all-atom adapter initially failed because current panels use <arm>/<schedule>/L*/per_sample.csv; the parser now supports that layout and the legacy sharded layout.",
+    "The 500000 checkpoint is not included here and remains pending the missing r1_z3_b0p01_c0p125 training chain."
+  ]
+}
