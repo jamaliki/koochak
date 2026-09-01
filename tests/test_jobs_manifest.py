@@ -82,7 +82,9 @@ def test_prepare_run_is_deterministic_and_contains_resolved_inputs(tmp_path: Pat
     ]
     assert manifest["environment"]["sha256"] == _profile().sha256
     assert manifest["config"]["sha256"] == first.artifacts[0].sha256
-    assert first.runner_argv()[1:4] == ["-I", "-m", "koochak.jobs.runner"]
+    assert first.runner_argv()[1:3] == ["-I", "-c"]
+    assert first.runner_argv()[-2:] == [first.manifest_path, first.manifest_sha256]
+    assert json.loads(first.artifacts[-1].content)["runner_runtime"]["sha256"]
 
 
 def test_stage_is_idempotent_but_never_clobbers_another_launch(tmp_path: Path) -> None:

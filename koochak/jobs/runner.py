@@ -16,16 +16,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..interruption import EVACUATION_EXIT_CODE
 from ..storage.artifact import (
     DeclaredOutput,
     artifact_publication,
     validate_artifact,
 )
-from ..interruption import EVACUATION_EXIT_CODE
 
 
 class PreflightError(RuntimeError):
     """The declared execution environment did not satisfy its contract."""
+
+
+_ISOLATED_CHILD_BOOTSTRAP = """\
+import hashlib
+import json
+import runpy
+import sys
+from pathlib import Path
+
+runtime_path, runtime_sha256, import_paths = sys.argv[1:4]
+runtime_content = Path(runtime_path).read_bytes()
+if hashlib.sha256(runtime_content).hexdigest() != runtime_sha256:
+    raise SystemExit("Koochak runner runtime digest differs")
+sys.path.insert(0, runtime_path)
+sys.argv = ["koochak.jobs.isolated_exec", import_paths, "--", *sys.argv[5:]]
+runpy.run_module("koochak.jobs.isolated_exec", run_name="__main__")
+"""
 
 
 def _sha256(value: object) -> str:
@@ -133,10 +150,21 @@ def _profile_import_paths(environment: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(item for item in pythonpath.split(os.pathsep) if item)
 
 
-def _isolated_python_argv(argv: list[str], import_paths: tuple[str, ...]) -> list[str]:
+def _isolated_python_argv(
+    argv: list[str],
+    import_paths: tuple[str, ...],
+    *,
+    runtime_path: str | None = None,
+    runtime_sha256: str | None = None,
+) -> list[str]:
     """Route isolated Python children through the explicit-path bootstrap."""
 
-    if not import_paths or not Path(argv[0]).name.startswith("python"):
+    if (
+        not import_paths
+        or runtime_path is None
+        or runtime_sha256 is None
+        or not Path(argv[0]).name.startswith("python")
+    ):
         return argv
     if "-I" not in argv[1:]:
         return argv
@@ -144,8 +172,10 @@ def _isolated_python_argv(argv: list[str], import_paths: tuple[str, ...]) -> lis
     return [
         argv[0],
         "-I",
-        "-m",
-        "koochak.jobs.isolated_exec",
+        "-c",
+        _ISOLATED_CHILD_BOOTSTRAP,
+        runtime_path,
+        runtime_sha256,
         json.dumps(list(import_paths), separators=(",", ":")),
         "--",
         *original,
@@ -268,6 +298,8 @@ def _run_managed_child(
     cwd: str,
     environment: Mapping[str, str],
     import_paths: tuple[str, ...] = (),
+    runtime_path: str | None = None,
+    runtime_sha256: str | None = None,
 ) -> int:
     """Run one child process group and forward evacuation only to that group."""
 
@@ -284,7 +316,12 @@ def _run_managed_child(
         if requested:
             return EVACUATION_EXIT_CODE
         child = subprocess.Popen(
-            _isolated_python_argv(argv, import_paths),
+            _isolated_python_argv(
+                argv,
+                import_paths,
+                runtime_path=runtime_path,
+                runtime_sha256=runtime_sha256,
+            ),
             cwd=cwd,
             env=dict(environment),
             start_new_session=True,
@@ -446,6 +483,8 @@ def execute_manifest(manifest_path: str, expected_sha256: str) -> int:
         cwd=document["cwd"],
         environment=clean_environment,
         import_paths=_profile_import_paths(environment),
+        runtime_path=document["runner_runtime"]["path"],
+        runtime_sha256=document["runner_runtime"]["sha256"],
     )
     if child_returncode:
         result.update(state="failed", child_returncode=child_returncode)

@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from koochak.jobs import DeclaredOutput, EnvironmentProfile, prepare_run, runner, stage_run
+from koochak.jobs import (
+    DeclaredOutput,
+    EnvironmentProfile,
+    prepare_run,
+    runner,
+    stage_run,
+)
 from koochak.storage.artifact import publish_artifact
 
 
@@ -68,10 +74,20 @@ def test_runner_records_preflight_then_runs_exact_workload(
     stage_run(prepared)
     seen: dict[str, object] = {}
 
-    def fake_child(argv, *, cwd, environment, import_paths):
+    def fake_child(
+        argv,
+        *,
+        cwd,
+        environment,
+        import_paths,
+        runtime_path,
+        runtime_sha256,
+    ):
         seen.update(executable=argv[0], argv=argv, environment=environment)
         assert cwd == prepared.cwd
         assert import_paths == ()
+        assert runtime_path == str(Path(prepared.run_dir) / "koochak-runtime.zip")
+        assert runtime_sha256
         return 0
 
     monkeypatch.setattr(runner.os, "environ", {"HOME": str(tmp_path), "NOISE": "drop"})
@@ -119,7 +135,7 @@ def test_runner_preflight_honors_profile_pythonpath_for_scruffy_client(
     monkeypatch.setattr(
         runner,
         "_run_managed_child",
-        lambda argv, *, cwd, environment, import_paths: seen.update(
+        lambda argv, *, cwd, environment, import_paths, runtime_path, runtime_sha256: seen.update(
             argv=argv, cwd=cwd, environment=environment
         ) or 0,
     )
@@ -171,6 +187,14 @@ def test_runner_rejects_missing_scruffy_before_managed_child(
 def test_isolated_runner_and_isolated_child_use_declared_import_root(
     tmp_path: Path,
 ) -> None:
+    stale = tmp_path / "stale-installed-koochak"
+    stale_jobs = stale / "koochak" / "jobs"
+    stale_jobs.mkdir(parents=True)
+    (stale / "koochak" / "__init__.py").write_text("")
+    (stale_jobs / "__init__.py").write_text("")
+    (stale_jobs / "runner.py").write_text(
+        "raise SystemExit('stale installed Koochak runner was used')\n"
+    )
     source = tmp_path / "isolated-client"
     package = source / "scruffy"
     package.mkdir(parents=True)
@@ -207,7 +231,11 @@ def test_isolated_runner_and_isolated_child_use_declared_import_root(
         prepared.runner_argv(),
         capture_output=True,
         text=True,
-        env={"HOME": str(tmp_path), "PATH": str(Path(sys.executable).parent)},
+        env={
+            "HOME": str(tmp_path),
+            "PATH": str(Path(sys.executable).parent),
+            "PYTHONPATH": str(stale),
+        },
         check=False,
     )
 
