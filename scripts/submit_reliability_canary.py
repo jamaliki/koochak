@@ -33,8 +33,8 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-reliability-canary"
-KOOCHAK_COMMIT = "646865e889fd16e89bf7682a89f75b5e0af35f7e"
-SCRUFFY_COMMIT = "d2b7dc2f98794eaf585077f67b9fd3644bb565ab"
+KOOCHAK_COMMIT = "f48ea84149433ad22b16f97b1c6fd148bcb18d96"
+SCRUFFY_COMMIT = "d60afabf82693c8c8e2108439696526c6bd2bd32"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
 DEFAULT_METADATA = Path(
     "/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/"

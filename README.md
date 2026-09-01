@@ -111,6 +111,23 @@ compile and fused CUDA paths to succeed rather than silently falling back. Set
 The reader consumes the existing Kaveh ragged Atom14 shards directly; see
 [the data format](docs/data.md).
 
+## Scruffy-backed campaigns
+
+Every campaign submitted through Scruffy must provide the exact Scruffy client
+to worker processes. The Koochak runner starts isolated workers with Python
+`-I`, so an ambient login-node `PYTHONPATH` or an installed client is not a
+valid handoff. Set `SCRUFFY_SITE` to an import root containing the deployed
+`scruffy` package, or pass the equivalent `--scruffy-source PATH` option to
+submission scripts that expose it. The path must be visible on compute nodes
+and correspond to the controller release recorded by the campaign.
+
+Campaign `EnvironmentProfile` definitions must put that source first in their
+explicit `PYTHONPATH` and declare `scruffy: "*"` under `requirements.packages`.
+Koochak then checks the import during preflight, and `make_scruffy_hooks()`
+checks it again before training begins. A missing or unimportable handoff fails
+before the first checkpoint rather than leaving a running campaign that cannot
+publish recovery evidence.
+
 ## Sample
 
 Use the same config as training so the checkpoint's model configuration can be
