@@ -113,6 +113,8 @@ The reader consumes the existing Kaveh ragged Atom14 shards directly; see
 
 ## Scruffy-backed campaigns
 
+For the operator workflow, see [Robust job operations](docs/robust-job-operations.md).
+
 Every campaign submitted through Scruffy must provide the exact Scruffy client
 to worker processes. The Koochak runner starts isolated workers with Python
 `-I`, so an ambient login-node `PYTHONPATH` or an installed client is not a
