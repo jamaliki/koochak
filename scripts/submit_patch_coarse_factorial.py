@@ -169,9 +169,10 @@ def _stage_run(
     return run
 
 
-def build_workflow(code_commit: str) -> PreparedWorkflow:
+def build_workflow(code_commit: str, lengths: tuple[int, ...]) -> PreparedWorkflow:
     short = code_commit[:7]
-    workflow = f"hk-patch-coarse-factorial-500k-{short}"
+    length_suffix = "-" + "-".join(f"L{length}" for length in lengths)
+    workflow = f"hk-patch-coarse-factorial-500k{length_suffix}-{short}"
     output_root = REMOTE_RUN_ROOT / "patch-coarse-factorial-500k" / code_commit
     remote_cwd = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"
     profiles = {
@@ -184,7 +185,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     sample_ids: dict[tuple[str, int, int], str] = {}
 
     for variant in VARIANTS:
-        for length in LENGTHS:
+        for length in lengths:
             name = variant[0]
             train_id = f"train-{name}-L{length}"
             train_ids[(name, length)] = train_id
@@ -265,7 +266,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     variant_names = ",".join(item[0] for item in VARIANTS)
     for step in MILESTONES:
         tag = _tag(step)
-        for length in LENGTHS:
+        for length in lengths:
             analysis_id = f"analysis-{tag}-L{length}"
             analysis_path = output_root / "analysis" / tag / f"L{length}" / "milestone.json"
             analysis_output = _output(
@@ -301,7 +302,9 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     )
 
 
-def _describe(workflow: PreparedWorkflow, code_commit: str) -> dict[str, object]:
+def _describe(
+    workflow: PreparedWorkflow, code_commit: str, lengths: tuple[int, ...]
+) -> dict[str, object]:
     return {
         "workflow_id": workflow.workflow_id,
         "request_id": workflow.request_id,
@@ -310,7 +313,7 @@ def _describe(workflow: PreparedWorkflow, code_commit: str) -> dict[str, object]
         "koochak_commit": KOOCHAK_COMMIT,
         "scruffy_commit": SCRUFFY_COMMIT,
         "milestones": list(MILESTONES),
-        "lengths": list(LENGTHS),
+        "lengths": list(lengths),
         "variant_count": len(VARIANTS),
         "task_count": len(workflow.tasks),
         "task_counts": Counter(
@@ -348,10 +351,13 @@ def main(argv: list[str] | None = None) -> None:
     code_commit = _git("rev-parse", "HEAD")
     if not args.dry_run:
         _validate_online(code_commit)
-    workflow = build_workflow(code_commit)
-    description = _describe(workflow, code_commit)
+    workflows = tuple(build_workflow(code_commit, (length,)) for length in LENGTHS)
+    descriptions = [
+        _describe(workflow, code_commit, (length,))
+        for workflow, length in zip(workflows, LENGTHS)
+    ]
     if args.dry_run:
-        print(json.dumps(description, indent=2, sort_keys=True, default=str))
+        print(json.dumps({"workflows": descriptions, "total_task_count": sum(item["task_count"] for item in descriptions)}, indent=2, sort_keys=True, default=str))
         return
     sys.path.insert(0, str(SCRUFFY_SITE))
     from scruffy import status  # noqa: PLC0415
@@ -361,8 +367,13 @@ def main(argv: list[str] | None = None) -> None:
     release = allocation.get("controller_release") if isinstance(allocation, Mapping) else None
     if release != SCRUFFY_COMMIT:
         raise RuntimeError(f"Scruffy controller release mismatch: expected {SCRUFFY_COMMIT}, got {release}")
-    result = submit_scruffy_workflow(workflow, root=SCRUFFY_ROOT)
-    print(json.dumps({"workflow": description, "submission": result}, indent=2, sort_keys=True, default=str))
+    submissions = []
+    for workflow, description in zip(workflows, descriptions):
+        submissions.append({
+            "workflow": description,
+            "submission": submit_scruffy_workflow(workflow, root=SCRUFFY_ROOT),
+        })
+    print(json.dumps({"workflows": submissions}, indent=2, sort_keys=True, default=str))
 
 
 if __name__ == "__main__":
