@@ -65,6 +65,10 @@ train:
   ddp_gradient_as_bucket_view: true
   ddp_bucket_cap_mb: 32
   ddp_broadcast_buffers: false
+  # Deliberate allocation evacuation is opt-in; Koochak handles USR1 only
+  # when explicitly enabled by a canary or production launcher.
+  evacuation_enabled: false
+  evacuation_signal: USR1
   seed: 42
   out_dir: ./runs/hierarchical-kaveh
   keep_last_k: 3

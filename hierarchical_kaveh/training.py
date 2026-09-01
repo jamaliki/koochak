@@ -262,6 +262,12 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
         "checkpoint_dict": checkpoint,
         "hooks": hooks,
     }
+    # The strict project config is the source of truth for this opt-in.  Do
+    # not pass an override for the default-disabled case: Koochak still reads
+    # the config field, while ordinary launches retain their legacy call
+    # shape and signal behavior.
+    if config.train.evacuation_enabled:
+        loop_kwargs["evacuation"] = True
     if resume_mode == "auto":
         loop_kwargs["resume"] = "auto"
         if auto_resume is not None:
