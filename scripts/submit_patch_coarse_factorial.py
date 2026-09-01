@@ -353,14 +353,16 @@ def _validate_online(code_commit: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--length", type=int, choices=LENGTHS)
     args = parser.parse_args(argv)
     code_commit = _git("rev-parse", "HEAD")
     if not args.dry_run:
         _validate_online(code_commit)
-    workflows = tuple(build_workflow(code_commit, (length,)) for length in LENGTHS)
+    lengths = (args.length,) if args.length is not None else LENGTHS
+    workflows = tuple(build_workflow(code_commit, (length,)) for length in lengths)
     descriptions = [
         _describe(workflow, code_commit, (length,))
-        for workflow, length in zip(workflows, LENGTHS)
+        for workflow, length in zip(workflows, lengths)
     ]
     if args.dry_run:
         print(json.dumps({"workflows": descriptions, "total_task_count": sum(item["task_count"] for item in descriptions)}, indent=2, sort_keys=True, default=str))
