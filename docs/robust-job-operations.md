@@ -5,19 +5,22 @@ Replace `<...>` with target-allocation values, never old campaign values.
 ## Mental model
 
 - **Koochak** prepares the immutable run (config, committed command, strict profile,
-  manifests, checkpoints, typed outputs) and owns interruption plus validated resume.
+  hash-checked archive, manifests, checkpoints, typed outputs) and owns interruption
+  plus validated resume.
 - **Scruffy** is the asynchronous queue inside one Slurm allocation; it owns
   placement, gates, handover, evacuation, health, and bounded recovery.
 - **Pazuzu** stages the same prepared run as a standalone Slurm job when no
   Scruffy allocation is suitable. Choose one backend for a prepared run.
 ## One-time setup and the profile contract
 
-1. Install Koochak/Hierarchical Kaveh and expose the exact Scruffy site source at one
-   absolute path on controller, submitter, and compute nodes.
+1. Install Koochak/Hierarchical Kaveh and expose an immutable, ABI/platform-compatible
+   Scruffy worker site at one absolute path on controller, submitter, and compute nodes.
+   Label it with Python implementation/version and OS/architecture; do not use a mutable checkout.
 2. Set one shared queue root/project. `SCRUFFY_ROOT` needs atomic rename and
    cluster-coherent `flock`; local-only locking is unsafe.
-3. Export `SCRUFFY_SITE` to the import root containing `scruffy`; a login-node install
-   or ambient `PYTHONPATH` is not a worker handoff because workers use `python -I`.
+3. Export `SCRUFFY_SITE` to the import root containing `scruffy`; a globally installed
+   Koochak/Scruffy or ambient `PYTHONPATH` is not a worker handoff because workers use
+   `python -I`. Keep the real site path private to the submission environment.
 
 ```bash
 export SCRUFFY_ROOT="/shared/path/to/scruffy-queue"
@@ -43,17 +46,30 @@ requirements:
   packages:
     scruffy: "*"
     koochak: "*"
+    pydantic_core: "*"
 ```
 
 The profile is strict: absolute paths and explicit `PATH` are required, runtime-owned
-`SCRUFFY_*` variables cannot be overridden, and unknown fields/interpolation are
-rejected. Pass `Path(os.environ["SCRUFFY_SITE"])` to the profile builder and verify
-`import scruffy` on compute, not only on the submit host.
+`SCRUFFY_*` variables cannot be overridden, and unknown fields/interpolation are rejected.
+Pass `Path(os.environ["SCRUFFY_SITE"])` to the builder and verify `import scruffy` on compute.
+
+Before submission, preflight with the exact isolated worker interpreter and this site;
+import `scruffy` and compiled dependencies such as `pydantic_core`. ABI/platform mismatch
+must fail before submission, not become a running job:
+
+```bash
+export WORKER_PYTHON="/shared/path/to/worker/python"
+"$WORKER_PYTHON" -I -c 'import os,sys; sys.path.insert(0, os.environ["SCRUFFY_SITE"]); import scruffy, pydantic_core'
+```
+
+The runner repeats these checks and records `preflight.json` before user code; explicit
+profile roots, not ambient imports, are the handoff.
 ## Prepare and submit one complete DAG
 
-Keep the submission program and launch scripts committed. Build every `PreparedRun`,
-then one `PreparedWorkflow`, and call `submit_scruffy_workflow(workflow, root=...)`
-once; it stages all manifests before Scruffy admits the workflow, so admission is all-or-none.
+Keep the submission program and launch scripts committed. Build every `PreparedRun`, then
+one `PreparedWorkflow`, and call `submit_scruffy_workflow(workflow, root=...)` once. It
+stages each deterministic, hash-validated Koochak archive/manifest before all-or-none
+admission. Never construct or edit the runtime archive manually.
 
 ```python
 from pathlib import Path
@@ -184,17 +200,20 @@ Do not retry ordinary application exits merely because logs look transient.
 - Do not SSH to compute nodes to launch, signal, or inspect worker processes.
 - Do not make `latest.pt`, a directory, or a shell-created marker a dependency.
 - Do not put `sleep` loops or filesystem polling in blocked jobs or operators.
+- Do not rely on globally installed Koochak/Scruffy or inherited `PYTHONPATH` under `python -I`.
 - Do not reuse a request ID after changing the request specification.
 - Do not cancel the outer Slurm allocation to evacuate a worker; use Scruffy.
 - Do not launch out-of-band GPU work against Scruffy's inventory.
+- Do not put site-specific absolute paths in this public repository or its config examples.
 ## Preflight
 
 - [ ] Code, config, launchers, and submission script are committed.
-- [ ] Exact Scruffy source is compute-visible; profile has first-entry
-      `PYTHONPATH` and `scruffy: "*"`.
+- [ ] Immutable ABI/platform-matched `SCRUFFY_SITE` is compute-visible; profile has
+      first-entry `PYTHONPATH`, `scruffy: "*"`, and compiled dependency declarations.
 - [ ] `SCRUFFY_ROOT` is shared/coherent; project and workflow IDs are fixed.
 - [ ] Complete DAG validates; dependencies use exact numbered/typed artifacts.
 - [ ] Recovery policy, `USR1` grace, stable run directory, and checkpoint ack timeout
       are explicit for restartable tasks.
-- [ ] Dry-run/profile import checks pass; monitor cursor is private and saved.
+- [ ] Exact-worker isolated preflight imports `scruffy` and compiled dependencies; ABI
+      mismatch fails before submission. Monitor cursor is private and saved.
 - [ ] Submit once, then inspect Scruffy state rather than resubmitting.
