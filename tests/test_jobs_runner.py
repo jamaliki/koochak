@@ -68,9 +68,10 @@ def test_runner_records_preflight_then_runs_exact_workload(
     stage_run(prepared)
     seen: dict[str, object] = {}
 
-    def fake_child(argv, *, cwd, environment):
+    def fake_child(argv, *, cwd, environment, import_paths):
         seen.update(executable=argv[0], argv=argv, environment=environment)
         assert cwd == prepared.cwd
+        assert import_paths == ()
         return 0
 
     monkeypatch.setattr(runner.os, "environ", {"HOME": str(tmp_path), "NOISE": "drop"})
@@ -118,7 +119,7 @@ def test_runner_preflight_honors_profile_pythonpath_for_scruffy_client(
     monkeypatch.setattr(
         runner,
         "_run_managed_child",
-        lambda argv, *, cwd, environment: seen.update(
+        lambda argv, *, cwd, environment, import_paths: seen.update(
             argv=argv, cwd=cwd, environment=environment
         ) or 0,
     )
@@ -165,6 +166,56 @@ def test_runner_rejects_missing_scruffy_before_managed_child(
 
     with pytest.raises(runner.PreflightError, match="required package is not importable"):
         runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256)
+
+
+def test_isolated_runner_and_isolated_child_use_declared_import_root(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "isolated-client"
+    package = source / "scruffy"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "__version__ = 'synthetic'\n"
+        "def publish_event(*_args, **_kwargs): return {'state': 'spooled'}\n"
+    )
+    marker = tmp_path / "child-import.txt"
+    profile = EnvironmentProfile(
+        profile_id="isolated-scruffy",
+        python=sys.executable,
+        variables={
+            "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+            "PYTHONPATH": str(source),
+        },
+        packages={"scruffy": "synthetic"},
+    )
+    prepared = prepare_run(
+        name="isolated-scruffy",
+        profile=profile,
+        python_args=[
+            "-I",
+            "-c",
+            (
+                "from pathlib import Path; import scruffy; "
+                f"Path({str(marker)!r}).write_text(scruffy.__version__)"
+            )
+        ],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+    )
+    stage_run(prepared)
+    result = subprocess.run(
+        prepared.runner_argv(),
+        capture_output=True,
+        text=True,
+        env={"HOME": str(tmp_path), "PATH": str(Path(sys.executable).parent)},
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == "synthetic"
+    preflight = json.loads((Path(prepared.run_dir) / "preflight.json").read_text())
+    assert preflight["state"] == "passed"
+    assert preflight["observed"]["package:scruffy"] == "synthetic"
 
 
 def test_runner_rejects_a_tampered_materialized_config(
