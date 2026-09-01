@@ -227,7 +227,14 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
     model = HierarchicalKaveh(config.model)
     optimizer = build_optimizer(model, asdict(config.optimizer))
     resume_mode = None if resume is None else str(resume).lower()
-    checkpoint = _resume_checkpoint(resume, config.train.out_dir)
+    auto_resume = (
+        checkpoint_lib.resolve_auto_resume(config.train.out_dir)
+        if resume_mode == "auto"
+        else None
+    )
+    checkpoint = auto_resume[1] if auto_resume is not None else _resume_checkpoint(
+        resume, config.train.out_dir
+    )
     global_step = 0 if checkpoint is None else int(
         checkpoint.get("next_step", int(checkpoint.get("step", 0)) + 1)
     )
@@ -257,6 +264,8 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
     }
     if resume_mode == "auto":
         loop_kwargs["resume"] = "auto"
+        if auto_resume is not None:
+            loop_kwargs["auto_resume_path"] = auto_resume[0]
     final_checkpoint = training_loop(
         **loop_kwargs,
     )

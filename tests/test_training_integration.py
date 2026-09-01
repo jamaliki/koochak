@@ -14,6 +14,7 @@ from hierarchical_kaveh.config import (
     WandbConfig,
 )
 from hierarchical_kaveh.train import _parser
+import hierarchical_kaveh.training as training_module
 from hierarchical_kaveh.training import _hooks, _resume_checkpoint, run_training
 
 
@@ -29,7 +30,7 @@ class _FakeWandb:
         return object()
 
 
-def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
+def test_koochak_step_checkpoint_and_resume(tmp_path, monkeypatch) -> None:
     length = 5
     generator = np.random.default_rng(1)
     np.savez_compressed(
@@ -105,6 +106,14 @@ def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
         train=training,
         logging=LoggingConfig(),
     )
+    observed_loader_steps: list[int] = []
+    real_build_loader = training_module.build_train_dataloader
+
+    def record_loader_step(*args, **kwargs):
+        observed_loader_steps.append(int(kwargs["global_step"]))
+        return real_build_loader(*args, **kwargs)
+
+    monkeypatch.setattr(training_module, "build_train_dataloader", record_loader_step)
 
     # The same immutable command is valid for both the first attempt and a
     # later attempt. Koochak starts cleanly when no publication exists.
@@ -115,6 +124,7 @@ def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
 
     resumed = run_training(replace(config, train=replace(training, max_steps=2)), resume="auto")
     assert resumed["next_step"] == 2
+    assert observed_loader_steps == [0, 1]
 
 
 def test_project_does_not_select_auto_resume_checkpoint() -> None:
