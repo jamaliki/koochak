@@ -91,10 +91,7 @@ def _requirements(environment: Mapping[str, Any]) -> dict[str, str]:
         if not Path(filename).is_file():
             raise PreflightError(f"required file is unavailable: {filename}")
         observed[f"file:{filename}"] = "available"
-    profile_environment = environment["environment"]
-    profile_values = profile_environment["set"]
-    profile_pythonpath = profile_values.get("PYTHONPATH", "")
-    import_paths = [item for item in profile_pythonpath.split(os.pathsep) if item]
+    import_paths = _profile_import_paths(environment)
     # The runner itself is intentionally launched with ``python -I``. Add the
     # profile's explicit import roots for package checks so preflight observes
     # the same source handoff that the managed child will receive.
@@ -123,6 +120,36 @@ def _requirements(environment: Mapping[str, Any]) -> dict[str, str]:
             )
         observed[f"package:{module_name}"] = actual_version
     return observed
+
+
+def _profile_import_paths(environment: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the explicit profile import roots in deterministic order."""
+
+    settings = environment["environment"]
+    values = settings["set"]
+    pythonpath = values.get("PYTHONPATH", "")
+    if not isinstance(pythonpath, str):
+        raise PreflightError("environment.set.PYTHONPATH must be a string")
+    return tuple(item for item in pythonpath.split(os.pathsep) if item)
+
+
+def _isolated_python_argv(argv: list[str], import_paths: tuple[str, ...]) -> list[str]:
+    """Route isolated Python children through the explicit-path bootstrap."""
+
+    if not import_paths or not Path(argv[0]).name.startswith("python"):
+        return argv
+    if "-I" not in argv[1:]:
+        return argv
+    original = [item for item in argv[1:] if item != "-I"]
+    return [
+        argv[0],
+        "-I",
+        "-m",
+        "koochak.jobs.isolated_exec",
+        json.dumps(list(import_paths), separators=(",", ":")),
+        "--",
+        *original,
+    ]
 
 
 def _verify_config(document: Mapping[str, Any]) -> None:
@@ -240,6 +267,7 @@ def _run_managed_child(
     *,
     cwd: str,
     environment: Mapping[str, str],
+    import_paths: tuple[str, ...] = (),
 ) -> int:
     """Run one child process group and forward evacuation only to that group."""
 
@@ -256,7 +284,7 @@ def _run_managed_child(
         if requested:
             return EVACUATION_EXIT_CODE
         child = subprocess.Popen(
-            argv,
+            _isolated_python_argv(argv, import_paths),
             cwd=cwd,
             env=dict(environment),
             start_new_session=True,
@@ -417,6 +445,7 @@ def execute_manifest(manifest_path: str, expected_sha256: str) -> int:
         document["argv"],
         cwd=document["cwd"],
         environment=clean_environment,
+        import_paths=_profile_import_paths(environment),
     )
     if child_returncode:
         result.update(state="failed", child_returncode=child_returncode)
