@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import pickle
 import re
 import shutil
 from collections import OrderedDict
@@ -115,6 +116,8 @@ def _valid_published_numbered_checkpoint(path: str) -> bool:
         return False
     manifest_path = publication_path(absolute)
     try:
+        if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
+            return False
         with open(manifest_path, encoding="utf-8") as handle:
             record = json.load(handle)
         expected = {"v", "artifact_id", "path", "size_bytes", "sha256", "manifest_path"}
@@ -129,13 +132,14 @@ def _valid_published_numbered_checkpoint(path: str) -> bool:
         size = os.path.getsize(absolute)
         if type(record["size_bytes"]) is not int or record["size_bytes"] != size:
             return False
-        digest = hashlib.sha256()
         with open(absolute, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        if record["sha256"] != digest.hexdigest():
+            payload = handle.read()
+        if len(payload) != size:
             return False
-        checkpoint = load(absolute)
+        digest = hashlib.sha256(payload).hexdigest()
+        if record["sha256"] != digest:
+            return False
+        checkpoint = torch.load(io.BytesIO(payload), weights_only=False, map_location="cpu")
         if not isinstance(checkpoint, dict):
             return False
         step = checkpoint.get("step")
@@ -148,7 +152,20 @@ def _valid_published_numbered_checkpoint(path: str) -> bool:
         # checkpoints store the completed-update cursor.  Both are valid.
         if next_step not in (step, step + 1):
             return False
-    except (OSError, EOFError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+    except (
+        OSError,
+        EOFError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        IndexError,
+        KeyError,
+        ImportError,
+        MemoryError,
+        OverflowError,
+        pickle.PickleError,
+    ):
         return False
     return True
 

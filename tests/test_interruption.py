@@ -13,6 +13,7 @@ import torch
 
 from koochak.interruption import EVACUATION_EXIT_CODE, EvacuationController
 from koochak.loop import training_loop
+from koochak.logging.events import make_event_hooks
 from koochak.storage import checkpoint
 
 
@@ -184,6 +185,85 @@ def test_manifest_path_size_digest_and_cursor_are_validated(tmp_path: Path) -> N
     manifest["path"] = str(tmp_path / "elsewhere.pt")
     manifest_path.write_text(json.dumps(manifest))
     assert checkpoint.highest_valid_published(str(tmp_path)) is None
+
+
+def test_malformed_payload_and_symlinked_manifest_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "step000000003.pt"
+    payload = b"not a torch checkpoint"
+    path.write_bytes(payload)
+    manifest_path = Path(checkpoint.publication_path(str(path)))
+    manifest = {
+        "v": 1,
+        "artifact_id": path.name.replace("step", "checkpoint/step"),
+        "path": str(path.absolute()),
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "manifest_path": str(manifest_path.absolute()),
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    assert checkpoint.highest_valid_published(str(tmp_path)) is None
+
+    checkpoint.save(
+        {"step": 3, "next_step": 4, "model": {}, "optimizer": {}}, str(path)
+    )
+    real_manifest = tmp_path / "real.ready.json"
+    real_manifest.write_bytes(manifest_path.read_bytes())
+    manifest_path.unlink()
+    manifest_path.symlink_to(real_manifest.name)
+    assert checkpoint.highest_valid_published(str(tmp_path)) is None
+
+
+def test_validator_loads_the_hashed_payload_not_checkpoint_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "step000000003.pt"
+    checkpoint.save(
+        {"step": 3, "next_step": 4, "model": {}, "optimizer": {}}, str(path)
+    )
+    monkeypatch.setattr(
+        checkpoint,
+        "load",
+        lambda _path: pytest.fail("validator must load its stable byte snapshot"),
+    )
+    assert checkpoint.highest_valid_published(str(tmp_path)) == str(path.absolute())
+
+
+def test_auto_resume_retries_typed_artifact_publication(tmp_path: Path) -> None:
+    failed = True
+
+    def flaky_publish(kind: str, _data: dict[str, object]) -> None:
+        nonlocal failed
+        if kind == "workload.artifact" and failed:
+            failed = False
+            raise OSError("transient Scruffy publication loss")
+
+    model = torch.nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    with pytest.warns(RuntimeWarning, match="publisher failed"):
+        training_loop(
+            model=model,
+            dataset=_dataset(),
+            step_fn=_step_fn,
+            optimizer=optimizer,
+            train_cfg=_train_cfg(tmp_path, max_steps=1),
+            resume="none",
+            hooks=make_event_hooks(flaky_publish),
+        )
+
+    healed: list[tuple[str, dict[str, object]]] = []
+    resumed_model = torch.nn.Linear(1, 1, bias=False)
+    resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1)
+    training_loop(
+        model=resumed_model,
+        dataset=_dataset(),
+        step_fn=_step_fn,
+        optimizer=resumed_optimizer,
+        train_cfg=_train_cfg(tmp_path, max_steps=2),
+        resume="auto",
+        hooks=make_event_hooks(lambda kind, data: healed.append((kind, data))),
+    )
+    artifacts = [data for kind, data in healed if kind == "workload.artifact"]
+    assert artifacts[0]["location"].endswith("step000000001.pt")
 
 
 def test_ddp_ranks_reconcile_evacuation_and_publish_per_rank_rng(tmp_path: Path) -> None:
