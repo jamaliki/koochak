@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ..jobs_types import freeze_json
+from ..storage.artifact import validate_artifact_id
 from .manifest import PreparedRun
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -64,8 +64,7 @@ def _validate_wait_for(wait_for: Sequence[Mapping[str, Any]]) -> tuple[Any, ...]
         if item["kind"] != "artifact":
             raise ValueError("wait_for only supports kind='artifact'")
         _id(item["task_id"], f"wait_for[{index}].task_id")
-        if not isinstance(item["artifact_id"], str) or not item["artifact_id"].strip():
-            raise ValueError(f"wait_for[{index}].artifact_id must be non-empty")
+        validate_artifact_id(item["artifact_id"], f"wait_for[{index}].artifact_id")
     identities = {(item["task_id"], item["artifact_id"]) for item in frozen}
     if len(identities) != len(frozen):
         raise ValueError("wait_for must not contain duplicate artifact conditions")
@@ -87,18 +86,18 @@ def _validate_recovery(value: Mapping[str, Any] | None) -> Any:
     if isinstance(retry_on, (str, bytes)) or not isinstance(retry_on, Sequence):
         raise ValueError("recovery.retry_on must be a sequence")
     retry_on = tuple(retry_on)
-    if not retry_on or any(reason not in _RETRY_REASONS for reason in retry_on):
+    if any(not isinstance(reason, str) or reason not in _RETRY_REASONS for reason in retry_on):
         raise ValueError(f"recovery.retry_on must use only {sorted(_RETRY_REASONS)!r}")
     if len(set(retry_on)) != len(retry_on):
         raise ValueError("recovery.retry_on must not contain duplicates")
     evacuation = value["evacuation"]
     if not isinstance(evacuation, Mapping) or set(evacuation) != {"signal", "grace_seconds"}:
         raise ValueError("recovery.evacuation must contain exactly signal and grace_seconds")
-    if evacuation["signal"] not in {"USR1", "SIGUSR1"}:
-        raise ValueError("recovery.evacuation.signal must be USR1")
+    if evacuation["signal"] != "USR1":
+        raise ValueError("recovery.evacuation.signal must equal 'USR1'")
     grace = evacuation["grace_seconds"]
-    if isinstance(grace, bool) or not isinstance(grace, (int, float)) or not math.isfinite(float(grace)) or grace <= 0:
-        raise ValueError("recovery.evacuation.grace_seconds must be positive and finite")
+    if type(grace) is not int or grace < 0:
+        raise ValueError("recovery.evacuation.grace_seconds must be a non-negative integer")
     return freeze_json(
         {
             "max_attempts": max_attempts,
@@ -182,6 +181,25 @@ class PreparedWorkflow:
             for condition in task.wait_for:
                 if condition["task_id"] not in known:
                     raise ValueError(f"missing artifact dependency: {condition['task_id']}")
+            for output in task.run.declared_outputs:
+                provenance = output.provenance
+                expected = {
+                    "project_id": self.project_id,
+                    "workflow_id": self.workflow_id,
+                    "task_id": task.task_id,
+                }
+                for key, value in expected.items():
+                    if provenance.get(key) != value:
+                        raise ValueError(
+                            f"declared output {output.artifact_id!r} provenance.{key} "
+                            f"must equal {value!r}"
+                        )
+                code_commit = provenance.get("code_commit")
+                if not isinstance(code_commit, str) or not code_commit.strip():
+                    raise ValueError(
+                        f"declared output {output.artifact_id!r} provenance.code_commit "
+                        "must be non-empty"
+                    )
         object.__setattr__(self, "tasks", tasks)
 
     def scruffy_tasks(self) -> list[dict[str, Any]]:

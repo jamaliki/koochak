@@ -99,7 +99,9 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - Phase 4 workflow foundations [DONE]
   - Immutable `PreparedTask`/`PreparedWorkflow` models and all-or-none `submit_scruffy_workflow` staging.
   - Immutable file/directory ready manifests with deterministic file ordering, byte size, SHA256, provenance, and counts.
-  - Declared output validation/publication in a managed child process group; SIGUSR1 is never sent to the parent allocation.
+  - Declared output validation/publication in a managed child process group; SIGUSR1 is never sent to the parent allocation, surviving descendants fail closed, and partial event retries use deterministic IDs.
+  - Shared-storage race checks use no-follow descriptors and no-overwrite links but assume cooperative same-user writers; use isolation for hostile same-UID workloads.
+  - Final-pin gate: after Scruffy stabilizes, update the optional dependency to its reviewed commit and rerun both repositories' full suites before release or deployment.
   - `storage.checkpoint.resolve_auto_resume()` returns the validated loaded payload alongside its path so callers can construct datasets from `next_step` before entering `training_loop`; preloaded selection retains `auto_resume_selected` and artifact republishing.
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
@@ -168,7 +170,7 @@ Done recently
 - Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).
 - Generic CLI: `python -m koochak.cli.train --config ...` with strict validation and standard hooks.
 - Generic CLI automatically attaches Scruffy workload-event hooks when both `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID` identify a managed worker; Scruffy remains an optional lazy import.
-- Safe evacuation is opt-in through `train.evacuation_enabled` or the `training_loop(..., evacuation=...)` API. `SIGUSR1` only sets an in-memory flag; after a completed optimizer update, DDP ranks reconcile the request, publish a numbered terminal checkpoint and event, finish hooks, and exit with reserved code 75.
+- Safe evacuation is opt-in through `train.evacuation_enabled` or the `training_loop(..., evacuation=...)` API. `SIGUSR1` only sets an in-memory flag; after a completed optimizer update, DDP ranks reconcile the request, durably publish a numbered terminal checkpoint, cross the terminal barrier, publish its event, finish hooks, and exit with reserved code 75.
 - `resume: auto` (the generic CLI default) selects only the highest numbered checkpoint with a valid ready manifest, exact path/size/SHA256, and valid resume cursor; `latest.pt` is never resume evidence.
 - When auto-resume selects a checkpoint, the typed checkpoint artifact event is retried once through the configured event hook so transient Scruffy journal loss can heal without making ordinary progress telemetry fatal. Restartable W&B jobs must provide a stable `name` or `id` and set `resume: allow`; this is enforced only on attempts that actually resume.
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.

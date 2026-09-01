@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
 
 from ..jobs_types import freeze_json, thaw_json, validate_json_value
-from .atomic import atomic_write
+from .immutable import read_stable_regular_file, write_immutable_file
 
 __all__ = [
     "ARTIFACT_MANIFEST_VERSION",
@@ -25,6 +26,18 @@ __all__ = [
 
 ARTIFACT_MANIFEST_VERSION = 1
 _KINDS = frozenset({"file", "directory"})
+
+
+def validate_artifact_id(value: object, label: str = "artifact_id") -> str:
+    """Validate the exact printable identifier contract accepted by Scruffy v1."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+    if value != value.strip():
+        raise ValueError(f"{label} must not have leading or trailing whitespace")
+    if len(value) > 256 or any(ord(character) < 32 for character in value):
+        raise ValueError(f"{label} must be at most 256 printable characters")
+    return value
 
 
 def _absolute(value: str, label: str) -> str:
@@ -67,10 +80,7 @@ class DeclaredOutput:
         expected_records: int | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        if not isinstance(artifact_id, str) or not artifact_id.strip():
-            raise ValueError("artifact_id must be a non-empty string")
-        if artifact_id != artifact_id.strip() or "\x00" in artifact_id:
-            raise ValueError("artifact_id must not contain surrounding whitespace or NUL bytes")
+        artifact_id = validate_artifact_id(artifact_id)
         if not isinstance(kind, str) or kind not in _KINDS:
             raise ValueError("kind must be 'file' or 'directory'")
         if not isinstance(stage, str) or "\x00" in stage:
@@ -142,9 +152,10 @@ def artifact_manifest_path(path: str) -> str:
 
 
 def _file_entry(path: Path, relative: str | None = None) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"artifact contains a non-regular file: {path}")
-    payload = path.read_bytes()
+    try:
+        payload = read_stable_regular_file(path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"artifact contains an unavailable or unstable file: {path}") from exc
     return {
         "path": relative or path.name,
         "size_bytes": len(payload),
@@ -153,16 +164,44 @@ def _file_entry(path: Path, relative: str | None = None) -> dict[str, Any]:
 
 
 def _directory_entries(root: Path) -> tuple[dict[str, Any], ...]:
-    if root.is_symlink() or not root.is_dir():
+    try:
+        root_stat = os.lstat(root)
+    except OSError as exc:
+        raise ValueError(f"artifact directory is unavailable: {root}") from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
         raise ValueError(f"artifact directory is unavailable: {root}")
     entries: list[dict[str, Any]] = []
-    for candidate in root.rglob("*"):
-        if candidate.is_dir():
-            if candidate.is_symlink():
-                raise ValueError(f"artifact contains a symlinked directory: {candidate}")
-            continue
-        relative = PurePosixPath(candidate.relative_to(root).as_posix()).as_posix()
-        entries.append(_file_entry(candidate, relative))
+    directories: dict[Path, tuple[int, int, int, int]] = {}
+    for directory_name, child_directories, filenames in os.walk(root, followlinks=False):
+        directory = Path(directory_name)
+        observed = os.lstat(directory)
+        if not stat.S_ISDIR(observed.st_mode):
+            raise ValueError(f"artifact directory changed while reading: {directory}")
+        directories[directory] = (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        )
+        for name in child_directories:
+            child = directory / name
+            child_stat = os.lstat(child)
+            if not stat.S_ISDIR(child_stat.st_mode):
+                raise ValueError(f"artifact contains a symlinked directory: {child}")
+        for name in filenames:
+            candidate = directory / name
+            relative = PurePosixPath(candidate.relative_to(root).as_posix()).as_posix()
+            entries.append(_file_entry(candidate, relative))
+    for directory, expected in directories.items():
+        observed = os.lstat(directory)
+        current = (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        )
+        if not stat.S_ISDIR(observed.st_mode) or current != expected:
+            raise ValueError(f"artifact directory changed while reading: {directory}")
     entries.sort(key=lambda item: item["path"])
     return tuple(entries)
 
@@ -189,6 +228,8 @@ def build_artifact_manifest(
     """Build a strict manifest from the output bytes currently on disk."""
 
     observed_records = _nonnegative_count(observed_records, "observed_records")
+    if output.expected_records is not None and observed_records != output.expected_records:
+        raise ValueError("observed_records must equal expected_records")
     size_bytes, digest, entries = _content_digest(output.kind, Path(output.path))
     manifest: dict[str, Any] = {
         "v": ARTIFACT_MANIFEST_VERSION,
@@ -215,10 +256,10 @@ def build_artifact_manifest(
 
 def _read_manifest(path: str) -> dict[str, Any]:
     manifest_path = artifact_manifest_path(path)
-    if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
-        raise ValueError(f"artifact ready manifest is unavailable: {manifest_path}")
-    with open(manifest_path, encoding="utf-8") as handle:
-        value = json.load(handle)
+    try:
+        value = json.loads(read_stable_regular_file(manifest_path))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"artifact ready manifest is unavailable: {manifest_path}") from exc
     if not isinstance(value, dict):
         raise ValueError(f"artifact ready manifest must be an object: {manifest_path}")
     return value
@@ -264,6 +305,17 @@ def validate_artifact(
     if counts["expected"] != output.expected_records:
         raise ValueError("artifact expected record count does not match declaration")
     _nonnegative_count(counts["observed"], "observed_records")
+    if counts["expected"] is not None and counts["observed"] != counts["expected"]:
+        raise ValueError("artifact observed record count differs from expected")
+    created_at = value["created_at"]
+    if not isinstance(created_at, str):
+        raise ValueError("artifact created_at must be a timezone-aware ISO timestamp")
+    try:
+        timestamp = datetime.fromisoformat(created_at)
+    except ValueError as exc:
+        raise ValueError("artifact created_at must be a timezone-aware ISO timestamp") from exc
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("artifact created_at must be a timezone-aware ISO timestamp")
     if (
         value["provenance"] != thaw_json(output.provenance)
         or value["metadata"] != thaw_json(output.metadata)
@@ -285,11 +337,24 @@ def publish_artifact(
     """Atomically publish one immutable output ready manifest."""
 
     manifest_path = artifact_manifest_path(output.path)
-    if os.path.exists(manifest_path):
-        return validate_artifact(output)
+    try:
+        os.lstat(manifest_path)
+    except FileNotFoundError:
+        pass
+    else:
+        value = validate_artifact(output)
+        if value["counts"]["observed"] != observed_records:
+            raise FileExistsError("published artifact observed_records differ")
+        return value
     manifest = build_artifact_manifest(output, observed_records=observed_records)
     encoded = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    atomic_write(manifest_path, encoded)
+    try:
+        write_immutable_file(manifest_path, encoded)
+    except FileExistsError:
+        value = validate_artifact(output)
+        if value["counts"]["observed"] != observed_records:
+            raise
+        return value
     return validate_artifact(output, manifest=manifest)
 
 
