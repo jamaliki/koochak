@@ -8,6 +8,7 @@ import pickle
 import re
 import shutil
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -31,6 +32,15 @@ from .atomic import atomic_write
 from .pruning import prune_keep_last_k
 
 PUBLICATION_SUFFIX = ".ready.json"
+
+
+@dataclass(frozen=True, slots=True)
+class AutoResumeSelection:
+    """Validated auto-resume evidence and its first unexecuted update."""
+
+    path: str
+    checkpoint: Dict[str, Any]
+    next_step: int
 
 
 def _torch_save_to_bytes(obj: Any) -> bytes:
@@ -106,52 +116,54 @@ def _copy_latest(step_path: str, latest_path: str) -> Optional[str]:
 _STEP_RE = re.compile(r"step(\d+)\.pt$")
 
 
-def _valid_published_numbered_checkpoint(path: str) -> bool:
+def _read_valid_published_numbered_checkpoint(
+    path: str,
+) -> Optional[AutoResumeSelection]:
     """Fail closed unless a numbered checkpoint and its exact manifest agree."""
 
     absolute = os.path.abspath(path)
     name = os.path.basename(absolute)
     match = re.fullmatch(r"step(\d+)\.pt", name)
     if match is None or not os.path.isfile(absolute) or os.path.islink(absolute):
-        return False
+        return None
     manifest_path = publication_path(absolute)
     try:
         if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
-            return False
+            return None
         with open(manifest_path, encoding="utf-8") as handle:
             record = json.load(handle)
         expected = {"v", "artifact_id", "path", "size_bytes", "sha256", "manifest_path"}
         if not isinstance(record, dict) or set(record) != expected:
-            return False
+            return None
         if record["v"] != 1:
-            return False
+            return None
         if record["artifact_id"] != f"checkpoint/{name}":
-            return False
+            return None
         if record["path"] != absolute or record["manifest_path"] != manifest_path:
-            return False
+            return None
         size = os.path.getsize(absolute)
         if type(record["size_bytes"]) is not int or record["size_bytes"] != size:
-            return False
+            return None
         with open(absolute, "rb") as handle:
             payload = handle.read()
         if len(payload) != size:
-            return False
+            return None
         digest = hashlib.sha256(payload).hexdigest()
         if record["sha256"] != digest:
-            return False
+            return None
         checkpoint = torch.load(io.BytesIO(payload), weights_only=False, map_location="cpu")
         if not isinstance(checkpoint, dict):
-            return False
+            return None
         step = checkpoint.get("step")
         next_step = checkpoint.get("next_step")
         if type(step) is not int or type(next_step) is not int or next_step < 0:
-            return False
+            return None
         if step != int(match.group(1)):
-            return False
+            return None
         # Periodic checkpoints store the last zero-based update; terminal
         # checkpoints store the completed-update cursor.  Both are valid.
         if next_step not in (step, step + 1):
-            return False
+            return None
     except (
         OSError,
         EOFError,
@@ -166,8 +178,12 @@ def _valid_published_numbered_checkpoint(path: str) -> bool:
         OverflowError,
         pickle.PickleError,
     ):
-        return False
-    return True
+        return None
+    return AutoResumeSelection(absolute, checkpoint, next_step)
+
+
+def _valid_published_numbered_checkpoint(path: str) -> bool:
+    return _read_valid_published_numbered_checkpoint(path) is not None
 
 
 def highest_valid_published(directory: str) -> Optional[str]:
@@ -186,12 +202,36 @@ def highest_valid_published(directory: str) -> Optional[str]:
         if match is not None:
             candidates.append((int(match.group(1)), os.path.join(directory, name)))
     for _step, path in sorted(candidates, reverse=True):
-        if _valid_published_numbered_checkpoint(path):
-            return os.path.abspath(path)
+        selection = _read_valid_published_numbered_checkpoint(path)
+        if selection is not None:
+            return selection.path
     return None
 
 
 latest_valid = highest_valid_published
+
+
+def resolve_auto_resume(directory: str) -> Optional[tuple[str, Dict[str, Any]]]:
+    """Return validated checkpoint bytes and cursor for first-run-safe resume.
+
+    The checkpoint payload is loaded from the same bytes whose size and SHA256
+    were validated against the ready manifest.  Callers that need the resume
+    cursor before constructing a dataset can use this API without reimplementing
+    Koochak's evidence checks.
+    """
+
+    if not os.path.isdir(directory):
+        return None
+    candidates = []
+    for name in os.listdir(directory):
+        match = re.fullmatch(r"step(\d+)\.pt", name)
+        if match is not None:
+            candidates.append((int(match.group(1)), os.path.join(directory, name)))
+    for _step, path in sorted(candidates, reverse=True):
+        selection = _read_valid_published_numbered_checkpoint(path)
+        if selection is not None:
+            return selection.path, selection.checkpoint
+    return None
 
 
 def save(ckpt: Dict[str, Any], path: str, keep_last_k: int = 3) -> str:

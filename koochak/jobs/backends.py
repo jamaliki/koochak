@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .manifest import Artifact, PreparedRun, stage_run
+from .workflow import PreparedWorkflow
 
 _REMOTE_STAGE = """
 import hashlib
@@ -142,4 +143,48 @@ def submit_scruffy(
         task_id=task_id,
         needs=needs,
         wait_for=wait_for,
+    )
+
+
+def submit_scruffy_workflow(
+    workflow: PreparedWorkflow,
+    *,
+    root: str | Path,
+) -> dict[str, Any]:
+    """Stage a complete prepared workflow, then submit it atomically to Scruffy.
+
+    The Koochak side effect order is deliberate: every launch manifest must be
+    durable before the one Scruffy API call is made.  The task mappings are
+    passed unchanged to Scruffy so an older client cannot silently discard a
+    dependency or recovery gate.
+    """
+
+    if not isinstance(workflow, PreparedWorkflow):
+        raise TypeError("workflow must be a PreparedWorkflow")
+    try:
+        from scruffy import submit_workflow
+    except ModuleNotFoundError as exc:
+        if exc.name == "scruffy":
+            raise RuntimeError(
+                "submit_scruffy_workflow requires the optional dependency: "
+                "install 'koochak[scruffy]'"
+            ) from exc
+        raise RuntimeError(
+            "the installed scruffy-gpu package has a missing dependency; "
+            "upgrade with 'pip install --upgrade koochak[scruffy]'"
+        ) from exc
+    except ImportError as exc:
+        raise RuntimeError(
+            "the installed scruffy-gpu package is incompatible with this Python; "
+            "upgrade with 'pip install --upgrade koochak[scruffy]'"
+        ) from exc
+
+    for task in workflow.tasks:
+        stage_run(task.run)
+    return submit_workflow(
+        Path(root),
+        request_id=workflow.request_id,
+        workflow_id=workflow.workflow_id,
+        project_id=workflow.project_id,
+        tasks=workflow.scruffy_tasks(),
     )

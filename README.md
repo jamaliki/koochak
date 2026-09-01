@@ -183,11 +183,13 @@ state deterministically.
   - `jobs/`
     - `profile.py` – strict, reusable execution-environment profiles.
     - `manifest.py` – deterministic config materialization and immutable launch manifests.
-    - `runner.py` – clean-environment checks followed by an exact Python `execve`.
-    - `backends.py` – thin Python adapters for Pazuzu and Scruffy.
+    - `runner.py` – clean-environment checks, managed child process groups, and typed output publication.
+    - `workflow.py` – immutable `PreparedTask`/`PreparedWorkflow` models targeting Scruffy's strict workflow protocol.
+    - `backends.py` – thin Python adapters for Pazuzu and Scruffy, including all-or-none workflow staging.
   - `optim/`
     - `build.py` – tiny builders for optimizers/schedulers (supports cosine, step, plateau, cosine_warmup).
   - `storage/`
+    - `artifact.py` – immutable file/directory ready manifests with deterministic ordering, size, SHA256, provenance, and counts.
     - `checkpoint.py` – checkpoint save/load (atomic), `latest`, `best`.
     - `atomic.py` – atomic file writer.
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
@@ -336,6 +338,23 @@ requirements:
   packages: {torch: "2.8.0", triton: "3.4.0"}
 preflight: [c_compiler, cuda, torch_compile]
 ```
+
+For a multi-task DAG, `submit_scruffy_workflow` stages every `PreparedRun`
+before making one strict `scruffy.submit_workflow(root, request_id,
+workflow_id, project_id, tasks)` call. Koochak pins the compatible client at
+commit `cb633a6` in the optional `scruffy` extra; it does not signature-probe
+or drop unsupported artifact gates or recovery fields. Artifact-only release
+is represented by an empty `needs` list and a `wait_for` artifact condition.
+Repeated request IDs are passed unchanged so Scruffy can apply its idempotent
+submission semantics.
+
+`DeclaredOutput` describes a file or directory that a consumer may wait for.
+The workload must create the output and atomically publish its
+`<output>.ready.json` manifest. After a successful child exit, Koochak validates
+all declared outputs before publishing typed `workload.artifact` events. A
+missing, corrupt, symlinked, or unpublishable output fails the runner. A
+SIGUSR1 request is forwarded only to that child process group and never to the
+parent Slurm allocation.
 
 Prepare a run in a committed Python submission script:
 
@@ -547,6 +566,7 @@ Koochak enforces them only when a later attempt finds durable checkpoint state.
 - `koochak.storage.checkpoint.load(path)` loads to CPU.
 - `koochak.storage.checkpoint.latest(dir)` returns `latest.pt` if present or the most recent step checkpoint.
 - `koochak.storage.checkpoint.highest_valid_published(dir)` selects the highest numbered checkpoint whose exact ready manifest, path, size, SHA256, and resume cursor validate. It never treats `latest.pt`, a directory, or incomplete/corrupt scaffolding as evidence.
+- `koochak.storage.checkpoint.resolve_auto_resume(dir)` returns `(path, checkpoint)` from the same single payload read whose manifest, path, size, SHA256, and cursor were validated. Use `checkpoint["next_step"]` before constructing a dataset, then pass both values as `checkpoint_dict` and `auto_resume_path` to `training_loop(..., resume="auto")` to retain selection events and typed artifact republishing.
 - `koochak.storage.checkpoint.best(dir, key)` selects the lowest metric across checkpoints.
 
 ### Safe evacuation and resume

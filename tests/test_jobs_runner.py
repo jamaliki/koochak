@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
-from koochak.jobs import EnvironmentProfile, prepare_run, runner, stage_run
+from koochak.jobs import DeclaredOutput, EnvironmentProfile, prepare_run, runner, stage_run
+from koochak.storage.artifact import publish_artifact
 
 
 def _profile(*, secrets: tuple[str, ...] = ()) -> EnvironmentProfile:
@@ -49,7 +52,7 @@ def test_clean_environment_discards_ambient_values_and_preserves_runtime_identit
     assert "NCCL_DEBUG" not in clean
 
 
-def test_runner_records_preflight_then_execs_exact_workload(
+def test_runner_records_preflight_then_runs_exact_workload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prepared = prepare_run(
@@ -62,19 +65,15 @@ def test_runner_records_preflight_then_execs_exact_workload(
     stage_run(prepared)
     seen: dict[str, object] = {}
 
-    class ExecCalled(Exception):
-        pass
-
-    def fake_exec(executable, argv, environment):
-        seen.update(executable=executable, argv=argv, environment=environment)
-        raise ExecCalled
+    def fake_child(argv, *, cwd, environment):
+        seen.update(executable=argv[0], argv=argv, environment=environment)
+        assert cwd == prepared.cwd
+        return 0
 
     monkeypatch.setattr(runner.os, "environ", {"HOME": str(tmp_path), "NOISE": "drop"})
-    monkeypatch.setattr(runner.os, "chdir", lambda _: None)
-    monkeypatch.setattr(runner.os, "execve", fake_exec)
+    monkeypatch.setattr(runner, "_run_managed_child", fake_child)
 
-    with pytest.raises(ExecCalled):
-        runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256)
+    assert runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256) == 0
 
     result = json.loads((Path(prepared.run_dir) / "preflight.json").read_text())
     assert result["state"] == "passed"
@@ -139,3 +138,79 @@ def test_isolated_runner_executes_the_declared_python(tmp_path: Path) -> None:
     preflight = json.loads((Path(prepared.run_dir) / "preflight.json").read_text())
     assert preflight["state"] == "passed"
     assert preflight["environment_sha256"]
+
+
+def test_managed_runner_publishes_declared_output_after_child_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "run" / "result.txt"
+    output = DeclaredOutput("result", str(output_path), stage="metrics")
+    prepared = prepare_run(
+        name="managed-runner",
+        profile=_profile(),
+        python_args=["-c", f"from pathlib import Path; Path({str(output_path)!r}).write_text('ok')"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+        declared_outputs=[output],
+    )
+    stage_run(prepared)
+    output_path.write_text("ok")
+    publish_artifact(output)
+    published: list[dict[str, object]] = []
+
+    def fake_publish(root, **values):
+        published.append({"root": root, **values})
+        return {"state": "spooled"}
+
+    import types
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = fake_publish  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    monkeypatch.setattr(runner.os, "environ", {
+        "HOME": str(tmp_path),
+        "SCRUFFY_ROOT": str(tmp_path / "queue"),
+        "SCRUFFY_JOB_ID": "job-1",
+    })
+
+    assert runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256) == 0
+    assert len(published) == 1
+    assert published[0]["kind"] == "workload.artifact"
+    assert published[0]["data"]["publication"]["artifact_id"] == "result"  # type: ignore[index]
+
+
+def test_managed_runner_preserves_nonzero_child_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = DeclaredOutput("result", str(tmp_path / "run" / "result.txt"))
+    prepared = prepare_run(
+        name="managed-failure",
+        profile=_profile(),
+        python_args=["-c", "raise SystemExit(7)"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+        declared_outputs=[output],
+    )
+    stage_run(prepared)
+    monkeypatch.setattr(runner.os, "environ", {"HOME": str(tmp_path)})
+    assert runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256) == 7
+
+
+def test_managed_runner_forwards_usr1_to_child_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    timer = threading.Timer(
+        0.05, lambda: runner.os.kill(runner.os.getpid(), signal.SIGUSR1)
+    )
+    timer.start()
+    try:
+        result = runner._run_managed_child(  # noqa: SLF001 - contract-level test
+            [sys.executable, "-c", "import time; time.sleep(.2)"],
+            cwd="/tmp",
+            environment={"PATH": str(Path(sys.executable).parent)},
+        )
+    finally:
+        timer.join()
+    assert result == 0
+    assert sent and sent[0][1] == signal.SIGUSR1
+    assert sent[0][0] > 0

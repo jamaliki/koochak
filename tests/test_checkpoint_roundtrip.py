@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
 import torch
 import torch.nn as nn
@@ -13,12 +12,7 @@ def _copy_state(sd):
     return {k: v.detach().clone() for k, v in sd.items()}
 
 
-def test_save_load_roundtrip(tmp_path: Path = Path("tests/_tmp_roundtrip")):
-    # fresh dir
-    if tmp_path.exists():
-        shutil.rmtree(tmp_path)
-    tmp_path.mkdir(parents=True)
-
+def test_save_load_roundtrip(tmp_path: Path):
     # create a model and optimizer, then save
     m = nn.Sequential(nn.Linear(3, 4), nn.ReLU(), nn.Linear(4, 2))
     opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
@@ -47,4 +41,3 @@ def test_save_load_roundtrip(tmp_path: Path = Path("tests/_tmp_roundtrip")):
     for (k, v), (k2, v2) in zip(orig.items(), m2.state_dict().items()):
         assert k == k2
         assert torch.allclose(v, v2)
-

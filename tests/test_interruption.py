@@ -150,6 +150,84 @@ def test_auto_resume_is_first_run_safe_and_uses_first_unexecuted_step(tmp_path: 
     assert resumed["next_step"] == 3
 
 
+def test_resolve_auto_resume_returns_validated_path_and_cursor(tmp_path: Path) -> None:
+    path = tmp_path / "step000000003.pt"
+    checkpoint.save(
+        {"step": 3, "next_step": 4, "model": {}, "optimizer": {}}, str(path)
+    )
+
+    resolved = checkpoint.resolve_auto_resume(str(tmp_path))
+
+    assert resolved is not None
+    resolved_path, resolved_checkpoint = resolved
+    assert resolved_path == str(path.absolute())
+    assert resolved_checkpoint["next_step"] == 4
+
+
+def test_resolve_auto_resume_loads_the_validated_payload_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "step000000003.pt"
+    checkpoint.save(
+        {"step": 3, "next_step": 4, "model": {}, "optimizer": {}}, str(path)
+    )
+    calls = 0
+    original_load = checkpoint.torch.load
+
+    def counted_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_load(*args, **kwargs)
+
+    def unexpected_path_load(_path):
+        raise AssertionError("resolver must not reopen the checkpoint path")
+
+    monkeypatch.setattr(checkpoint.torch, "load", counted_load)
+    monkeypatch.setattr(checkpoint, "load", unexpected_path_load)
+    resolved = checkpoint.resolve_auto_resume(str(tmp_path))
+    assert resolved is not None
+    assert calls == 1
+    assert resolved[1]["next_step"] == 4
+
+
+def test_preloaded_auto_resume_preserves_selection_event(tmp_path: Path) -> None:
+    model = torch.nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    training_loop(
+        model=model,
+        dataset=_dataset(),
+        step_fn=_step_fn,
+        optimizer=optimizer,
+        train_cfg=_train_cfg(tmp_path, max_steps=1),
+    )
+    resolved = checkpoint.resolve_auto_resume(str(tmp_path))
+    assert resolved is not None
+    resume_path, resume_checkpoint = resolved
+
+    events: list[tuple[str, bool]] = []
+    resumed_model = torch.nn.Linear(1, 1, bias=False)
+    resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1)
+    training_loop(
+        model=resumed_model,
+        dataset=_dataset(),
+        step_fn=_step_fn,
+        optimizer=resumed_optimizer,
+        train_cfg=_train_cfg(tmp_path, max_steps=2),
+        checkpoint_dict=resume_checkpoint,
+        resume="auto",
+        auto_resume_path=resume_path,
+        hooks={
+            "on_resume_checkpoint": [
+                lambda path, _checkpoint, ctx: events.append(
+                    (path, bool(ctx["auto_resume_selected"]))
+                )
+            ]
+        },
+    )
+
+    assert events == [(resume_path, True)]
+
+
 def test_highest_valid_published_ignores_latest_and_bad_candidates(tmp_path: Path) -> None:
     for step in (2, 4):
         checkpoint.save(
