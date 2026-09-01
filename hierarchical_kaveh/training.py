@@ -16,6 +16,7 @@ from koochak.core import dist as dist_lib
 from koochak.core import hooks as hooks_lib
 from koochak.core import launch
 from koochak.logging.csv import make_csv_hooks
+from koochak.logging.events import make_scruffy_hooks
 from koochak.logging.jsonl import make_jsonl_hooks
 from koochak.logging.stdout import make_stdout_hooks
 from koochak.loop import training_loop
@@ -168,11 +169,23 @@ def _hooks(config: RunConfig) -> dict[str, list]:
         from koochak.logging.wandb_logger import make_wandb_hooks
 
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(asdict(config.wandb)))
+    scruffy_root = os.environ.get("SCRUFFY_ROOT")
+    scruffy_job_id = os.environ.get("SCRUFFY_JOB_ID")
+    if bool(scruffy_root) != bool(scruffy_job_id):
+        raise RuntimeError(
+            "Scruffy worker identity requires both SCRUFFY_ROOT and SCRUFFY_JOB_ID"
+        )
+    if scruffy_root and scruffy_job_id:
+        # Append after local logging hooks. Koochak emits on_checkpoint only
+        # after the immutable checkpoint and ready publication are complete.
+        hooks = hooks_lib.merge(hooks, make_scruffy_hooks())
     return hooks
 
 
 def _resume_checkpoint(resume: str | Path | None, out_dir: str) -> dict[str, Any] | None:
-    if resume is None:
+    # Koochak owns validated auto-resume selection.  Do not load a candidate
+    # here: doing so would bypass its publication checks and retry event.
+    if resume is None or str(resume).lower() == "auto":
         return None
     checkpoint_file = checkpoint_lib.latest(out_dir) if str(resume) == "latest" else str(resume)
     if checkpoint_file is None:
@@ -224,7 +237,15 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
 
     model = HierarchicalKaveh(config.model)
     optimizer = build_optimizer(model, asdict(config.optimizer))
-    checkpoint = _resume_checkpoint(resume, config.train.out_dir)
+    resume_mode = None if resume is None else str(resume).lower()
+    auto_resume = (
+        checkpoint_lib.resolve_auto_resume(config.train.out_dir)
+        if resume_mode == "auto"
+        else None
+    )
+    checkpoint = auto_resume[1] if auto_resume is not None else _resume_checkpoint(
+        resume, config.train.out_dir
+    )
     global_step = 0 if checkpoint is None else int(
         checkpoint.get("next_step", int(checkpoint.get("step", 0)) + 1)
     )
@@ -241,16 +262,29 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
         seed=config.train.seed,
     )
     hooks = _hooks(config)
+    loop_kwargs: dict[str, Any] = {
+        "model": model,
+        "dataset": loader,
+        "step_fn": step,
+        "optimizer": optimizer,
+        "scheduler": None,
+        "train_cfg": plain_config["train"],
+        "config_json": plain_config,
+        "checkpoint_dict": checkpoint,
+        "hooks": hooks,
+    }
+    # The strict project config is the source of truth for this opt-in.  Do
+    # not pass an override for the default-disabled case: Koochak still reads
+    # the config field, while ordinary launches retain their legacy call
+    # shape and signal behavior.
+    if config.train.evacuation_enabled:
+        loop_kwargs["evacuation"] = True
+    if resume_mode == "auto":
+        loop_kwargs["resume"] = "auto"
+        if auto_resume is not None:
+            loop_kwargs["auto_resume_path"] = auto_resume[0]
     final_checkpoint = training_loop(
-        model=model,
-        dataset=loader,
-        step_fn=step,
-        optimizer=optimizer,
-        scheduler=None,
-        train_cfg=plain_config["train"],
-        config_json=plain_config,
-        checkpoint_dict=checkpoint,
-        hooks=hooks,
+        **loop_kwargs,
     )
 
     if config.train.save_final and dist_lib.rank0():

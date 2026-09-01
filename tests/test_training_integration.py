@@ -1,7 +1,9 @@
 from dataclasses import replace
 import json
+import sys
 
 import numpy as np
+import pytest
 
 from hierarchical_kaveh.config import (
     DataConfig,
@@ -10,11 +12,26 @@ from hierarchical_kaveh.config import (
     ModelConfig,
     RunConfig,
     TrainingConfig,
+    WandbConfig,
 )
-from hierarchical_kaveh.training import run_training
+from hierarchical_kaveh.train import _parser
+import hierarchical_kaveh.training as training_module
+from hierarchical_kaveh.training import _hooks, _resume_checkpoint, run_training
 
 
-def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
+class _FakeWandb:
+    class Settings:
+        pass
+
+    def __init__(self) -> None:
+        self.init_calls: list[dict] = []
+
+    def init(self, **kwargs):
+        self.init_calls.append(kwargs)
+        return object()
+
+
+def test_koochak_step_checkpoint_and_resume(tmp_path, monkeypatch) -> None:
     length = 5
     generator = np.random.default_rng(1)
     np.savez_compressed(
@@ -90,11 +107,97 @@ def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
         train=training,
         logging=LoggingConfig(),
     )
+    observed_loader_steps: list[int] = []
+    real_build_loader = training_module.build_train_dataloader
 
-    first = run_training(config)
+    def record_loader_step(*args, **kwargs):
+        observed_loader_steps.append(int(kwargs["global_step"]))
+        return real_build_loader(*args, **kwargs)
+
+    monkeypatch.setattr(training_module, "build_train_dataloader", record_loader_step)
+
+    # The same immutable command is valid for both the first attempt and a
+    # later attempt. Koochak starts cleanly when no publication exists.
+    first = run_training(config, resume="auto")
     assert first["next_step"] == 1
     assert first["config"]["model"] == config.to_dict()["model"]
     assert "ema" in first
 
-    resumed = run_training(replace(config, train=replace(training, max_steps=2)), resume="latest")
+    resumed = run_training(replace(config, train=replace(training, max_steps=2)), resume="auto")
     assert resumed["next_step"] == 2
+    assert observed_loader_steps == [0, 1]
+
+
+def test_project_does_not_select_auto_resume_checkpoint() -> None:
+    """Auto selection stays in Koochak, including publication validation."""
+
+    assert _resume_checkpoint("auto", "/missing/run") is None
+
+
+def test_training_cli_accepts_auto_resume() -> None:
+    args = _parser().parse_args(["--config", "config.yaml", "--resume", "auto"])
+    assert args.resume == "auto"
+
+
+def test_auto_resume_wandb_identity_is_stable_and_allows_join(monkeypatch) -> None:
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    config = RunConfig(
+        wandb=WandbConfig(
+            enabled=True,
+            project="hierarchical-kaveh-test",
+            name="stable-training-run",
+            id="stable-wandb-id",
+            resume="allow",
+        )
+    )
+
+    hooks = _hooks(config)
+    context = {"auto_resume_selected": True, "config_json": {}, "train_cfg": {}}
+    for _ in range(2):
+        for callback in hooks["on_train_start"]:
+            callback(context)
+
+    assert [call["id"] for call in fake.init_calls] == [
+        "stable-wandb-id",
+        "stable-wandb-id",
+    ]
+    assert [call["resume"] for call in fake.init_calls] == ["allow", "allow"]
+
+
+def test_scruffy_hooks_absent_for_ordinary_training(monkeypatch) -> None:
+    monkeypatch.delenv("SCRUFFY_ROOT", raising=False)
+    monkeypatch.delenv("SCRUFFY_JOB_ID", raising=False)
+
+    def unexpected_scruffy_hook() -> None:
+        raise AssertionError("ordinary training must not build Scruffy hooks")
+
+    monkeypatch.setattr(training_module, "make_scruffy_hooks", unexpected_scruffy_hook)
+    assert "on_checkpoint" not in _hooks(RunConfig())
+
+
+def test_scruffy_hooks_attach_after_local_checkpoint_hooks(monkeypatch) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/queue")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-1")
+    order: list[str] = []
+    monkeypatch.setattr(
+        training_module,
+        "make_stdout_hooks",
+        lambda: {"on_checkpoint": [lambda *_args: order.append("local")]},
+    )
+    monkeypatch.setattr(
+        training_module,
+        "make_scruffy_hooks",
+        lambda: {"on_checkpoint": [lambda *_args: order.append("scruffy")]},
+    )
+    hooks = _hooks(RunConfig())
+    for callback in hooks["on_checkpoint"]:
+        callback("/queue/step000000002.pt", {}, {})
+    assert order == ["local", "scruffy"]
+
+
+def test_scruffy_partial_worker_identity_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/queue")
+    monkeypatch.delenv("SCRUFFY_JOB_ID", raising=False)
+    with pytest.raises(RuntimeError, match="requires both SCRUFFY_ROOT and SCRUFFY_JOB_ID"):
+        _hooks(RunConfig())

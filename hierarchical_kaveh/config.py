@@ -294,6 +294,10 @@ class TrainingConfig:
     ddp_gradient_as_bucket_view: bool = True
     ddp_bucket_cap_mb: int = 32
     ddp_broadcast_buffers: bool = False
+    # Evacuation is deliberately opt-in.  Koochak installs the USR1 handler
+    # only when this flag is enabled, leaving ordinary local training intact.
+    evacuation_enabled: bool = False
+    evacuation_signal: str = "USR1"
     seed: int = 42
     device: str = "cuda"
     out_dir: str = "./runs/hierarchical-kaveh"
@@ -314,6 +318,8 @@ class TrainingConfig:
     def __post_init__(self) -> None:
         if not 0.0 <= self.self_conditioning_probability <= 1.0:
             raise ValueError("train.self_conditioning_probability must lie in [0, 1]")
+        if self.evacuation_signal != "USR1":
+            raise ValueError("train.evacuation_signal must equal 'USR1'")
 
 
 @dataclass(frozen=True)
@@ -337,6 +343,7 @@ class WandbConfig:
     project: str | None = None
     entity: str | None = None
     name: str | None = None
+    id: str | None = None
     group: str | None = None
     tags: tuple[str, ...] = ()
     mode: str | None = None

@@ -79,6 +79,19 @@ torchrun --standalone --nproc-per-node=8 \
   -m hierarchical_kaveh.train --config configs/train.yaml --resume latest
 ```
 
+Restartable tasks should use the same immutable command on every attempt:
+
+```bash
+torchrun --standalone --nproc-per-node=8 \
+  -m hierarchical_kaveh.train --config configs/train.yaml --resume auto
+```
+
+`auto` starts at step zero when no valid published numbered checkpoint exists;
+otherwise Koochak selects the highest checkpoint with a valid ready manifest.
+It never treats `latest.pt` or checkpoint scaffolding as resume evidence. Keep
+`train.out_dir` and `wandb.name` (or `wandb.id`) stable across attempts and set
+`wandb.resume: allow` for W&B-backed restartable tasks.
+
 Training follows Pallatom's standard EDM contract: scaled log-normal noise,
 rigid augmentation, stopped-gradient Kabsch-aligned coordinate MSE,
 `1/c_out^2` weighting, 100% coordinate self-conditioning, Adam at `1e-3`
@@ -97,6 +110,25 @@ compile and fused CUDA paths to succeed rather than silently falling back. Set
 
 The reader consumes the existing Kaveh ragged Atom14 shards directly; see
 [the data format](docs/data.md).
+
+## Scruffy-backed campaigns
+
+For the operator workflow, see [Robust job operations](docs/robust-job-operations.md).
+
+Every campaign submitted through Scruffy must provide the exact Scruffy client
+to worker processes. The Koochak runner starts isolated workers with Python
+`-I`, so an ambient login-node `PYTHONPATH` or an installed client is not a
+valid handoff. Set `SCRUFFY_SITE` to an import root containing the deployed
+`scruffy` package, or pass the equivalent `--scruffy-source PATH` option to
+submission scripts that expose it. The path must be visible on compute nodes
+and correspond to the controller release recorded by the campaign.
+
+Campaign `EnvironmentProfile` definitions must put that source first in their
+explicit `PYTHONPATH` and declare `scruffy: "*"` under `requirements.packages`.
+Koochak then checks the import during preflight, and `make_scruffy_hooks()`
+checks it again before training begins. A missing or unimportable handoff fails
+before the first checkpoint rather than leaving a running campaign that cannot
+publish recovery evidence.
 
 ## Sample
 
