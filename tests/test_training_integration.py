@@ -3,6 +3,7 @@ import json
 import sys
 
 import numpy as np
+import pytest
 
 from hierarchical_kaveh.config import (
     DataConfig,
@@ -162,3 +163,41 @@ def test_auto_resume_wandb_identity_is_stable_and_allows_join(monkeypatch) -> No
         "stable-wandb-id",
     ]
     assert [call["resume"] for call in fake.init_calls] == ["allow", "allow"]
+
+
+def test_scruffy_hooks_absent_for_ordinary_training(monkeypatch) -> None:
+    monkeypatch.delenv("SCRUFFY_ROOT", raising=False)
+    monkeypatch.delenv("SCRUFFY_JOB_ID", raising=False)
+
+    def unexpected_scruffy_hook() -> None:
+        raise AssertionError("ordinary training must not build Scruffy hooks")
+
+    monkeypatch.setattr(training_module, "make_scruffy_hooks", unexpected_scruffy_hook)
+    assert "on_checkpoint" not in _hooks(RunConfig())
+
+
+def test_scruffy_hooks_attach_after_local_checkpoint_hooks(monkeypatch) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/queue")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-1")
+    order: list[str] = []
+    monkeypatch.setattr(
+        training_module,
+        "make_stdout_hooks",
+        lambda: {"on_checkpoint": [lambda *_args: order.append("local")]},
+    )
+    monkeypatch.setattr(
+        training_module,
+        "make_scruffy_hooks",
+        lambda: {"on_checkpoint": [lambda *_args: order.append("scruffy")]},
+    )
+    hooks = _hooks(RunConfig())
+    for callback in hooks["on_checkpoint"]:
+        callback("/queue/step000000002.pt", {}, {})
+    assert order == ["local", "scruffy"]
+
+
+def test_scruffy_partial_worker_identity_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/queue")
+    monkeypatch.delenv("SCRUFFY_JOB_ID", raising=False)
+    with pytest.raises(RuntimeError, match="requires both SCRUFFY_ROOT and SCRUFFY_JOB_ID"):
+        _hooks(RunConfig())

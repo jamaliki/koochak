@@ -16,6 +16,7 @@ from koochak.core import dist as dist_lib
 from koochak.core import hooks as hooks_lib
 from koochak.core import launch
 from koochak.logging.csv import make_csv_hooks
+from koochak.logging.events import make_scruffy_hooks
 from koochak.logging.jsonl import make_jsonl_hooks
 from koochak.logging.stdout import make_stdout_hooks
 from koochak.loop import training_loop
@@ -168,6 +169,16 @@ def _hooks(config: RunConfig) -> dict[str, list]:
         from koochak.logging.wandb_logger import make_wandb_hooks
 
         hooks = hooks_lib.merge(hooks, make_wandb_hooks(asdict(config.wandb)))
+    scruffy_root = os.environ.get("SCRUFFY_ROOT")
+    scruffy_job_id = os.environ.get("SCRUFFY_JOB_ID")
+    if bool(scruffy_root) != bool(scruffy_job_id):
+        raise RuntimeError(
+            "Scruffy worker identity requires both SCRUFFY_ROOT and SCRUFFY_JOB_ID"
+        )
+    if scruffy_root and scruffy_job_id:
+        # Append after local logging hooks. Koochak emits on_checkpoint only
+        # after the immutable checkpoint and ready publication are complete.
+        hooks = hooks_lib.merge(hooks, make_scruffy_hooks())
     return hooks
 
 
