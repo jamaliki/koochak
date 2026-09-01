@@ -12,6 +12,7 @@ import pytest
 from hierarchical_kaveh.config import TrainingConfig, load_config
 import scripts.submit_reliability_canary as canary
 from scripts.submit_reliability_canary import (
+    CANARY_TRAIN_LENGTH,
     CHECKPOINT_ARTIFACTS,
     DEFAULT_METADATA,
     PROJECT_ID,
@@ -26,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_canary_defaults_to_validated_production_metadata() -> None:
     assert DEFAULT_METADATA.name == "metadata_ca4_patch4.json"
+    assert CANARY_TRAIN_LENGTH == 64
 
 
 def test_training_evacuation_is_opt_in_and_usr1_only(tmp_path: Path) -> None:

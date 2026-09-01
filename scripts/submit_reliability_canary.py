@@ -39,6 +39,7 @@ DEFAULT_METADATA = Path(
     "/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/"
     "parsed_np_shards_with_ss_3di/metadata_ca4_patch4.json"
 )
+CANARY_TRAIN_LENGTH = 64
 MILESTONE_STEPS = (2, 4)
 CHECKPOINT_ARTIFACTS = tuple(
     f"checkpoint/step{step:09d}.pt" for step in MILESTONE_STEPS
@@ -103,8 +104,8 @@ def _patches(
         ConfigPatch("model.distogram_bins", 8),
         ConfigPatch("data.metadata_path", str(metadata)),
         ConfigPatch("data.min_length", 4),
-        ConfigPatch("data.max_length", 8),
-        ConfigPatch("data.length_buckets", [8]),
+        ConfigPatch("data.max_length", CANARY_TRAIN_LENGTH),
+        ConfigPatch("data.length_buckets", [CANARY_TRAIN_LENGTH]),
         ConfigPatch("data.batch_size", 1),
         ConfigPatch("data.num_workers", 0),
         ConfigPatch("data.pin_memory", False),
