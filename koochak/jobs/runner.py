@@ -91,8 +91,31 @@ def _requirements(environment: Mapping[str, Any]) -> dict[str, str]:
         if not Path(filename).is_file():
             raise PreflightError(f"required file is unavailable: {filename}")
         observed[f"file:{filename}"] = "available"
+    profile_environment = environment["environment"]
+    profile_values = profile_environment["set"]
+    profile_pythonpath = profile_values.get("PYTHONPATH", "")
+    import_paths = [item for item in profile_pythonpath.split(os.pathsep) if item]
+    # The runner itself is intentionally launched with ``python -I``. Add the
+    # profile's explicit import roots for package checks so preflight observes
+    # the same source handoff that the managed child will receive.
+    for import_path in reversed(import_paths):
+        if import_path not in sys.path:
+            sys.path.insert(0, import_path)
     for module_name, expected_version in requirements["packages"].items():
-        module = importlib.import_module(module_name)
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name == module_name or exc.name == module_name.split(".", 1)[0]:
+                raise PreflightError(
+                    f"required package is not importable: {module_name}"
+                ) from exc
+            raise PreflightError(
+                f"required package is missing a dependency: {module_name}: {exc.name}"
+            ) from exc
+        except ImportError as exc:
+            raise PreflightError(
+                f"required package is incompatible: {module_name}: {exc}"
+            ) from exc
         actual_version = str(getattr(module, "__version__", "unknown"))
         if expected_version != "*" and actual_version != expected_version:
             raise PreflightError(

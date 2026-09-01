@@ -35,6 +35,27 @@ _MISSING = object()
 _ARTIFACT_ACK_TIMEOUT_ENV = "KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS"
 
 
+def _scruffy_publisher() -> Publish:
+    """Import and validate the Scruffy client at hook-construction time."""
+
+    try:
+        from scruffy import publish_event
+    except ModuleNotFoundError as exc:
+        if exc.name == "scruffy":
+            raise RuntimeError(
+                "Scruffy hooks require the Scruffy client to be importable before "
+                "training starts; declare the client in the execution profile"
+            ) from exc
+        raise RuntimeError(
+            "the installed Scruffy client is missing a dependency"
+        ) from exc
+    except ImportError as exc:
+        raise RuntimeError("the installed Scruffy client is incompatible") from exc
+    if not callable(publish_event):
+        raise RuntimeError("the installed Scruffy client has no callable publish_event")
+    return publish_event
+
+
 def _scalar(value: Any) -> object:
     """Return a small JSON scalar, or a sentinel for unsupported values."""
 
@@ -303,9 +324,9 @@ def make_scruffy_hooks(
 ) -> Dict[str, List[Callable]]:
     """Publish events for the Scruffy job identified by its worker environment.
 
-    ``SCRUFFY_ROOT`` and ``SCRUFFY_JOB_ID`` must be set. Scruffy is imported only
-    when a hook publishes, so import or publication failures remain non-fatal by
-    default. When ``artifact_ack_timeout_s`` is configured, strict checkpoint
+    ``SCRUFFY_ROOT`` and ``SCRUFFY_JOB_ID`` must be set. The Scruffy client is
+    imported and validated here, before model or training-loop execution can
+    begin. When ``artifact_ack_timeout_s`` is configured, strict checkpoint
     artifact events wait for Scruffy acknowledgement and fail closed if the
     acknowledgement is rejected or not received before the timeout.
     """
@@ -328,6 +349,7 @@ def make_scruffy_hooks(
 
     root = Path(os.environ["SCRUFFY_ROOT"])
     job_id = os.environ["SCRUFFY_JOB_ID"]
+    publish_event = _scruffy_publisher()
     source = {"name": "koochak"}
     node = os.environ.get("SCRUFFY_NODE", "").strip()
     if node:
@@ -337,8 +359,6 @@ def make_scruffy_hooks(
         )
 
     def publish(kind: str, data: Dict[str, object]) -> object:
-        from scruffy import publish_event
-
         event_id = None
         publication = data.get("publication")
         if kind == "workload.artifact" and isinstance(publication, Mapping):

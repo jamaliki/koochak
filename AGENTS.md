@@ -34,7 +34,8 @@ This doc tracks incremental design decisions and changes from the initial design
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
   - `koochak/logging/wandb_logger.py` – lazy-import W&B hooks, logs metrics and artifacts, tracks `best/*` summaries.
   - `koochak/logging/events.py` – bounded, rank-0 lifecycle/progress events plus
-    a lazy optional Scruffy adapter. Numbered checkpoints publish strict,
+    an optional Scruffy adapter that validates its client at hook construction.
+    Numbered checkpoints publish strict,
     deterministic artifact evidence after their ready manifest exists; full
     config objects and checkpoint contents never enter coordination events.
     Scruffy checkpoint acknowledgement is opt-in and synchronous only for
@@ -172,7 +173,7 @@ Done recently
 - Config: adopted OmegaConf for YAML loading and interpolation/resolution.
 - Examples: MNIST (YAML-only); DDP launcher (`examples/mnist/ddp_main.py`).
 - Generic CLI: `python -m koochak.cli.train --config ...` with strict validation and standard hooks.
-- Generic CLI automatically attaches Scruffy workload-event hooks when both `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID` identify a managed worker; Scruffy remains an optional lazy import.
+- Generic CLI automatically attaches Scruffy workload-event hooks when both `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID` identify a managed worker; hook construction validates the client before training starts.
 - Safe evacuation is opt-in through `train.evacuation_enabled` or the `training_loop(..., evacuation=...)` API. `SIGUSR1` only sets an in-memory flag; after a completed optimizer update, DDP ranks reconcile the request, durably publish a numbered terminal checkpoint, cross the terminal barrier, publish its event, finish hooks, and exit with reserved code 75.
 - `resume: auto` (the generic CLI default) selects only the highest numbered checkpoint with a valid ready manifest, exact path/size/SHA256, and valid resume cursor; `latest.pt` is never resume evidence.
 - When auto-resume selects a checkpoint, the typed checkpoint artifact event is retried once through the configured event hook so transient Scruffy journal loss can heal without making ordinary progress telemetry fatal. Restartable W&B jobs must provide a stable `name` or `id` and set `resume: allow`; this is enforced only on attempts that actually resume.
