@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -198,7 +201,15 @@ def test_managed_runner_forwards_usr1_to_child_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sent: list[tuple[int, int]] = []
-    monkeypatch.setattr(runner.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    real_killpg = runner.os.killpg
+
+    def record_signal(process_group: int, requested_signal: int) -> None:
+        if requested_signal == 0:
+            real_killpg(process_group, requested_signal)
+        else:
+            sent.append((process_group, requested_signal))
+
+    monkeypatch.setattr(runner.os, "killpg", record_signal)
     timer = threading.Timer(
         0.05, lambda: runner.os.kill(runner.os.getpid(), signal.SIGUSR1)
     )
@@ -214,3 +225,234 @@ def test_managed_runner_forwards_usr1_to_child_process_group(
     assert result == 0
     assert sent and sent[0][1] == signal.SIGUSR1
     assert sent[0][0] > 0
+
+
+def test_matching_staging_is_hardened_and_symlink_target_is_rejected(
+    tmp_path: Path,
+) -> None:
+    prepared = prepare_run(
+        name="staging",
+        profile=_profile(),
+        python_args=["-c", "print('ok')"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+    )
+    stage_run(prepared)
+    manifest = Path(prepared.manifest_path)
+    manifest.chmod(0o666)
+    stage_run(prepared)
+    assert manifest.stat().st_mode & 0o222 == 0
+
+    target = tmp_path / "symlink-run" / "launch.json"
+    target.parent.mkdir()
+    backing = tmp_path / "backing.json"
+    backing.write_bytes(prepared.artifacts[-1].content)
+    target.symlink_to(backing)
+    symlinked = prepare_run(
+        name="symlink-staging",
+        profile=_profile(),
+        python_args=["-c", "print('ok')"],
+        cwd=str(tmp_path),
+        run_dir=str(target.parent),
+    )
+    with pytest.raises(FileExistsError, match="non-regular"):
+        stage_run(symlinked)
+    assert target.is_symlink()
+
+
+def test_concurrent_staging_publishes_one_identical_read_only_run(tmp_path: Path) -> None:
+    prepared = prepare_run(
+        name="concurrent-staging",
+        profile=_profile(),
+        python_args=["-c", "print('ok')"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+    )
+    barrier = threading.Barrier(8)
+
+    def stage() -> None:
+        barrier.wait()
+        stage_run(prepared)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _index: stage(), range(8)))
+    for artifact in prepared.artifacts:
+        target = Path(artifact.path)
+        assert target.read_bytes() == artifact.content
+        assert target.stat().st_mode & 0o222 == 0
+
+
+def test_pending_signal_before_launch_exits_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_signal = runner.signal.signal
+    installed = False
+
+    def deliver_on_install(signum, handler):
+        nonlocal installed
+        previous = real_signal(signum, handler)
+        if callable(handler) and not installed:
+            installed = True
+            handler(signum, None)
+        return previous
+
+    monkeypatch.setattr(runner.signal, "signal", deliver_on_install)
+    monkeypatch.setattr(
+        runner.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("pending evacuation must prevent launch"),
+    )
+    assert (
+        runner._run_managed_child(
+            [sys.executable, "-c", "pass"],
+            cwd="/tmp",
+            environment={"PATH": str(Path(sys.executable).parent)},
+        )
+        == 75
+    )
+
+
+def test_signal_just_after_spawn_is_forwarded_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Child:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    def spawn(*_args, **_kwargs):
+        os.kill(os.getpid(), signal.SIGUSR1)
+        return Child()
+
+    forwarded: list[int] = []
+    monkeypatch.setattr(runner.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        runner,
+        "_forward_to_owned_group",
+        lambda _child, requested_signal: forwarded.append(requested_signal) or True,
+    )
+    monkeypatch.setattr(runner, "_require_quiescent_group", lambda _group: None)
+    assert (
+        runner._run_managed_child(
+            [sys.executable, "-c", "pass"], cwd="/tmp", environment={}
+        )
+        == 0
+    )
+    assert forwarded == [signal.SIGUSR1]
+
+
+def test_stale_or_completed_process_group_is_never_signaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Child:
+        pid = 12345
+
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+        def poll(self):
+            return self.returncode
+
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(runner.os, "killpg", lambda *values: sent.append(values))
+    assert runner._forward_to_owned_group(Child(0), signal.SIGUSR1) is False
+    monkeypatch.setattr(runner.os, "getpgid", lambda _pid: 999)
+    with pytest.raises(runner.PreflightError, match="no longer owns"):
+        runner._forward_to_owned_group(Child(None), signal.SIGUSR1)
+    assert sent == []
+
+
+def test_background_descendant_is_killed_and_run_fails_closed(tmp_path: Path) -> None:
+    marker = tmp_path / "descendant-started"
+    code = f"""
+import subprocess, sys, time
+from pathlib import Path
+subprocess.Popen([
+    sys.executable,
+    "-c",
+    "from pathlib import Path; Path({str(marker)!r}).write_text('yes'); import time; time.sleep(30)",
+])
+deadline = time.monotonic() + 2
+while not Path({str(marker)!r}).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+raise SystemExit(0)
+"""
+    with pytest.raises(runner.PreflightError, match="background descendants"):
+        runner._run_managed_child(
+            [sys.executable, "-c", code],
+            cwd=str(tmp_path),
+            environment={"PATH": str(Path(sys.executable).parent)},
+        )
+    deadline = time.monotonic() + 1
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker.exists()
+
+
+def test_output_is_revalidated_immediately_before_each_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outputs = []
+    for name in ("first", "second"):
+        filename = tmp_path / f"{name}.txt"
+        filename.write_text(name)
+        output = DeclaredOutput(name, str(filename))
+        publish_artifact(output)
+        outputs.append(output)
+    calls: list[str] = []
+
+    def mutate_on_first(_root, **values):
+        calls.append(values["data"]["publication"]["artifact_id"])
+        if len(calls) == 1:
+            Path(outputs[1].path).write_text("changed")
+
+    import types
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = mutate_on_first  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    with pytest.raises(ValueError, match="bytes differ"):
+        runner._publish_outputs(
+            tuple(outputs),
+            {"SCRUFFY_ROOT": str(tmp_path / "queue"), "SCRUFFY_JOB_ID": "job-1"},
+        )
+    assert calls == ["first"]
+
+
+def test_partial_output_event_publication_replays_with_stable_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outputs = []
+    for name in ("first", "second"):
+        filename = tmp_path / f"{name}.txt"
+        filename.write_text(name)
+        output = DeclaredOutput(name, str(filename))
+        publish_artifact(output)
+        outputs.append(output)
+    attempts: list[list[str]] = [[], []]
+    current = 0
+
+    def flaky(_root, **values):
+        event_id = values["event_id"]
+        attempts[current].append(event_id)
+        if current == 0 and len(attempts[current]) == 2:
+            raise OSError("second spool failed")
+
+    import types
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = flaky  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    environment = {
+        "SCRUFFY_ROOT": str(tmp_path / "queue"),
+        "SCRUFFY_JOB_ID": "job-1",
+    }
+    with pytest.raises(OSError, match="second spool"):
+        runner._publish_outputs(tuple(outputs), environment)
+    current = 1
+    runner._publish_outputs(tuple(outputs), environment)
+    assert attempts[0] == attempts[1]

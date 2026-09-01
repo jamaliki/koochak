@@ -909,12 +909,14 @@ class _TrainLoop:
         *,
         next_step: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
+        emit_hook: bool = True,
     ) -> tuple[str, Dict[str, Any]]:
         ckpt = self._build_checkpoint(step, next_step=next_step, metrics=metrics)
         os.makedirs(self.settings.out_dir, exist_ok=True)
         path = os.path.join(self.settings.out_dir, f"step{step:09d}.pt")
         saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=self.settings.keep_last_k)
-        _emit(self.hooks, "on_checkpoint", saved_path, ckpt, self._step_ctx(step))
+        if emit_hook:
+            _emit(self.hooks, "on_checkpoint", saved_path, ckpt, self._step_ctx(step))
         return saved_path, ckpt
 
     # ------------------------------------------------------------------ inner loop
@@ -1286,19 +1288,32 @@ class _TrainLoop:
             # Persist it before announcing completion so downstream consumers
             # can immediately resolve the final immutable artifact.
             self._gather_checkpoint_rng = True
+            terminal_path = os.path.join(
+                self.settings.out_dir, f"step{next_step:09d}.pt"
+            )
             if self.is_rank0:
-                _, self.final_ckpt = self._save_checkpoint(next_step, next_step=next_step)
+                terminal_path, self.final_ckpt = self._save_checkpoint(
+                    next_step, next_step=next_step, emit_hook=False
+                )
             else:
                 self.final_ckpt = self._build_checkpoint(next_step, next_step=next_step)
             self._gather_checkpoint_rng = False
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 dist_lib.barrier()
+            if self.is_rank0:
+                _emit(
+                    self.hooks,
+                    "on_checkpoint",
+                    terminal_path,
+                    self.final_ckpt,
+                    self._step_ctx(next_step),
+                )
             if interrupted:
                 if self.is_rank0:
                     _emit(
                         self.hooks,
                         "on_evacuation",
-                        os.path.join(self.settings.out_dir, f"step{next_step:09d}.pt"),
+                        terminal_path,
                         self.final_ckpt,
                         self._step_ctx(next_step),
                     )

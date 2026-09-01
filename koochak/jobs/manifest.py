@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import posixpath
 import re
-import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -17,6 +15,7 @@ from omegaconf import OmegaConf
 
 from .profile import EnvironmentProfile
 from ..storage.artifact import DeclaredOutput
+from ..storage.immutable import write_immutable_file
 
 _JOB_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
@@ -195,29 +194,7 @@ def prepare_run(
 
 
 def _write_immutable(artifact: Artifact) -> None:
-    target = Path(artifact.path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        if target.read_bytes() != artifact.content:
-            raise FileExistsError(f"refusing to replace different artifact: {target}")
-        return
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", dir=target.parent
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(artifact.content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary_name, 0o444)
-        try:
-            os.link(temporary_name, target)
-        except FileExistsError:
-            if target.read_bytes() != artifact.content:
-                raise FileExistsError(f"refusing to replace different artifact: {target}")
-    finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
+    write_immutable_file(artifact.path, artifact.content)
 
 
 def stage_run(prepared: PreparedRun) -> None:

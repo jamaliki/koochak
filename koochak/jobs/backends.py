@@ -14,6 +14,7 @@ _REMOTE_STAGE = """
 import hashlib
 import os
 import pathlib
+import stat
 import sys
 import tempfile
 
@@ -23,9 +24,36 @@ content = sys.stdin.buffer.read()
 if hashlib.sha256(content).hexdigest() != expected:
     raise SystemExit("artifact digest differs")
 target.parent.mkdir(parents=True, exist_ok=True)
-if target.exists():
-    if target.read_bytes() != content:
-        raise SystemExit(f"refusing to replace different artifact: {target}")
+
+def accept_existing():
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(target, flags)
+    except OSError as error:
+        raise SystemExit(f"refusing non-regular immutable artifact: {target}: {error}")
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SystemExit(f"refusing non-regular immutable artifact: {target}")
+        observed = b""
+        while chunk := os.read(descriptor, 1024 * 1024):
+            observed += chunk
+        after = os.fstat(descriptor)
+        current = os.lstat(target)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+            raise SystemExit(f"immutable artifact changed while reading: {target}")
+        if observed != content:
+            raise SystemExit(f"refusing to replace different artifact: {target}")
+        os.fchmod(descriptor, 0o444)
+    finally:
+        os.close(descriptor)
+
+try:
+    os.lstat(target)
+except FileNotFoundError:
+    pass
+else:
+    accept_existing()
     raise SystemExit(0)
 descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
 try:
@@ -37,8 +65,7 @@ try:
     try:
         os.link(temporary_name, target)
     except FileExistsError:
-        if target.read_bytes() != content:
-            raise SystemExit(f"refusing to replace different artifact: {target}")
+        accept_existing()
 finally:
     if os.path.exists(temporary_name):
         os.unlink(temporary_name)

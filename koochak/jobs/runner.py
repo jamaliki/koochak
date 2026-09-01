@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from ..storage.artifact import (
     artifact_publication,
     validate_artifact,
 )
+from ..interruption import EVACUATION_EXIT_CODE
 
 
 class PreflightError(RuntimeError):
@@ -228,20 +230,25 @@ def _run_managed_child(
 
     signal.signal(signal.SIGUSR1, _request)
     try:
+        if requested:
+            return EVACUATION_EXIT_CODE
         child = subprocess.Popen(
             argv,
             cwd=cwd,
             env=dict(environment),
             start_new_session=True,
         )
+        if requested:
+            _forward_to_owned_group(child, signal.SIGUSR1)
+            forwarded = True
         while True:
             try:
                 returncode = child.wait(timeout=0.1)
                 break
             except subprocess.TimeoutExpired:
                 if requested and not forwarded:
-                    os.killpg(child.pid, signal.SIGUSR1)
-                    forwarded = True
+                    forwarded = _forward_to_owned_group(child, signal.SIGUSR1)
+        _require_quiescent_group(child.pid)
     except OSError as exc:
         raise PreflightError(f"managed workload could not run: {exc}") from exc
     finally:
@@ -249,6 +256,50 @@ def _run_managed_child(
     # subprocess uses negative values for signal termination; shell-compatible
     # status keeps the child's nonzero outcome visible to the scheduler.
     return 128 + abs(returncode) if returncode < 0 else returncode
+
+
+def _forward_to_owned_group(child: subprocess.Popen[Any], requested_signal: int) -> bool:
+    """Signal only a live leader whose process group is the one Koochak created."""
+
+    if child.poll() is not None:
+        return False
+    try:
+        if os.getpgid(child.pid) != child.pid:
+            raise PreflightError("managed workload no longer owns its process group")
+        os.killpg(child.pid, requested_signal)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _require_quiescent_group(process_group: int, *, cleanup_seconds: float = 1.0) -> None:
+    """Reject and clean a process group whose leader exited before descendants."""
+
+    if not _group_exists(process_group):
+        return
+    for cleanup_signal in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process_group, cleanup_signal)
+        except ProcessLookupError:
+            break
+        deadline = time.monotonic() + cleanup_seconds
+        while _group_exists(process_group) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not _group_exists(process_group):
+            break
+    if _group_exists(process_group):
+        raise PreflightError("managed workload process group could not be quiesced")
+    raise PreflightError("managed workload left background descendants")
 
 
 def _publish_outputs(outputs: tuple[DeclaredOutput, ...], environment: Mapping[str, str]) -> None:
@@ -270,9 +321,14 @@ def _publish_outputs(outputs: tuple[DeclaredOutput, ...], environment: Mapping[s
         raise PreflightError(
             "declared outputs require SCRUFFY_ROOT and SCRUFFY_JOB_ID runtime identity"
         )
-    for output, manifest in zip(outputs, manifests):
+    for output, initial_manifest in zip(outputs, manifests):
+        manifest = validate_artifact(output)
+        if manifest != initial_manifest:
+            raise PreflightError(
+                f"declared output changed during publication: {output.artifact_id}"
+            )
         identity = hashlib.sha256(
-            f"{output.artifact_id}\0{manifest['sha256']}".encode()
+            f"{job_id}\0{output.artifact_id}\0{manifest['sha256']}".encode()
         ).hexdigest()
         publish_event(
             Path(root),

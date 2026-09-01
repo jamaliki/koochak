@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import multiprocessing as mp
 import os
@@ -119,6 +120,35 @@ def test_signal_saves_terminal_checkpoint_before_reserved_exit(tmp_path: Path) -
     assert checkpoint.load(str(terminal_path))["next_step"] == 1
     assert terminal_path.with_name(terminal_path.name + ".ready.json").is_file()
     assert events == ["artifact", "evacuation", "end"]
+
+
+def test_terminal_checkpoint_hook_runs_after_distributed_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ordering: list[str] = []
+    loop_module = importlib.import_module("koochak.loop")
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(loop_module.dist_lib, "rank", lambda: 0)
+    monkeypatch.setattr(loop_module.dist_lib, "world_size", lambda: 1)
+    monkeypatch.setattr(loop_module.dist_lib, "rank0", lambda: True)
+    monkeypatch.setattr(loop_module.dist_lib, "barrier", lambda: ordering.append("barrier"))
+    model = torch.nn.Linear(1, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    def checkpoint_ready(filename, *_args):
+        assert Path(filename).is_file()
+        assert Path(checkpoint.publication_path(filename)).is_file()
+        ordering.append("hook")
+
+    training_loop(
+        model=model,
+        dataset=_dataset(),
+        step_fn=_step_fn,
+        optimizer=optimizer,
+        train_cfg={**_train_cfg(tmp_path, max_steps=1), "evacuation_enabled": False},
+        hooks={"on_checkpoint": [checkpoint_ready]},
+    )
+    assert ordering == ["barrier", "hook"]
 
 
 def test_auto_resume_is_first_run_safe_and_uses_first_unexecuted_step(tmp_path: Path) -> None:

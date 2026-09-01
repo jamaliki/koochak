@@ -341,12 +341,19 @@ preflight: [c_compiler, cuda, torch_compile]
 
 For a multi-task DAG, `submit_scruffy_workflow` stages every `PreparedRun`
 before making one strict `scruffy.submit_workflow(root, request_id,
-workflow_id, project_id, tasks)` call. Koochak pins the compatible client at
-commit `cb633a6` in the optional `scruffy` extra; it does not signature-probe
-or drop unsupported artifact gates or recovery fields. Artifact-only release
+workflow_id, project_id, tasks)` call. It does not signature-probe or drop
+unsupported artifact gates or recovery fields. During joint development, tests
+validate emitted specs against the exact local Scruffy checkout. **Final-pin
+gate:** before either repository is released or deployed, update Koochak's
+optional `scruffy` extra to the final reviewed Scruffy commit and rerun both
+full suites. Artifact-only release
 is represented by an empty `needs` list and a `wait_for` artifact condition.
 Repeated request IDs are passed unchanged so Scruffy can apply its idempotent
 submission semantics.
+Recovery mappings use Scruffy's exact v1 wire contract: `max_attempts` is an
+integer from 1 through 10, `retry_on` is a duplicate-free array (which may be
+empty), and `evacuation` contains exactly `signal: USR1` plus a non-negative
+integer `grace_seconds`.
 
 `DeclaredOutput` describes a file or directory that a consumer may wait for.
 The workload must create the output and atomically publish its
@@ -354,7 +361,20 @@ The workload must create the output and atomically publish its
 all declared outputs before publishing typed `workload.artifact` events. A
 missing, corrupt, symlinked, or unpublishable output fails the runner. A
 SIGUSR1 request is forwarded only to that child process group and never to the
-parent Slurm allocation.
+parent Slurm allocation. If the leader exits while descendants remain, Koochak
+terminates only that owned group and fails closed before output validation.
+Every output is revalidated immediately before its event. Event IDs include the
+job, artifact ID, and content digest, so retrying after a partial spool is
+idempotent: an already accepted first event deduplicates while later outputs
+continue.
+
+Ready-manifest and staging publication use no-overwrite hard links, stable
+`O_NOFOLLOW` descriptor reads, inode checks, and read-only regular targets.
+These checks defend against accidental concurrent writers and ordinary
+replacement races. They assume cooperative same-user shared storage: a process
+with permission to mutate files and directories continuously can always race a
+later consumer, so hostile same-UID writers require filesystem isolation or
+separate credentials.
 
 Prepare a run in a committed Python submission script:
 
