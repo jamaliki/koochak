@@ -10,8 +10,8 @@ DAG; all downstream edges are strict artifact conditions.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,7 +32,7 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-reliability-canary"
-KOOCHAK_COMMIT = "63312d0"
+KOOCHAK_COMMIT = "16c18a59a49f5b01fd025890bcb9750f517f4444"
 SCRUFFY_COMMIT = "cf4c1d002debf37a7dee234227618d10232b8519"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
 MILESTONE_STEPS = (2, 4)
@@ -361,11 +361,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--metadata", type=Path, default=Path("/mnt/lustre/users/kiarash-eitgbi/data/metadata.json"))
     parser.add_argument("--python", default="/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python")
     parser.add_argument("--scruffy-root", type=Path, default=Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105"))
-    parser.add_argument(
-        "--scruffy-commit",
-        default=SCRUFFY_COMMIT,
-        help="Scruffy controller commit verified from controller status before admission.",
-    )
     parser.add_argument("--enable-wandb", action="store_true")
     args = parser.parse_args(argv)
     code_commit = _git_commit()
@@ -386,17 +381,30 @@ def main(argv: list[str] | None = None) -> None:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    if observed_koochak != KOOCHAK_COMMIT and not observed_koochak.startswith(KOOCHAK_COMMIT):
+    if observed_koochak != KOOCHAK_COMMIT:
         raise RuntimeError(f"canary requires Koochak {KOOCHAK_COMMIT}, found {observed_koochak}")
-    if args.scruffy_commit != SCRUFFY_COMMIT:
-        raise RuntimeError(
-            f"canary requires Scruffy {SCRUFFY_COMMIT}, found {args.scruffy_commit}"
-        )
-    observed_scruffy = os.environ.get("SCRUFFY_CONTROLLER_COMMIT")
-    if observed_scruffy is not None and observed_scruffy != SCRUFFY_COMMIT:
-        raise RuntimeError(
-            f"controller reports Scruffy {observed_scruffy}, expected {SCRUFFY_COMMIT}"
-        )
+    try:
+        # Import Scruffy only after the dry-run return: local planning must not
+        # depend on, inspect, or mutate a scheduler installation.
+        from scruffy import status  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 - fail closed at the admission boundary
+        raise RuntimeError("cannot attest the Scruffy controller release") from exc
+    try:
+        snapshot = status(args.scruffy_root)
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("status response must be a mapping")
+        allocation = snapshot.get("allocation")
+        if not isinstance(allocation, Mapping):
+            raise ValueError("status response has no allocation")
+        release = allocation.get("controller_release")
+        if not isinstance(release, str) or not release.strip() or release == "unknown":
+            raise ValueError("status response has no known controller release")
+        if release != SCRUFFY_COMMIT:
+            raise ValueError(
+                f"controller reports Scruffy {release}, expected {SCRUFFY_COMMIT}"
+            )
+    except Exception as exc:  # noqa: BLE001 - no admission on malformed status
+        raise RuntimeError("Scruffy controller release attestation failed") from exc
     result = submit_scruffy_workflow(workflow, root=args.scruffy_root)
     print(json.dumps({"workflow": _describe(workflow, code_commit=code_commit), "submission": result}, indent=2, sort_keys=True))
 

@@ -5,8 +5,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import types
+
+import pytest
 
 from hierarchical_kaveh.config import TrainingConfig, load_config
+import scripts.submit_reliability_canary as canary
 from scripts.submit_reliability_canary import (
     CHECKPOINT_ARTIFACTS,
     PROJECT_ID,
@@ -92,8 +96,77 @@ def test_canary_dry_run_is_deterministic_and_does_not_stage(tmp_path: Path) -> N
     assert not run_root.exists()
     assert all(task["needs"] == [] for task in document["tasks"])
     assert document["tasks"][1]["wait_for"][0]["artifact_id"] == CHECKPOINT_ARTIFACTS[0]
-    assert document["commits"]["koochak"] == "63312d0"
+    assert document["commits"]["koochak"] == "16c18a59a49f5b01fd025890bcb9750f517f4444"
     assert document["commits"]["scruffy"] == SCRUFFY_COMMIT
+
+
+def _online_args(tmp_path: Path) -> list[str]:
+    return [
+        "--run-root", str(tmp_path / "runs"),
+        "--metadata", str(tmp_path / "metadata.json"),
+        "--python", sys.executable,
+        "--scruffy-root", str(tmp_path / "queue"),
+    ]
+
+
+def test_live_release_attestation_submits_once(tmp_path: Path, monkeypatch) -> None:
+    calls: list[object] = []
+    scruffy = types.ModuleType("scruffy")
+    scruffy.status = lambda _root: {"allocation": {"controller_release": SCRUFFY_COMMIT}}
+    monkeypatch.setitem(sys.modules, "scruffy", scruffy)
+    monkeypatch.setattr(
+        canary,
+        "submit_scruffy_workflow",
+        lambda workflow, *, root: calls.append((workflow, root)) or {"state": "mocked"},
+    )
+    canary.main(_online_args(tmp_path))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "status_value",
+    [
+        {},
+        {"allocation": None},
+        {"allocation": {"controller_release": "unknown"}},
+        {"allocation": {"controller_release": "wrong-release"}},
+        {"allocation": {"controller_release": 123}},
+    ],
+)
+def test_live_release_attestation_fails_closed_without_submission(
+    tmp_path: Path, monkeypatch, status_value
+) -> None:
+    calls: list[object] = []
+    scruffy = types.ModuleType("scruffy")
+    scruffy.status = lambda _root: status_value
+    monkeypatch.setitem(sys.modules, "scruffy", scruffy)
+    monkeypatch.setattr(
+        canary,
+        "submit_scruffy_workflow",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+    with pytest.raises(RuntimeError, match="attestation failed"):
+        canary.main(_online_args(tmp_path))
+    assert calls == []
+
+
+def test_live_release_status_exception_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    calls: list[object] = []
+    scruffy = types.ModuleType("scruffy")
+
+    def fail_status(_root):
+        raise OSError("status unavailable")
+
+    scruffy.status = fail_status
+    monkeypatch.setitem(sys.modules, "scruffy", scruffy)
+    monkeypatch.setattr(
+        canary,
+        "submit_scruffy_workflow",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+    with pytest.raises(RuntimeError, match="attestation failed"):
+        canary.main(_online_args(tmp_path))
+    assert calls == []
 
 
 def test_sampler_stage_smoke_rejects_no_unknown_argv(tmp_path: Path, monkeypatch) -> None:
