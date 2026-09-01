@@ -434,6 +434,7 @@ def training_loop(
     prepare_batch_fn: Optional[BatchPrepareFn] = None,
     hooks: Optional[Dict[str, list[Callable]]] = None,
     resume: Optional[str] = None,
+    auto_resume_path: Optional[str] = None,
     evacuation: Optional[EvacuationController | bool] = None,
 ) -> Dict[str, Any]:
     """Runs training until `train.max_steps` or dataset exhaustion.
@@ -454,6 +455,7 @@ def training_loop(
         prepare_batch_fn=prepare_batch_fn,
         hooks=hooks,
         resume=resume,
+        auto_resume_path=auto_resume_path,
         evacuation=evacuation,
     )
     return loop.run()
@@ -478,6 +480,7 @@ class _TrainLoop:
         prepare_batch_fn: Optional[BatchPrepareFn],
         hooks: Optional[Dict[str, list[Callable]]],
         resume: Optional[str],
+        auto_resume_path: Optional[str],
         evacuation: Optional[EvacuationController | bool],
     ) -> None:
         train_config, config_json = _resolve_train_config(train_cfg, config_json)
@@ -498,6 +501,11 @@ class _TrainLoop:
         ).lower()
         if self.resume_mode not in {"none", "auto"}:
             raise ValueError("resume must be 'none' or 'auto'")
+        if auto_resume_path is not None and self.resume_mode != "auto":
+            raise ValueError("auto_resume_path requires resume='auto'")
+        if auto_resume_path is not None and checkpoint_dict is None:
+            raise ValueError("auto_resume_path requires a preloaded checkpoint")
+        self.auto_resume_path = auto_resume_path
         if evacuation is None:
             self.evacuation = EvacuationController(
                 bool(config_lib.get(train_config, "evacuation_enabled", False)),
@@ -752,11 +760,16 @@ class _TrainLoop:
             return 0
 
     def _load_auto_resume(self) -> Optional[str]:
-        if self.checkpoint_dict is not None or self.resume_mode != "auto":
+        if self.resume_mode != "auto":
             return None
-        path = checkpoint_lib.highest_valid_published(self.settings.out_dir)
-        if path is not None:
-            self.checkpoint_dict = checkpoint_lib.load(path)
+        if self.checkpoint_dict is not None:
+            if self.auto_resume_path is not None:
+                self.ctx["auto_resume_selected"] = True
+                return self.auto_resume_path
+            return None
+        selection = checkpoint_lib.resolve_auto_resume(self.settings.out_dir)
+        if selection is not None:
+            path, self.checkpoint_dict = selection
             self.ctx["auto_resume_selected"] = True
             return path
         return None

@@ -16,6 +16,7 @@ from typing import Any
 from omegaconf import OmegaConf
 
 from .profile import EnvironmentProfile
+from ..storage.artifact import DeclaredOutput
 
 _JOB_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
@@ -63,6 +64,7 @@ class PreparedRun:
     manifest_path: str
     manifest_sha256: str
     artifacts: tuple[Artifact, ...]
+    declared_outputs: tuple[DeclaredOutput, ...] = ()
 
     def runner_argv(self) -> list[str]:
         return [
@@ -125,6 +127,7 @@ def prepare_run(
     base_config: str | Path | None = None,
     patches: Sequence[ConfigPatch] = (),
     out_dir_config_key: str | None = "train.out_dir",
+    declared_outputs: Sequence[DeclaredOutput] = (),
 ) -> PreparedRun:
     """Create a deterministic launch manifest without performing I/O remotely."""
 
@@ -145,6 +148,10 @@ def prepare_run(
         else None
     )
     environment = profile.resolve(cwd=cwd, run_dir=run_dir)
+    outputs = tuple(declared_outputs)
+    output_ids = [output.artifact_id for output in outputs]
+    if len(set(output_ids)) != len(output_ids):
+        raise ValueError("declared outputs must have unique artifact IDs")
     argv = [
         environment.python,
         *_resolve_python_args(
@@ -159,6 +166,7 @@ def prepare_run(
         "argv": argv,
         "environment": environment.to_dict(),
         "preflight_result_path": posixpath.join(run_dir, "preflight.json"),
+        "outputs": [output.to_dict() for output in outputs],
     }
     artifacts = []
     if config_text is not None and config_path is not None:
@@ -182,6 +190,7 @@ def prepare_run(
         manifest_path=manifest_path,
         manifest_sha256=manifest_sha256,
         artifacts=tuple(artifacts),
+        declared_outputs=outputs,
     )
 
 

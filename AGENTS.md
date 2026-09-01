@@ -96,6 +96,11 @@ This list guides ongoing work. All contributors (agents and humans) should updat
   - The runner checks interpreters, files, packages, CUDA, the C compiler, and Torch compilation before user code.
   - Python-only Pazuzu and Scruffy adapters replace the raw SSH backend.
   - Tests cover validation, digesting, tamper detection, environment ownership, preflight records, adapters, and private-string scanning.
+- Phase 4 workflow foundations [DONE]
+  - Immutable `PreparedTask`/`PreparedWorkflow` models and all-or-none `submit_scruffy_workflow` staging.
+  - Immutable file/directory ready manifests with deterministic file ordering, byte size, SHA256, provenance, and counts.
+  - Declared output validation/publication in a managed child process group; SIGUSR1 is never sent to the parent allocation.
+  - `storage.checkpoint.resolve_auto_resume()` returns the validated loaded payload alongside its path so callers can construct datasets from `next_step` before entering `training_loop`; preloaded selection retains `auto_resume_selected` and artifact republishing.
 
 Note: Keep this TODO section synchronized with the codebase state and design decisions. Prefer the authoritative "Open TODOs" section at the end.
 

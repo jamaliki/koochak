@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,12 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from ..storage.artifact import (
+    DeclaredOutput,
+    artifact_publication,
+    validate_artifact,
+)
 
 
 class PreflightError(RuntimeError):
@@ -185,8 +192,108 @@ def _write_result(filename: str, document: Mapping[str, Any]) -> None:
             os.unlink(temporary_name)
 
 
-def execute_manifest(manifest_path: str, expected_sha256: str) -> None:
-    """Run all checks and replace this process with the declared Python workload."""
+def _declared_outputs(document: Mapping[str, Any]) -> tuple[DeclaredOutput, ...]:
+    raw = document.get("outputs", [])
+    if not isinstance(raw, list):
+        raise PreflightError("launch manifest outputs must be a JSON array")
+    outputs = []
+    for value in raw:
+        if not isinstance(value, Mapping):
+            raise PreflightError("launch manifest output must be an object")
+        try:
+            outputs.append(DeclaredOutput.from_dict(value))
+        except (TypeError, ValueError) as exc:
+            raise PreflightError(f"invalid declared output: {exc}") from exc
+    artifact_ids = [output.artifact_id for output in outputs]
+    if len(set(artifact_ids)) != len(artifact_ids):
+        raise PreflightError("launch manifest outputs must have unique artifact IDs")
+    return tuple(outputs)
+
+
+def _run_managed_child(
+    argv: list[str],
+    *,
+    cwd: str,
+    environment: Mapping[str, str],
+) -> int:
+    """Run one child process group and forward evacuation only to that group."""
+
+    requested = False
+    forwarded = False
+    previous_handler = signal.getsignal(signal.SIGUSR1)
+
+    def _request(_signum: int, _frame: Any) -> None:
+        nonlocal requested
+        requested = True
+
+    signal.signal(signal.SIGUSR1, _request)
+    try:
+        child = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=dict(environment),
+            start_new_session=True,
+        )
+        while True:
+            try:
+                returncode = child.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if requested and not forwarded:
+                    os.killpg(child.pid, signal.SIGUSR1)
+                    forwarded = True
+    except OSError as exc:
+        raise PreflightError(f"managed workload could not run: {exc}") from exc
+    finally:
+        signal.signal(signal.SIGUSR1, previous_handler)
+    # subprocess uses negative values for signal termination; shell-compatible
+    # status keeps the child's nonzero outcome visible to the scheduler.
+    return 128 + abs(returncode) if returncode < 0 else returncode
+
+
+def _publish_outputs(outputs: tuple[DeclaredOutput, ...], environment: Mapping[str, str]) -> None:
+    """Validate all outputs before publishing any typed artifact event."""
+
+    manifests = [validate_artifact(output) for output in outputs]
+    try:
+        from scruffy import publish_event
+    except ModuleNotFoundError as exc:
+        if exc.name == "scruffy":
+            raise PreflightError("declared outputs require the Scruffy client") from exc
+        raise PreflightError("the installed Scruffy client is missing a dependency") from exc
+    except ImportError as exc:
+        raise PreflightError("the installed Scruffy client is incompatible") from exc
+
+    root = environment.get("SCRUFFY_ROOT")
+    job_id = environment.get("SCRUFFY_JOB_ID")
+    if not root or not job_id:
+        raise PreflightError(
+            "declared outputs require SCRUFFY_ROOT and SCRUFFY_JOB_ID runtime identity"
+        )
+    for output, manifest in zip(outputs, manifests):
+        identity = hashlib.sha256(
+            f"{output.artifact_id}\0{manifest['sha256']}".encode()
+        ).hexdigest()
+        publish_event(
+            Path(root),
+            job_id=job_id,
+            kind="workload.artifact",
+            event_id=f"koochak-artifact-{identity}",
+            source={"name": "koochak-runner"},
+            data={
+                "artifact_type": output.stage or output.kind,
+                "location": output.path,
+                "publication": artifact_publication(manifest),
+                "stage": output.stage,
+                "provenance": dict(output.provenance),
+                "counts": dict(manifest["counts"]),
+                "metadata": dict(output.metadata),
+            },
+        )
+
+
+def execute_manifest(manifest_path: str, expected_sha256: str) -> int:
+    """Run checks, then execute and account for the declared workload."""
 
     document = _load_manifest(manifest_path, expected_sha256)
     environment = document["environment"]
@@ -226,9 +333,28 @@ def execute_manifest(manifest_path: str, expected_sha256: str) -> None:
         _write_result(result_path, result)
         raise
 
-    os.chdir(document["cwd"])
-    argv = document["argv"]
-    os.execve(argv[0], argv, clean_environment)
+    outputs = _declared_outputs(document)
+    child_returncode = _run_managed_child(
+        document["argv"],
+        cwd=document["cwd"],
+        environment=clean_environment,
+    )
+    if child_returncode:
+        result.update(state="failed", child_returncode=child_returncode)
+        _write_result(result_path, result)
+        return child_returncode
+    if outputs:
+        try:
+            _publish_outputs(outputs, clean_environment)
+        except Exception as exc:
+            result.update(state="failed", error=f"{type(exc).__name__}: {exc}")
+            _write_result(result_path, result)
+            raise
+    result["state"] = "completed" if outputs else "passed"
+    if outputs:
+        result["outputs"] = [output.artifact_id for output in outputs]
+    _write_result(result_path, result)
+    return 0
 
 
 def main() -> int:
@@ -236,7 +362,7 @@ def main() -> int:
         print("usage: python -m koochak.jobs.runner MANIFEST SHA256", file=sys.stderr)
         return 64
     try:
-        execute_manifest(sys.argv[1], sys.argv[2])
+        return execute_manifest(sys.argv[1], sys.argv[2])
     except Exception as exc:  # noqa: BLE001 - this is the process error boundary.
         print(
             json.dumps(
@@ -246,7 +372,6 @@ def main() -> int:
             file=sys.stderr,
         )
         return 78
-    return 0
 
 
 if __name__ == "__main__":
