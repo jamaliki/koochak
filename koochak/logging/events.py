@@ -214,6 +214,15 @@ def make_event_hooks(
             pass
         send("workload.artifact", data)
 
+    def on_resume_checkpoint(
+        checkpoint_path: str,
+        checkpoint: Mapping[str, Any],
+        ctx: Mapping[str, Any],
+    ) -> None:
+        """Retry publication for durable evidence found during auto-resume."""
+
+        on_checkpoint(checkpoint_path, checkpoint, ctx)
+
     def on_train_end(ctx: Mapping[str, Any]) -> None:
         current_step = remember_step(ctx)
         evacuation = bool(ctx.get("evacuation_requested", False))
@@ -264,6 +273,7 @@ def make_event_hooks(
         "on_step_end": [rank0_only(on_step_end)],
         "on_eval_end": [rank0_only(on_eval_end)],
         "on_checkpoint": [rank0_only(on_checkpoint)],
+        "on_resume_checkpoint": [rank0_only(on_resume_checkpoint)],
         "on_train_end": [rank0_only(on_train_end)],
         "on_evacuation": [rank0_only(on_evacuation)],
         "on_exception": [rank0_only(on_exception)],

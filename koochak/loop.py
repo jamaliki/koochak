@@ -531,6 +531,8 @@ class _TrainLoop:
             "train_cfg": train_config,
             "model": self.model,
             "evacuation_requested": False,
+            "resume_mode": self.resume_mode,
+            "auto_resume_selected": False,
         }
         self.ema: Optional[EMA] = None
         self.ema_dual: list[EMA] = []
@@ -749,12 +751,15 @@ class _TrainLoop:
         except (AttributeError, TypeError, ValueError):
             return 0
 
-    def _load_auto_resume(self) -> None:
+    def _load_auto_resume(self) -> Optional[str]:
         if self.checkpoint_dict is not None or self.resume_mode != "auto":
-            return
+            return None
         path = checkpoint_lib.highest_valid_published(self.settings.out_dir)
         if path is not None:
             self.checkpoint_dict = checkpoint_lib.load(path)
+            self.ctx["auto_resume_selected"] = True
+            return path
+        return None
 
     def _restore_one_ema(
         self,
@@ -1226,6 +1231,7 @@ class _TrainLoop:
         try:
             self.evacuation.install()
             self._shard_datasets()
+            resume_path = self._load_auto_resume()
             _emit(self.hooks, "on_train_start", self.ctx, suppress_exceptions=False)
             self._apply_compile()
             self._wrap_ddp()
@@ -1237,8 +1243,15 @@ class _TrainLoop:
                     f"trainable: {counts['trainable']:,} | frozen: {counts['frozen']:,}"
                 )
 
-            self._load_auto_resume()
             start_step = self._resume_from_checkpoint()
+            if resume_path is not None and self.is_rank0:
+                _emit(
+                    self.hooks,
+                    "on_resume_checkpoint",
+                    resume_path,
+                    self.checkpoint_dict,
+                    self._step_ctx(start_step),
+                )
             next_step = start_step
             it = self._make_iterator()
             interrupted = False

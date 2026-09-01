@@ -165,6 +165,7 @@ Done recently
 - Generic CLI automatically attaches Scruffy workload-event hooks when both `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID` identify a managed worker; Scruffy remains an optional lazy import.
 - Safe evacuation is opt-in through `train.evacuation_enabled` or the `training_loop(..., evacuation=...)` API. `SIGUSR1` only sets an in-memory flag; after a completed optimizer update, DDP ranks reconcile the request, publish a numbered terminal checkpoint and event, finish hooks, and exit with reserved code 75.
 - `resume: auto` (the generic CLI default) selects only the highest numbered checkpoint with a valid ready manifest, exact path/size/SHA256, and valid resume cursor; `latest.pt` is never resume evidence.
+- When auto-resume selects a checkpoint, the typed checkpoint artifact event is retried once through the configured event hook so transient Scruffy journal loss can heal without making ordinary progress telemetry fatal. Restartable W&B jobs must provide a stable `name` or `id` and set `resume: allow`; this is enforced only on attempts that actually resume.
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
 - Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
 

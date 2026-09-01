@@ -1,6 +1,8 @@
 import hashlib
 import sys
 
+import pytest
+
 from koochak.logging.wandb_logger import make_wandb_hooks
 
 
@@ -98,3 +100,17 @@ def test_wandb_explicit_id_overrides_name_hash():
 
     assert fake.init_kwargs is not None
     assert fake.init_kwargs["id"] == "manual-id"
+
+
+def test_wandb_auto_resume_requires_allow_and_stable_identity():
+    fake = _FakeWandb()
+    sys.modules["wandb"] = fake  # type: ignore
+    hooks = make_wandb_hooks({"enabled": True, "project": "proj", "name": "retry"})
+    with pytest.raises(ValueError, match="resume='allow'"):
+        hooks["on_train_start"][0]({"auto_resume_selected": True})
+
+    fake = _FakeWandb()
+    sys.modules["wandb"] = fake  # type: ignore
+    hooks = make_wandb_hooks({"enabled": True, "project": "proj", "resume": "allow"})
+    with pytest.raises(ValueError, match="stable"):
+        hooks["on_train_start"][0]({"auto_resume_selected": True})

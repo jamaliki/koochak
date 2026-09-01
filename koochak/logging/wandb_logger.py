@@ -115,6 +115,15 @@ def make_wandb_hooks(cfg) -> Dict[str, List]:
         run_id = get("id", None)
         if not run_id and run_name:
             run_id = _run_id_from_name(run_name)
+        if ctx.get("auto_resume_selected"):
+            if resume_mode != "allow":
+                raise ValueError(
+                    "W&B auto-resume requires wandb.resume='allow' on a restartable job"
+                )
+            if not run_id:
+                raise ValueError(
+                    "W&B auto-resume requires a stable wandb.name or wandb.id"
+                )
 
         wandb.init(
             project=get("project", "koochak"),

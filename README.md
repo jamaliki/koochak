@@ -517,6 +517,11 @@ W&B artifacts:
   - `artifact_name_prefix` (str, default `model`)
   - `artifact_type` (str, default `model`)
 
+Restartable jobs that actually select a checkpoint with `resume=auto` must set
+`wandb.resume: allow` and provide a stable `wandb.name` or explicit `wandb.id`.
+The first attempt may create the run without these restart-only requirements;
+Koochak enforces them only when a later attempt finds durable checkpoint state.
+
 ## EMA Support
 
 - Enable EMA by setting `train.ema.enabled: true` (or by providing `decay`/`profile` keys while `enabled` is unset). Nested config lives under `train.ema.*`; legacy flat keys (`ema_decay`, `ema_eval`, etc.) are still honored.
