@@ -4,6 +4,7 @@ import pytest
 
 from hierarchical_kaveh.model.patch import (
     PATCH_SIZE,
+    Patchify,
     bucket_patch_capacity,
     build_patch_layout,
 )
@@ -103,3 +104,22 @@ def test_static_capacity_rejects_layout_overflow_in_eager_validation():
             residue_index,
             patch_capacity=4,
         )
+
+
+def test_flat_linear_patchify_is_mean_initialized_and_masks_padding():
+    layout = _layout([5], 7)
+    x = torch.randn(1, 7, 3)
+    condition = torch.randn(1, 7, 2)
+    patchify = Patchify(3, 2, mode="flat_linear")
+
+    patches, patch_condition = patchify(x, condition, layout)
+    slots = layout.pack(x)
+    expected = slots.sum(2) / PATCH_SIZE
+    expected_condition = layout.pack(condition).sum(2) / layout.slot_mask.sum(
+        2, keepdim=True
+    ).clamp_min(1)
+
+    torch.testing.assert_close(patches, expected)
+    torch.testing.assert_close(patch_condition, expected_condition)
+    assert torch.count_nonzero(patches[:, 2:]) == 0
+    assert torch.count_nonzero(patch_condition[:, 2:]) == 0

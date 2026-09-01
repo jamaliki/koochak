@@ -125,6 +125,31 @@ def test_output_contract_is_finite():
     assert torch.isfinite(output.coordinates).all()
 
 
+@pytest.mark.parametrize("patchify_mode", ("masked_pool", "flat_linear"))
+@pytest.mark.parametrize("pair_position", ("after_node", "before_attention"))
+@pytest.mark.parametrize("pair_transition", (False, True))
+def test_coarse_factorial_variants_have_finite_forward(
+    patchify_mode, pair_position, pair_transition
+):
+    model = HierarchicalKaveh(
+        small_config(
+            patchify_mode=patchify_mode,
+            coarse_pair_position=pair_position,
+            coarse_pair_transition=pair_transition,
+        )
+    ).eval()
+
+    output = model(sample_input())
+
+    assert torch.isfinite(output.coordinates).all()
+    assert torch.isfinite(output.aatype_logits).all()
+    assert output.distogram is not None
+    assert torch.isfinite(output.distogram.coarse_logits).all()
+    assert all(
+        (block.pair_ffn is not None) == pair_transition for block in model.coarse
+    )
+
+
 def test_secondary_structure_conditioning_prediction_and_recycling() -> None:
     model = HierarchicalKaveh(
         small_config(

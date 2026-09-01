@@ -213,7 +213,7 @@ class HierarchicalKaveh(nn.Module):
         self.residue_encoder = nn.ModuleList(
             GlobalBlock(*global_args) for _ in range(c.residue_encoder_depth)
         )
-        self.patchify = Patchify(c.node_dim, c.condition_dim)
+        self.patchify = Patchify(c.node_dim, c.condition_dim, c.patchify_mode)
         self.pair_initializer = PairInitializer(
             c.pair_dim,
             c.pair_rbf_bins,
@@ -229,6 +229,7 @@ class HierarchicalKaveh(nn.Module):
                 c.node_dim, c.condition_dim, c.pair_dim,
                 c.attention_heads, c.attention_head_dim,
                 c.residue_ffn_expansion, c.dropout, residual_scale, REGISTER_COUNT,
+                c.coarse_pair_position, c.coarse_pair_transition, c.pair_ffn_expansion,
             )
             for _ in range(c.coarse_depth)
         )

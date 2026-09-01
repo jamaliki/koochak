@@ -60,6 +60,19 @@ train:
     assert config.data.loop_length_max is None
     assert config.data.packing_density_min is None
 
+    variant = ModelConfig(
+        patchify_mode="flat_linear",
+        coarse_pair_position="before_attention",
+        coarse_pair_transition=True,
+    )
+    assert variant.patchify_mode == "flat_linear"
+    assert variant.coarse_pair_position == "before_attention"
+    assert variant.coarse_pair_transition
+    with pytest.raises(ValueError, match="patchify_mode"):
+        ModelConfig(patchify_mode="invalid")
+    with pytest.raises(ValueError, match="coarse_pair_position"):
+        ModelConfig(coarse_pair_position="invalid")
+
     config_file.write_text(
         "data: {metadata_path: /data/metadata.json}\nmodel: {legacy_mode: true}\n",
         encoding="utf-8",

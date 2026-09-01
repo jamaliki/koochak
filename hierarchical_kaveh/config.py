@@ -32,8 +32,12 @@ class ModelConfig:
     atom_decoder_depth: int = 1
     atom_window_radius: int = 1
     residue_ffn_expansion: int = 4
+    pair_ffn_expansion: int = 4
     atom_ffn_expansion: int = 2
     dropout: float = 0.2
+    patchify_mode: str = "masked_pool"
+    coarse_pair_position: str = "after_node"
+    coarse_pair_transition: bool = False
     pair_rbf_bins: int = 16
     pair_distance_min: float = 0.05
     pair_distance_max: float = 22.0
@@ -65,6 +69,7 @@ class ModelConfig:
             "atom_head_dim",
             "coarse_depth",
             "residue_ffn_expansion",
+            "pair_ffn_expansion",
             "atom_ffn_expansion",
             "pair_rbf_bins",
             "distogram_bins",
@@ -86,6 +91,12 @@ class ModelConfig:
             raise ValueError("attention_heads * attention_head_dim must equal node_dim")
         if self.atom_heads * self.atom_head_dim != self.atom_dim:
             raise ValueError("atom_heads * atom_head_dim must equal atom_dim")
+        if self.patchify_mode not in {"masked_pool", "flat_linear"}:
+            raise ValueError("patchify_mode must be 'masked_pool' or 'flat_linear'")
+        if self.coarse_pair_position not in {"after_node", "before_attention"}:
+            raise ValueError(
+                "coarse_pair_position must be 'after_node' or 'before_attention'"
+            )
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
         if not 0 < self.pair_distance_min < self.pair_distance_max:

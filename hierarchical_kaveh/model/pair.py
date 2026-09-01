@@ -462,7 +462,7 @@ class PairMultiplicationBlock(nn.Module):
 
 
 class CoarseBlock(nn.Module):
-    """Pair-biased node attention followed by pair multiplication every layer."""
+    """One pair/node coarse block with configurable pair update placement."""
 
     def __init__(
         self,
@@ -475,13 +475,24 @@ class CoarseBlock(nn.Module):
         dropout: float,
         residual_scale: float,
         registers: int,
+        pair_position: str = "after_node",
+        pair_transition: bool = False,
+        pair_ffn_expansion: int = 4,
     ):
         super().__init__()
+        if pair_position not in {"after_node", "before_attention"}:
+            raise ValueError("pair position must be 'after_node' or 'before_attention'")
+        self.pair_position = pair_position
         self.attention = PairBiasAttention(
             node_dim, condition_dim, pair_dim, heads, head_dim, registers
         )
         self.ffn = FeedForward(node_dim, condition_dim, expansion, dropout, residual_scale)
         self.pair_multiplication = PairMultiplicationBlock(pair_dim, dropout)
+        self.pair_ffn = (
+            FeedForward(pair_dim, None, pair_ffn_expansion, dropout, residual_scale)
+            if pair_transition
+            else None
+        )
 
     def forward(
         self,
@@ -492,9 +503,19 @@ class CoarseBlock(nn.Module):
         positions: Tensor,
         pair_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
+        if self.pair_position == "before_attention":
+            pair = self._update_pair(pair, pair_mask)
         x = x + self.attention(x, condition, pair, mask, positions)
         x = self.ffn(x, condition) * mask[..., None].to(x.dtype)
-        return x, self.pair_multiplication(pair, pair_mask)
+        if self.pair_position == "after_node":
+            pair = self._update_pair(pair, pair_mask)
+        return x, pair
+
+    def _update_pair(self, pair: Tensor, pair_mask: Tensor) -> Tensor:
+        pair = self.pair_multiplication(pair, pair_mask)
+        if self.pair_ffn is not None:
+            pair = self.pair_ffn(pair) * pair_mask[..., None].to(pair.dtype)
+        return pair
 
 
 class IntermediateDistogramHead(nn.Module):

@@ -160,10 +160,20 @@ def bucket_patch_capacity(required: int) -> int:
 
 
 class Patchify(nn.Module):
-    """Learned masked pooling with an exact mean residual at initialization."""
+    """Map four residue states to one coarse state."""
 
-    def __init__(self, node_dim: int, condition_dim: int):
+    def __init__(self, node_dim: int, condition_dim: int, mode: str = "masked_pool"):
         super().__init__()
+        if mode not in {"masked_pool", "flat_linear"}:
+            raise ValueError("patchify mode must be 'masked_pool' or 'flat_linear'")
+        self.mode = mode
+        if mode == "flat_linear":
+            self.projection = nn.Linear(PATCH_SIZE * node_dim, node_dim, bias=False)
+            with torch.no_grad():
+                self.projection.weight.zero_()
+                identity = torch.eye(node_dim, device=self.projection.weight.device)
+                self.projection.weight.copy_(identity.repeat(1, PATCH_SIZE) / PATCH_SIZE)
+            return
         self.slot_embedding = nn.Parameter(torch.zeros(PATCH_SIZE, node_dim))
         self.norm = RMSNorm(node_dim)
         self.score = init_linear(nn.Linear(node_dim + condition_dim, 1, bias=False), "zero")
@@ -173,6 +183,14 @@ class Patchify(nn.Module):
     def forward(self, x: Tensor, condition: Tensor, layout: PatchLayout) -> tuple[Tensor, Tensor]:
         slots, condition_slots = layout.pack(x), layout.pack(condition)
         mask = layout.slot_mask
+        if self.mode == "flat_linear":
+            patches = self.projection(slots.flatten(2))
+            count = mask.sum(2, keepdim=True).clamp_min(1)
+            mean_condition = condition_slots.sum(2) / count.to(condition_slots.dtype)
+            return (
+                patches * layout.patch_mask[..., None].to(patches.dtype),
+                mean_condition * layout.patch_mask[..., None].to(condition_slots.dtype),
+            )
         count = mask.sum(2, keepdim=True).clamp_min(1)
         mean = slots.sum(2) / count.to(slots.dtype)
         mean_condition = condition_slots.sum(2) / count.to(condition_slots.dtype)

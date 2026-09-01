@@ -34,8 +34,10 @@ first global communication stage and occurs before lossy patching.
 
 Patchify groups four residues without crossing a chain boundary,
 residue-index discontinuity, or padding. Diffusion coordinates and historical
-geometry break flags never affect the layout. Learned masked pooling again sits
-on an exact mean residual. A tail of one to three residues forms a masked
+geometry break flags never affect the layout. By default, learned masked pooling
+again sits on an exact mean residual. The optional `flat_linear` variant
+flattens the four masked slots and applies one linear projection, initialized to
+the full-patch mean. A tail of one to three residues forms a masked
 partial patch rather than being dropped. An offline population audit determines
 one calibrated coarse capacity per filtered length bucket; the layout itself
 comes directly from chain and residue indices. Pack and unpack always use the
@@ -46,14 +48,17 @@ every patch pair. Sixteen RBF distance channels per slot pair preserve more
 geometry than centroid distance. Signed-log residue separation, chain identity,
 and slot validity supply static topology.
 
-Every coarse block applies:
+The default coarse block applies:
 
 1. pair-biased patch attention;
 2. node feed-forward update;
 3. outgoing pair multiplication;
 4. incoming pair multiplication.
 
-There is no triangle attention, pair transition, node-to-pair update, predicted
+The factorial also exposes a pair-first order, in which pair multiplication runs
+before node attention, and an optional identity-initialized pair FFN directly
+after pair multiplication. Defaults retain the ordering above and no pair
+transition. There is no triangle attention, node-to-pair update, predicted
 coordinate refresh, or pair-state recycling. The pair matrix is stable and
 compact at `ceil(N/4)^2` scale.
 
