@@ -100,8 +100,8 @@ def test_canary_dry_run_is_deterministic_and_does_not_stage(tmp_path: Path) -> N
     assert not run_root.exists()
     assert all(task["needs"] == [] for task in document["tasks"])
     assert document["tasks"][1]["wait_for"][0]["artifact_id"] == CHECKPOINT_ARTIFACTS[0]
-    assert document["commits"]["koochak"] == "16c18a59a49f5b01fd025890bcb9750f517f4444"
-    assert document["commits"]["scruffy"] == SCRUFFY_COMMIT
+    assert document["commits"]["koochak"] == "a049a7caab75c9347a09f1a1de71971a1d9abb15"
+    assert document["commits"]["scruffy"] == "07fe2a660bf9ab2da0e956ee43fc3572d51d5cd1"
 
 
 def _online_args(tmp_path: Path) -> list[str]:

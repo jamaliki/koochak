@@ -32,8 +32,8 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-reliability-canary"
-KOOCHAK_COMMIT = "16c18a59a49f5b01fd025890bcb9750f517f4444"
-SCRUFFY_COMMIT = "fe568317a947a71d67eb74aed51d1f28ae83928c"
+KOOCHAK_COMMIT = "a049a7caab75c9347a09f1a1de71971a1d9abb15"
+SCRUFFY_COMMIT = "07fe2a660bf9ab2da0e956ee43fc3572d51d5cd1"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
 MILESTONE_STEPS = (2, 4)
 CHECKPOINT_ARTIFACTS = tuple(
