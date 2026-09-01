@@ -523,9 +523,12 @@ def step_fn(model, batch, ctx):
     condition. Payloads never include full resolved configs or checkpoint
     contents.
   - `koochak.logging.events.make_scruffy_hooks()` – requires `SCRUFFY_ROOT` and
-    `SCRUFFY_JOB_ID`; Scruffy is imported lazily. Install `koochak[scruffy]` in
-    submission environments to get the compatible Python client without adding
-    Scruffy to worker-only environments.
+    `SCRUFFY_JOB_ID`; the exact Scruffy client is imported and validated when
+    hooks are constructed, before training starts. Declare `scruffy` in the
+    execution profile and include its shared source/site root in that profile's
+    explicit `PYTHONPATH`; the isolated runner checks that import during
+    preflight. Install `koochak[scruffy]` only when the compatible client is
+    available from the target environment.
     By default all publications remain asynchronous and publisher failures warn
     once without stopping training. For workflows that require a checkpoint to
     be acknowledged before evacuation can proceed, pass

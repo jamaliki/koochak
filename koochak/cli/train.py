@@ -28,7 +28,7 @@ def _import_obj(path: str):
 
 
 def _maybe_add_scruffy_hooks(hooks):
-    """Attach the optional coordinator adapter only inside a Scruffy worker."""
+    """Attach and validate the coordinator adapter inside a Scruffy worker."""
 
     if os.environ.get("SCRUFFY_ROOT") and os.environ.get("SCRUFFY_JOB_ID"):
         return hooks_lib.merge(hooks, make_scruffy_hooks())

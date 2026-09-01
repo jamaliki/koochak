@@ -86,6 +86,87 @@ def test_runner_records_preflight_then_runs_exact_workload(
     assert "NOISE" not in seen["environment"]  # type: ignore[operator]
 
 
+def test_runner_preflight_honors_profile_pythonpath_for_scruffy_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "client"
+    source.mkdir()
+    (source / "scruffy.py").write_text(
+        "__version__ = 'test'\n"
+        "def publish_event(*_args, **_kwargs): return {'state': 'spooled'}\n"
+    )
+    profile = EnvironmentProfile(
+        profile_id="scruffy-runner",
+        python=sys.executable,
+        variables={
+            "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+            "PYTHONPATH": str(source),
+        },
+        packages={"scruffy": "*"},
+    )
+    prepared = prepare_run(
+        name="scruffy-preflight",
+        profile=profile,
+        python_args=["-c", "print('ok')"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+    )
+    stage_run(prepared)
+    monkeypatch.setattr(runner.os, "environ", {"HOME": str(tmp_path)})
+    monkeypatch.delitem(sys.modules, "scruffy", raising=False)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        runner,
+        "_run_managed_child",
+        lambda argv, *, cwd, environment: seen.update(
+            argv=argv, cwd=cwd, environment=environment
+        ) or 0,
+    )
+
+    assert runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256) == 0
+    assert seen["environment"]["PYTHONPATH"] == str(source)  # type: ignore[index]
+    result = json.loads((Path(prepared.run_dir) / "preflight.json").read_text())
+    assert result["state"] == "passed"
+    assert result["observed"]["package:scruffy"] == "test"
+
+
+def test_runner_rejects_missing_scruffy_before_managed_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = EnvironmentProfile(
+        profile_id="scruffy-required",
+        python=sys.executable,
+        variables={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"},
+        packages={"scruffy": "*"},
+    )
+    prepared = prepare_run(
+        name="missing-scruffy",
+        profile=profile,
+        python_args=["-c", "raise SystemExit('child must not run')"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+    )
+    stage_run(prepared)
+    monkeypatch.setattr(runner.os, "environ", {"HOME": str(tmp_path)})
+    monkeypatch.delitem(sys.modules, "scruffy", raising=False)
+    real_import_module = runner.importlib.import_module
+
+    def reject_scruffy(name: str):
+        if name == "scruffy":
+            raise ModuleNotFoundError("No module named 'scruffy'", name="scruffy")
+        return real_import_module(name)
+
+    monkeypatch.setattr(runner.importlib, "import_module", reject_scruffy)
+    monkeypatch.setattr(
+        runner,
+        "_run_managed_child",
+        lambda *_args, **_kwargs: pytest.fail("preflight must reject before child launch"),
+    )
+
+    with pytest.raises(runner.PreflightError, match="required package is not importable"):
+        runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256)
+
+
 def test_runner_rejects_a_tampered_materialized_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

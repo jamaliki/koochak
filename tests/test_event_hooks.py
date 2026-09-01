@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import builtins
 import sys
 import types
 from unittest import mock
@@ -137,24 +136,17 @@ def test_hooks_are_rank_zero_only() -> None:
     assert published == []
 
 
-def test_scruffy_adapter_imports_lazily_and_supplies_worker_identity(monkeypatch) -> None:
+def test_scruffy_adapter_validates_client_at_construction_and_supplies_worker_identity(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
     monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
     monkeypatch.setenv("SCRUFFY_NODE", "gpu-4")
-    real_import = builtins.__import__
-
-    def reject_scruffy(name, *args, **kwargs):
-        if name == "scruffy":
-            raise AssertionError("Scruffy imported while hooks were only constructed")
-        return real_import(name, *args, **kwargs)
-
-    with mock.patch("builtins.__import__", side_effect=reject_scruffy):
-        hooks = make_scruffy_hooks()
-
     publish_event = mock.Mock(return_value={"event_id": "evt-1"})
     module = types.ModuleType("scruffy")
     module.publish_event = publish_event
     monkeypatch.setitem(sys.modules, "scruffy", module)
+    hooks = make_scruffy_hooks()
     _call(hooks, "on_train_start", {"rank": 0, "world_size": 1})
 
     publish_event.assert_called_once_with(
@@ -165,6 +157,23 @@ def test_scruffy_adapter_imports_lazily_and_supplies_worker_identity(monkeypatch
         source={"name": "koochak", "node": "gpu-4"},
     )
     assert str(publish_event.call_args.args[0]) == "/shared/scruffy"
+
+
+def test_scruffy_adapter_fails_at_construction_when_client_is_absent(monkeypatch) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    monkeypatch.delitem(sys.modules, "scruffy", raising=False)
+    real_import = __import__
+
+    def reject_scruffy(name, *args, **kwargs):
+        if name == "scruffy":
+            raise ModuleNotFoundError("No module named 'scruffy'", name="scruffy")
+        return real_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=reject_scruffy), pytest.raises(
+        RuntimeError, match="importable before training starts"
+    ):
+        make_scruffy_hooks()
 
 
 def test_generic_cli_adds_scruffy_hooks_only_with_complete_identity(monkeypatch) -> None:
