@@ -35,6 +35,10 @@ PROJECT_ID = "hierarchical-kaveh-reliability-canary"
 KOOCHAK_COMMIT = "a049a7caab75c9347a09f1a1de71971a1d9abb15"
 SCRUFFY_COMMIT = "07fe2a660bf9ab2da0e956ee43fc3572d51d5cd1"
 BASE_CONFIG = REPO_ROOT / "configs" / "train.yaml"
+DEFAULT_METADATA = Path(
+    "/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/"
+    "parsed_np_shards_with_ss_3di/metadata_ca4_patch4.json"
+)
 MILESTONE_STEPS = (2, 4)
 CHECKPOINT_ARTIFACTS = tuple(
     f"checkpoint/step{step:09d}.pt" for step in MILESTONE_STEPS
@@ -363,7 +367,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--run-root", type=Path, default=Path("/mnt/lustre/users/kiarash-eitgbi/reliability-canary"))
-    parser.add_argument("--metadata", type=Path, default=Path("/mnt/lustre/users/kiarash-eitgbi/data/metadata.json"))
+    parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
     parser.add_argument("--python", default="/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python")
     parser.add_argument("--scruffy-root", type=Path, default=Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105"))
     parser.add_argument("--enable-wandb", action="store_true")
