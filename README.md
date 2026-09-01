@@ -79,6 +79,19 @@ torchrun --standalone --nproc-per-node=8 \
   -m hierarchical_kaveh.train --config configs/train.yaml --resume latest
 ```
 
+Restartable tasks should use the same immutable command on every attempt:
+
+```bash
+torchrun --standalone --nproc-per-node=8 \
+  -m hierarchical_kaveh.train --config configs/train.yaml --resume auto
+```
+
+`auto` starts at step zero when no valid published numbered checkpoint exists;
+otherwise Koochak selects the highest checkpoint with a valid ready manifest.
+It never treats `latest.pt` or checkpoint scaffolding as resume evidence. Keep
+`train.out_dir` and `wandb.name` (or `wandb.id`) stable across attempts and set
+`wandb.resume: allow` for W&B-backed restartable tasks.
+
 Training follows Pallatom's standard EDM contract: scaled log-normal noise,
 rigid augmentation, stopped-gradient Kabsch-aligned coordinate MSE,
 `1/c_out^2` weighting, 100% coordinate self-conditioning, Adam at `1e-3`

@@ -14,7 +14,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume",
         default=None,
-        help="Checkpoint file, or 'latest' to resume from train.out_dir.",
+        help=(
+            "Checkpoint file, 'latest' for train.out_dir/latest.pt, or 'auto' "
+            "for Koochak's highest valid published numbered checkpoint."
+        ),
     )
     return parser
 

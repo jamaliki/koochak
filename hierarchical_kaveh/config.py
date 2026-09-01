@@ -326,6 +326,7 @@ class WandbConfig:
     project: str | None = None
     entity: str | None = None
     name: str | None = None
+    id: str | None = None
     group: str | None = None
     tags: tuple[str, ...] = ()
     mode: str | None = None

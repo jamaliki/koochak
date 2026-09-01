@@ -172,7 +172,9 @@ def _hooks(config: RunConfig) -> dict[str, list]:
 
 
 def _resume_checkpoint(resume: str | Path | None, out_dir: str) -> dict[str, Any] | None:
-    if resume is None:
+    # Koochak owns validated auto-resume selection.  Do not load a candidate
+    # here: doing so would bypass its publication checks and retry event.
+    if resume is None or str(resume).lower() == "auto":
         return None
     checkpoint_file = checkpoint_lib.latest(out_dir) if str(resume) == "latest" else str(resume)
     if checkpoint_file is None:
@@ -224,6 +226,7 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
 
     model = HierarchicalKaveh(config.model)
     optimizer = build_optimizer(model, asdict(config.optimizer))
+    resume_mode = None if resume is None else str(resume).lower()
     checkpoint = _resume_checkpoint(resume, config.train.out_dir)
     global_step = 0 if checkpoint is None else int(
         checkpoint.get("next_step", int(checkpoint.get("step", 0)) + 1)
@@ -241,16 +244,21 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
         seed=config.train.seed,
     )
     hooks = _hooks(config)
+    loop_kwargs: dict[str, Any] = {
+        "model": model,
+        "dataset": loader,
+        "step_fn": step,
+        "optimizer": optimizer,
+        "scheduler": None,
+        "train_cfg": plain_config["train"],
+        "config_json": plain_config,
+        "checkpoint_dict": checkpoint,
+        "hooks": hooks,
+    }
+    if resume_mode == "auto":
+        loop_kwargs["resume"] = "auto"
     final_checkpoint = training_loop(
-        model=model,
-        dataset=loader,
-        step_fn=step,
-        optimizer=optimizer,
-        scheduler=None,
-        train_cfg=plain_config["train"],
-        config_json=plain_config,
-        checkpoint_dict=checkpoint,
-        hooks=hooks,
+        **loop_kwargs,
     )
 
     if config.train.save_final and dist_lib.rank0():

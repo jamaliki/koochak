@@ -1,5 +1,6 @@
 from dataclasses import replace
 import json
+import sys
 
 import numpy as np
 
@@ -10,8 +11,22 @@ from hierarchical_kaveh.config import (
     ModelConfig,
     RunConfig,
     TrainingConfig,
+    WandbConfig,
 )
-from hierarchical_kaveh.training import run_training
+from hierarchical_kaveh.train import _parser
+from hierarchical_kaveh.training import _hooks, _resume_checkpoint, run_training
+
+
+class _FakeWandb:
+    class Settings:
+        pass
+
+    def __init__(self) -> None:
+        self.init_calls: list[dict] = []
+
+    def init(self, **kwargs):
+        self.init_calls.append(kwargs)
+        return object()
 
 
 def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
@@ -91,10 +106,49 @@ def test_koochak_step_checkpoint_and_resume(tmp_path) -> None:
         logging=LoggingConfig(),
     )
 
-    first = run_training(config)
+    # The same immutable command is valid for both the first attempt and a
+    # later attempt. Koochak starts cleanly when no publication exists.
+    first = run_training(config, resume="auto")
     assert first["next_step"] == 1
     assert first["config"]["model"] == config.to_dict()["model"]
     assert "ema" in first
 
-    resumed = run_training(replace(config, train=replace(training, max_steps=2)), resume="latest")
+    resumed = run_training(replace(config, train=replace(training, max_steps=2)), resume="auto")
     assert resumed["next_step"] == 2
+
+
+def test_project_does_not_select_auto_resume_checkpoint() -> None:
+    """Auto selection stays in Koochak, including publication validation."""
+
+    assert _resume_checkpoint("auto", "/missing/run") is None
+
+
+def test_training_cli_accepts_auto_resume() -> None:
+    args = _parser().parse_args(["--config", "config.yaml", "--resume", "auto"])
+    assert args.resume == "auto"
+
+
+def test_auto_resume_wandb_identity_is_stable_and_allows_join(monkeypatch) -> None:
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    config = RunConfig(
+        wandb=WandbConfig(
+            enabled=True,
+            project="hierarchical-kaveh-test",
+            name="stable-training-run",
+            id="stable-wandb-id",
+            resume="allow",
+        )
+    )
+
+    hooks = _hooks(config)
+    context = {"auto_resume_selected": True, "config_json": {}, "train_cfg": {}}
+    for _ in range(2):
+        for callback in hooks["on_train_start"]:
+            callback(context)
+
+    assert [call["id"] for call in fake.init_calls] == [
+        "stable-wandb-id",
+        "stable-wandb-id",
+    ]
+    assert [call["resume"] for call in fake.init_calls] == ["allow", "allow"]
