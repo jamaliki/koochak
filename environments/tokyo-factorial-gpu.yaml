@@ -44,5 +44,4 @@ requirements:
     omegaconf: 2.3.0
     torch: 2.11.0+cu130
     triton: 3.6.0
-    wandb: "*"
 preflight: [c_compiler, cuda, torch_compile]

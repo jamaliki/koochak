@@ -106,12 +106,8 @@ def _patches(
         ConfigPatch("train.evacuation_enabled", True),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
-        ConfigPatch("wandb.enabled", True),
-        ConfigPatch("wandb.project", PROJECT_ID),
-        ConfigPatch("wandb.group", workflow),
-        ConfigPatch("wandb.name", f"{workflow}-{name}-L{length}"),
-        ConfigPatch("wandb.id", f"{workflow}-{name}-L{length}"),
-        ConfigPatch("wandb.resume", "allow"),
+        ConfigPatch("wandb.enabled", False),
+        ConfigPatch("wandb.mode", "disabled"),
     ]
 
 
