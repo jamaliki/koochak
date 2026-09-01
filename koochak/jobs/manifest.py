@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import posixpath
 import re
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -13,15 +15,58 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from .profile import EnvironmentProfile
 from ..storage.artifact import DeclaredOutput
 from ..storage.immutable import write_immutable_file
+from .profile import EnvironmentProfile
 
 _JOB_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_RUNTIME_NAME = "koochak-runtime.zip"
+_RUNNER_BOOTSTRAP = """\
+import hashlib
+import json
+import runpy
+import sys
+from pathlib import Path
+
+runtime_path, runtime_sha256, manifest_path, manifest_sha256 = sys.argv[1:5]
+manifest_content = Path(manifest_path).read_bytes()
+if hashlib.sha256(manifest_content).hexdigest() != manifest_sha256:
+    raise SystemExit("Koochak launch manifest digest differs")
+document = json.loads(manifest_content)
+runtime = document.get("runner_runtime")
+if (
+    not isinstance(runtime, dict)
+    or runtime.get("path") != runtime_path
+    or runtime.get("sha256") != runtime_sha256
+):
+    raise SystemExit("Koochak runner runtime does not match its launch manifest")
+runtime_content = Path(runtime_path).read_bytes()
+if hashlib.sha256(runtime_content).hexdigest() != runtime_sha256:
+    raise SystemExit("Koochak runner runtime digest differs")
+sys.path.insert(0, runtime_path)
+sys.argv = ["koochak.jobs.runner", manifest_path, manifest_sha256]
+runpy.run_module("koochak.jobs.runner", run_name="__main__")
+"""
 
 
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _runtime_package() -> bytes:
+    """Build a deterministic import archive for the exact Koochak source."""
+
+    package_root = Path(__file__).resolve().parents[1]
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for source in sorted(package_root.rglob("*.py")):
+            relative = source.relative_to(package_root)
+            info = zipfile.ZipInfo(f"koochak/{relative.as_posix()}")
+            info.date_time = (1980, 1, 1, 0, 0, 0)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, source.read_bytes())
+    return output.getvalue()
 
 
 def _absolute(value: str, name: str) -> str:
@@ -66,11 +111,17 @@ class PreparedRun:
     declared_outputs: tuple[DeclaredOutput, ...] = ()
 
     def runner_argv(self) -> list[str]:
+        runtime_path = posixpath.join(self.run_dir, _RUNTIME_NAME)
+        runtime = next(
+            artifact for artifact in self.artifacts if artifact.path == runtime_path
+        )
         return [
             self.python,
             "-I",
-            "-m",
-            "koochak.jobs.runner",
+            "-c",
+            _RUNNER_BOOTSTRAP,
+            runtime_path,
+            runtime.sha256,
             self.manifest_path,
             self.manifest_sha256,
         ]
@@ -176,6 +227,14 @@ def prepare_run(
             "sha256": config_sha256,
         }
         artifacts.append(Artifact(config_path, config_content, config_sha256))
+    runtime_path = posixpath.join(run_dir, _RUNTIME_NAME)
+    runtime_content = _runtime_package()
+    runtime_sha256 = _sha256(runtime_content)
+    document["runner_runtime"] = {
+        "path": runtime_path,
+        "sha256": runtime_sha256,
+    }
+    artifacts.append(Artifact(runtime_path, runtime_content, runtime_sha256))
     manifest_content = (
         json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     ).encode()

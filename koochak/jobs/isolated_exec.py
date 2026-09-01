@@ -21,7 +21,9 @@ def _target(arguments: list[str]) -> tuple[str, str, list[str]]:
 
 def main() -> int:
     if "--" not in sys.argv[1:]:
-        raise SystemExit("isolated_exec requires '--' before the original Python arguments")
+        raise SystemExit(
+            "isolated_exec requires '--' before the original Python arguments"
+        )
     separator = sys.argv.index("--")
     try:
         import_paths = json.loads(sys.argv[1])
