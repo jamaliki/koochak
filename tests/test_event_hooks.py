@@ -226,9 +226,143 @@ def test_checkpoint_publication_uses_a_stable_scruffy_event_id(
 
     assert first["event_id"] == second["event_id"]
     assert first["event_id"].startswith("koochak-checkpoint-")
+    assert "wait" not in first
+    assert "timeout" not in first
     assert first["data"]["publication"] == checkpoint_lib.publication(
         str(checkpoint_path)
     )
+
+
+def test_scruffy_checkpoint_ack_wait_is_opt_in_and_checkpoint_only(
+    monkeypatch, tmp_path
+) -> None:
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    checkpoint_path = tmp_path / "step000000007.pt"
+    checkpoint = {"step": 7, "model": {}}
+    checkpoint_lib.save(checkpoint, str(checkpoint_path))
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    calls = []
+
+    def publish_event(root, **values):
+        calls.append((root, values))
+        return {
+            "state": "accepted" if values.get("wait") else "spooled",
+            "acknowledged": bool(values.get("wait")),
+        }
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = publish_event
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    hooks = make_scruffy_hooks(progress_interval_s=0, artifact_ack_timeout_s=4.5)
+    _call(hooks, "on_train_start", {"rank": 0, "world_size": 1})
+    _call(
+        hooks,
+        "on_checkpoint",
+        str(checkpoint_path),
+        checkpoint,
+        {"rank": 0, "world_size": 1, "step": 7},
+    )
+    _call(
+        hooks,
+        "on_evacuation",
+        str(checkpoint_path),
+        checkpoint,
+        {"rank": 0, "world_size": 1, "step": 7},
+    )
+
+    assert calls[0][1].get("wait") is None
+    assert calls[0][1].get("timeout") is None
+    assert calls[1][1]["wait"] is True
+    assert calls[1][1]["timeout"] == 4.5
+    assert calls[2][1].get("wait") is None
+    assert calls[2][1].get("timeout") is None
+    assert calls[1][1]["event_id"].startswith("koochak-checkpoint-")
+    assert calls[1][1]["data"]["publication"] == checkpoint_lib.publication(
+        str(checkpoint_path)
+    )
+
+
+def test_scruffy_checkpoint_ack_timeout_uses_environment_and_explicit_wins(
+    monkeypatch, tmp_path
+) -> None:
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    checkpoint_path = tmp_path / "step000000001.pt"
+    checkpoint = {"step": 1, "model": {}}
+    checkpoint_lib.save(checkpoint, str(checkpoint_path))
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    monkeypatch.setenv("KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS", "30")
+    calls = []
+
+    def publish_event(_root, **values):
+        calls.append(values)
+        return {"state": "accepted", "acknowledged": True}
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = publish_event
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    hooks = make_scruffy_hooks()
+    _call(hooks, "on_checkpoint", str(checkpoint_path), checkpoint, {"step": 1})
+    assert calls[-1]["timeout"] == 30.0
+
+    calls.clear()
+    hooks = make_scruffy_hooks(artifact_ack_timeout_s=2)
+    _call(hooks, "on_checkpoint", str(checkpoint_path), checkpoint, {"step": 1})
+    assert calls[-1]["timeout"] == 2.0
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), "not-a-timeout"])
+def test_scruffy_checkpoint_ack_timeout_requires_finite_nonnegative_value(
+    monkeypatch, value
+) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    with pytest.raises(ValueError, match="artifact_ack_timeout_s"):
+        make_scruffy_hooks(artifact_ack_timeout_s=value)
+
+
+def test_scruffy_checkpoint_ack_timeout_rejects_malformed_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    monkeypatch.setenv("KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS", "bad")
+    with pytest.raises(ValueError, match="artifact_ack_timeout_s"):
+        make_scruffy_hooks()
+
+
+def test_scruffy_checkpoint_ack_rejection_fails_closed(monkeypatch, tmp_path) -> None:
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    checkpoint_path = tmp_path / "step000000001.pt"
+    checkpoint = {"step": 1, "model": {}}
+    checkpoint_lib.save(checkpoint, str(checkpoint_path))
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+
+    def reject(_root, **_values):
+        return {"state": "rejected", "acknowledged": False}
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = reject
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    hooks = make_scruffy_hooks(artifact_ack_timeout_s=1)
+
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        _call(hooks, "on_checkpoint", str(checkpoint_path), checkpoint, {"step": 1})
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        hooks_lib.emit(
+            hooks,
+            "on_checkpoint",
+            str(checkpoint_path),
+            checkpoint,
+            {"step": 1},
+        )
 
 
 def test_setup_failure_publishes_failed_phase(monkeypatch, tmp_path) -> None:
