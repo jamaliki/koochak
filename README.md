@@ -526,6 +526,14 @@ def step_fn(model, batch, ctx):
     `SCRUFFY_JOB_ID`; Scruffy is imported lazily. Install `koochak[scruffy]` in
     submission environments to get the compatible Python client without adding
     Scruffy to worker-only environments.
+    By default all publications remain asynchronous and publisher failures warn
+    once without stopping training. For workflows that require a checkpoint to
+    be acknowledged before evacuation can proceed, pass
+    `artifact_ack_timeout_s=<seconds>` (or set
+    `KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS`). Only strict numbered
+    `workload.artifact` checkpoint publications use `wait=True`; lifecycle and
+    evacuation milestone events remain asynchronous. A rejected or timed-out
+    strict checkpoint acknowledgement fails closed.
     Failed publication never releases a dependent task; Scruffy leaves it
     blocked rather than inferring readiness from the filesystem.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.

@@ -37,6 +37,9 @@ This doc tracks incremental design decisions and changes from the initial design
     a lazy optional Scruffy adapter. Numbered checkpoints publish strict,
     deterministic artifact evidence after their ready manifest exists; full
     config objects and checkpoint contents never enter coordination events.
+    Scruffy checkpoint acknowledgement is opt-in and synchronous only for
+    strict artifact events; configured rejection/timeout fails closed, while
+    the default telemetry path remains asynchronous and non-fatal.
   - Stdout and W&B record resolved config at `on_train_start`; CSV/JSONL remain metric logs.
 
 - Jobs

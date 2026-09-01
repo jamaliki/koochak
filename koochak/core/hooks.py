@@ -43,7 +43,7 @@ def emit(
         except Exception:
             # User-supplied callbacks may raise anything; by default we swallow so the
             # training loop is not destabilised by logging/wandb/csv errors.
-            if not suppress_exceptions:
+            if not suppress_exceptions or getattr(fn, "_koochak_fail_closed", False):
                 raise
             continue
 

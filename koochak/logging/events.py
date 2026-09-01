@@ -32,6 +32,7 @@ _MAX_METRIC_KEY_CHARS = 96
 _MAX_PATH_CHARS = 1024
 _MAX_ERROR_CHARS = 512
 _MISSING = object()
+_ARTIFACT_ACK_TIMEOUT_ENV = "KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS"
 
 
 def _scalar(value: Any) -> object:
@@ -103,13 +104,16 @@ def make_event_hooks(
     publish: Publish,
     progress_interval_s: float = 30,
     clock: Clock = time.monotonic,
+    strict_artifact_publish: bool = False,
 ) -> Dict[str, List[Callable]]:
     """Map Koochak hooks to bounded ``workload.*`` coordination events.
 
     ``publish`` receives ``(kind, data)``. Publisher failures are expected for
     optional external integrations, so they produce one warning and never stop
     training. Progress events are rate-limited; eval, checkpoint, and terminal
-    lifecycle events are always attempted.
+    lifecycle events are always attempted. When ``strict_artifact_publish`` is
+    enabled, failures publishing a checkpoint artifact are allowed to escape so
+    callers can fail closed when downstream scheduling depends on its receipt.
     """
 
     if not callable(publish):
@@ -124,11 +128,13 @@ def make_event_hooks(
     last_step: object = None
     publisher_warning_emitted = False
 
-    def send(kind: str, data: Dict[str, object]) -> None:
+    def send(kind: str, data: Dict[str, object], *, strict: bool = False) -> None:
         nonlocal publisher_warning_emitted
         try:
             publish(kind, data)
         except Exception as exc:
+            if strict:
+                raise
             if not publisher_warning_emitted:
                 publisher_warning_emitted = True
                 try:
@@ -212,7 +218,10 @@ def make_event_hooks(
             # Hooks may be used with checkpoints not written by Koochak. They
             # remain useful observations but cannot satisfy a Scruffy gate.
             pass
-        send("workload.artifact", data)
+        strict = strict_artifact_publish and isinstance(
+            data.get("publication"), Mapping
+        )
+        send("workload.artifact", data, strict=strict)
 
     def on_resume_checkpoint(
         checkpoint_path: str,
@@ -268,11 +277,18 @@ def make_event_hooks(
             data["step"] = terminal_step
         send("workload.phase", data)
 
+    checkpoint_hook = rank0_only(on_checkpoint)
+    if strict_artifact_publish:
+        # ``hooks.emit`` normally suppresses optional telemetry failures. Mark
+        # this one callback so a configured checkpoint acknowledgement cannot be
+        # swallowed, including when the loop emits its terminal checkpoint.
+        checkpoint_hook._koochak_fail_closed = True
+
     return {
         "on_train_start": [rank0_only(on_train_start)],
         "on_step_end": [rank0_only(on_step_end)],
         "on_eval_end": [rank0_only(on_eval_end)],
-        "on_checkpoint": [rank0_only(on_checkpoint)],
+        "on_checkpoint": [checkpoint_hook],
         "on_resume_checkpoint": [rank0_only(on_resume_checkpoint)],
         "on_train_end": [rank0_only(on_train_end)],
         "on_evacuation": [rank0_only(on_evacuation)],
@@ -283,12 +299,32 @@ def make_event_hooks(
 def make_scruffy_hooks(
     progress_interval_s: float = 30,
     clock: Clock = time.monotonic,
+    artifact_ack_timeout_s: float | None = None,
 ) -> Dict[str, List[Callable]]:
     """Publish events for the Scruffy job identified by its worker environment.
 
     ``SCRUFFY_ROOT`` and ``SCRUFFY_JOB_ID`` must be set. Scruffy is imported only
-    when a hook publishes, so import or publication failures remain non-fatal.
+    when a hook publishes, so import or publication failures remain non-fatal by
+    default. When ``artifact_ack_timeout_s`` is configured, strict checkpoint
+    artifact events wait for Scruffy acknowledgement and fail closed if the
+    acknowledgement is rejected or not received before the timeout.
     """
+
+    if artifact_ack_timeout_s is None:
+        configured_timeout = os.environ.get(_ARTIFACT_ACK_TIMEOUT_ENV)
+        if configured_timeout is not None:
+            artifact_ack_timeout_s = configured_timeout
+    if artifact_ack_timeout_s is not None:
+        try:
+            artifact_ack_timeout_s = float(artifact_ack_timeout_s)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "artifact_ack_timeout_s must be a finite non-negative number"
+            ) from exc
+        if not math.isfinite(artifact_ack_timeout_s) or artifact_ack_timeout_s < 0:
+            raise ValueError(
+                "artifact_ack_timeout_s must be a finite non-negative number"
+            )
 
     root = Path(os.environ["SCRUFFY_ROOT"])
     job_id = os.environ["SCRUFFY_JOB_ID"]
@@ -313,17 +349,39 @@ def make_scruffy_hooks(
                     f"{artifact_id}\0{digest}".encode()
                 ).hexdigest()
                 event_id = f"koochak-checkpoint-{identity}"
-        return publish_event(
+        wait_for_ack = (
+            artifact_ack_timeout_s is not None
+            and kind == "workload.artifact"
+            and isinstance(publication, Mapping)
+        )
+        result = publish_event(
             root,
             job_id=job_id,
             kind=kind,
             data=data,
             source=source,
             **({"event_id": event_id} if event_id is not None else {}),
+            **(
+                {"wait": True, "timeout": artifact_ack_timeout_s}
+                if wait_for_ack
+                else {}
+            ),
         )
+        if wait_for_ack and (
+            not isinstance(result, Mapping)
+            or result.get("state") != "accepted"
+            or result.get("acknowledged") is not True
+        ):
+            state = result.get("state") if isinstance(result, Mapping) else None
+            raise RuntimeError(
+                "Scruffy did not acknowledge checkpoint artifact publication"
+                + (f" (state={state!r})" if state is not None else "")
+            )
+        return result
 
     return make_event_hooks(
         publish,
         progress_interval_s=progress_interval_s,
         clock=clock,
+        strict_artifact_publish=artifact_ack_timeout_s is not None,
     )
