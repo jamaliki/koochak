@@ -194,7 +194,10 @@ def build_workflow(code_commit: str, lengths: tuple[int, ...]) -> PreparedWorkfl
             train = prepare_run(
                 name=f"hk-factorial-train-{name}-L{length}-{short}",
                 profile=profiles["gpu"],
-                python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"],
+                python_args=[
+                    "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=8",
+                    "-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto",
+                ],
                 cwd=str(remote_cwd), run_dir=str(train_dir), base_config=BASE_CONFIG,
                 patches=patches,
             )
