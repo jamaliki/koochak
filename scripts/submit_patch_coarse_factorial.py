@@ -80,6 +80,10 @@ TRAINING_SETTINGS = {
         # Batch 280 OOMs in smooth_lddt_loss for this factorial; keep the
         # proven single-GPU fallback without changing accumulation or DDP.
         "batch_size": 256,
+        # The factorial graph leaves only a small amount of H100 headroom at
+        # L256. Chunk the exact same lDDT computation more finely so its
+        # temporary distance tensors fit without changing the training batch.
+        "smooth_lddt_chunk_size": 64,
         "min_length": 4,
         "loop_length_max": None,
         "loop_content_max": 0.5,
@@ -152,6 +156,7 @@ def _patches(
         ConfigPatch("train.prefetch_pipeline", "two_stage"),
         ConfigPatch("train.prefetch_threaded", True),
         ConfigPatch("train.self_conditioning_probability", settings["self_conditioning_probability"]),
+        ConfigPatch("loss.smooth_lddt_chunk_size", settings.get("smooth_lddt_chunk_size", 128)),
         ConfigPatch("train.compile.enabled", True),
         ConfigPatch("train.compile.mode", "default"),
         ConfigPatch("train.compile.fullgraph", False),
