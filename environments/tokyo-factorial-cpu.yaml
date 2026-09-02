@@ -21,6 +21,8 @@ requirements:
   files:
     - "{cwd}/pyproject.toml"
     - "{cwd}/scripts/analyze_esmfold_designability.py"
+    - "{cwd}/scripts/analyze_step_scale_designability.py"
+    - "{cwd}/scripts/run_esmfold_designability_shard.py"
     - "{cwd}/scripts/robust_factorial_stage.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
   packages:
