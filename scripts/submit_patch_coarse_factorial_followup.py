@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -42,7 +43,7 @@ from scripts.submit_patch_coarse_factorial import (  # noqa: E402
     RESOURCES,
     SAMPLE_SEED,
     SAMPLES_PER_LENGTH,
-    SCRUFFY_SITE,
+    SCRUFFY_SITE as PROFILE_SCRUFFY_SITE,
     SCRUFFY_ROOT,
     TRAIN_RESOURCES,
     VARIANTS,
@@ -58,6 +59,10 @@ from scripts.submit_patch_coarse_factorial import (  # noqa: E402
 
 PROJECT_ID = "hierarchical-kaveh-patch-coarse-factorial"
 SCRUFFY_COMMIT = "d9d89c45a232602aca2b7af790fde31a755b90a1"
+SCRUFFY_SITE = Path(
+    "/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/"
+    "scruffy-d60afabf-py310-cpython310-linux-x86_64/site"
+)
 PARENT_COMMIT = "4fae11513a5012b908da749104a675ed557d9590"
 PARENT_WORKFLOW = "hk-patch-coarse-factorial-500k-L128-4fae115"
 PARENT_RUN_ROOT = REMOTE_RUN_ROOT / "patch-coarse-factorial-500k" / PARENT_COMMIT
@@ -108,6 +113,19 @@ NEW_CELLS = tuple(
         ("relaxed", 0.5),
     )
 )
+
+
+def _load_profile(source: Path):
+    profile = load_environment_profile(source)
+    variables = {
+        key: value.replace(str(PROFILE_SCRUFFY_SITE), str(SCRUFFY_SITE))
+        for key, value in profile.variables.items()
+    }
+    return replace(
+        profile,
+        profile_id=f"{profile.profile_id}-py310",
+        variables=variables,
+    )
 
 
 def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
@@ -210,7 +228,7 @@ def _cell_train_run(cell: Cell, workflow: str, output_root: Path):
     patches = _patches(cell, train_dir, workflow)
     run: PreparedRun = prepare_run(
         name=f"hk-factorial-followup-train-{cell.cell_id}-{_git('rev-parse', 'HEAD')[:7]}",
-        profile=load_environment_profile(GPU_PROFILE),
+        profile=_load_profile(GPU_PROFILE),
         python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"],
         cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{_git('rev-parse', 'HEAD')[:7]}"),
         run_dir=str(train_dir),
@@ -228,9 +246,9 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, list[dict[str, A
     tasks: list[PreparedTask] = []
     diffs: list[dict[str, Any]] = []
     profiles = {
-        "gpu": load_environment_profile(GPU_PROFILE),
-        "cpu": load_environment_profile(CPU_PROFILE),
-        "esmfold": load_environment_profile(ESMFOLD_PROFILE),
+        "gpu": _load_profile(GPU_PROFILE),
+        "cpu": _load_profile(CPU_PROFILE),
+        "esmfold": _load_profile(ESMFOLD_PROFILE),
     }
     for cell in NEW_CELLS:
         train, train_dir, patches = _cell_train_run(cell, workflow, output_root)
