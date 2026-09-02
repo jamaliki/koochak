@@ -84,6 +84,7 @@ TRAINING_SETTINGS = {
         # L256. Chunk the exact same lDDT computation more finely so its
         # temporary distance tensors fit without changing the training batch.
         "smooth_lddt_chunk_size": 64,
+        "smooth_lddt_checkpoint": True,
         # The L256 factorial graph exceeds H100 headroom without activation
         # recomputation; preserve batch 256 while bounding saved activations.
         "checkpoint_blocks": True,
@@ -161,6 +162,7 @@ def _patches(
         ConfigPatch("train.prefetch_threaded", True),
         ConfigPatch("train.self_conditioning_probability", settings["self_conditioning_probability"]),
         ConfigPatch("loss.smooth_lddt_chunk_size", settings.get("smooth_lddt_chunk_size", 128)),
+        ConfigPatch("loss.smooth_lddt_checkpoint", settings.get("smooth_lddt_checkpoint", False)),
         ConfigPatch("train.compile.enabled", True),
         ConfigPatch("train.compile.mode", "default"),
         ConfigPatch("train.compile.fullgraph", False),

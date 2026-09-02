@@ -184,6 +184,29 @@ def test_smooth_lddt_is_rigid_invariant_and_penalizes_distortion() -> None:
     assert distorted_loss > rigid_loss
 
 
+def test_smooth_lddt_checkpoint_matches_value_and_gradient() -> None:
+    torch.manual_seed(11)
+    target = torch.randn(1, 4, 14, 3)
+    mask = torch.ones(1, 4, 14, dtype=torch.bool)
+    prediction = torch.randn_like(target, requires_grad=True)
+    eager_loss = smooth_lddt_loss(prediction, target, mask, chunk_size=9)
+    eager_loss.backward()
+    eager_gradient = prediction.grad.detach().clone()
+
+    checkpointed_prediction = prediction.detach().clone().requires_grad_()
+    checkpointed_loss = smooth_lddt_loss(
+        checkpointed_prediction,
+        target,
+        mask,
+        chunk_size=9,
+        checkpoint_chunks=True,
+    )
+    checkpointed_loss.backward()
+
+    torch.testing.assert_close(checkpointed_loss, eager_loss.detach())
+    torch.testing.assert_close(checkpointed_prediction.grad, eager_gradient)
+
+
 def test_compact_patch_distogram_matches_dense_for_non_divisible_length() -> None:
     torch.manual_seed(3)
     batch, residues, patches, bins = 1, 5, 2, 8

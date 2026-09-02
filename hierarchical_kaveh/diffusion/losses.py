@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from hierarchical_kaveh.config import LossConfig, ModelConfig
 from hierarchical_kaveh.types import CompactDistogram, DenoiserInput, Prediction
@@ -207,6 +208,7 @@ def smooth_lddt_loss(
     *,
     cutoff: float = 15.0,
     chunk_size: int = 128,
+    checkpoint_chunks: bool = False,
 ) -> Tensor:
     """Exact all-atom smooth lDDT, evaluated in bounded query chunks."""
 
@@ -222,26 +224,49 @@ def smooth_lddt_loss(
     scores = prediction.new_zeros(batch, dtype=torch.float32)
     counts = prediction.new_zeros(batch, dtype=torch.float32)
 
+    def score_chunk(
+        predicted_query: Tensor,
+        predicted_all: Tensor,
+        truth_query: Tensor,
+        truth_all: Tensor,
+        valid_query: Tensor,
+        valid_all: Tensor,
+        local_indices: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        true_distance = torch.cdist(truth_query, truth_all)
+        predicted_distance = torch.cdist(predicted_query, predicted_all)
+        difference = (true_distance - predicted_distance).abs()
+        agreement = 0.25 * sum(
+            torch.sigmoid(threshold - difference)
+            for threshold in (0.5, 1.0, 2.0, 4.0)
+        )
+        pair_mask = valid_query[:, :, None] & valid_all[:, None]
+        pair_mask &= true_distance < float(cutoff)
+        pair_mask.scatter_(
+            2,
+            local_indices[None, :, None].expand(batch, -1, -1),
+            False,
+        )
+        return (
+            (agreement * pair_mask).sum(dim=(-2, -1)),
+            pair_mask.sum(dim=(-2, -1)),
+        )
+
     with torch.autocast(device_type=prediction.device.type, enabled=False):
         for start in range(0, atom_count, chunk_size):
             stop = min(start + chunk_size, atom_count)
-            true_distance = torch.cdist(truth[:, start:stop], truth)
-            predicted_distance = torch.cdist(predicted[:, start:stop], predicted)
-            difference = (true_distance - predicted_distance).abs()
-            agreement = 0.25 * sum(
-                torch.sigmoid(threshold - difference)
-                for threshold in (0.5, 1.0, 2.0, 4.0)
-            )
-            pair_mask = valid[:, start:stop, None] & valid[:, None]
-            pair_mask &= true_distance < float(cutoff)
             local_indices = torch.arange(start, stop, device=prediction.device)
-            pair_mask.scatter_(
-                2,
-                local_indices[None, :, None].expand(batch, -1, -1),
-                False,
+            args = (
+                predicted[:, start:stop], predicted,
+                truth[:, start:stop], truth,
+                valid[:, start:stop], valid, local_indices,
             )
-            scores += (agreement * pair_mask).sum(dim=(-2, -1))
-            counts += pair_mask.sum(dim=(-2, -1))
+            if checkpoint_chunks and torch.is_grad_enabled() and prediction.requires_grad:
+                chunk_scores, chunk_counts = checkpoint(score_chunk, *args, use_reentrant=False)
+            else:
+                chunk_scores, chunk_counts = score_chunk(*args)
+            scores += chunk_scores
+            counts += chunk_counts
 
     lddt = scores / counts.clamp_min(1.0)
     loss = torch.where(counts > 0, 1.0 - lddt, torch.zeros_like(lddt))
@@ -357,6 +382,7 @@ def compute_losses(
         batch["coordinate_mask"],
         cutoff=loss_config.smooth_lddt_cutoff,
         chunk_size=loss_config.smooth_lddt_chunk_size,
+        checkpoint_chunks=loss_config.smooth_lddt_checkpoint,
     )
     if prediction.distogram is None and loss_config.distogram_weight != 0.0:
         raise ValueError("Prediction.distogram is required when distogram_weight is nonzero")

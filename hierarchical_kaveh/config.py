@@ -223,6 +223,7 @@ class LossConfig:
     polar_weight: float = 2.0
     smooth_lddt_cutoff: float = 15.0
     smooth_lddt_chunk_size: int = 128
+    smooth_lddt_checkpoint: bool = False
     distogram_drop_diagonal: bool = False
 
     def __post_init__(self) -> None:
