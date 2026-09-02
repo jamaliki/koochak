@@ -60,19 +60,41 @@ VARIANTS = (
     ("flat_before_attention_pair_transition", "flat_linear", "before_attention", True),
 )
 LENGTHS = (128, 256)
-TRAIN_BATCH_SIZE = 256
 TRAIN_NUM_WORKERS = 8
 TRAIN_GRAD_ACCUM = 1
 LENGTH_BUCKETS = {
     128: ((64, 96, 128), (16, 24, 32)),
     256: ((64, 128, 192, 256), (16, 32, 48, 64)),
 }
+TRAINING_SETTINGS = {
+    128: {
+        "batch_size": 256,
+        "min_length": 32,
+        "loop_length_max": 15,
+        "loop_content_max": 0.4,
+        "packing_density_min": 0.3,
+        "self_conditioning_probability": 1.0,
+        "keep_last_k": 12,
+    },
+    256: {
+        "batch_size": 280,
+        "min_length": 4,
+        "loop_length_max": None,
+        "loop_content_max": 0.5,
+        "packing_density_min": None,
+        "self_conditioning_probability": 0.5,
+        "keep_last_k": 1,
+    },
+}
 
 RESOURCES = {
-    "train": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 240, "time_limit_seconds": 259_200},
     "sample": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 128, "time_limit_seconds": 21_600},
     "esmfold": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 8, "memory_gb_per_node": 128, "time_limit_seconds": 43_200},
     "analysis": {"nodes": 1, "gpus_per_node": 0, "cpus_per_node": 8, "memory_gb_per_node": 32, "time_limit_seconds": 14_400},
+}
+TRAIN_RESOURCES = {
+    128: {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 240, "time_limit_seconds": 259_200},
+    256: {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 240, "time_limit_seconds": 86_400},
 }
 RECOVERY = {
     "max_attempts": 3,
@@ -97,21 +119,43 @@ def _patches(
 ) -> list[ConfigPatch]:
     name, patchify, pair_position, pair_transition = variant
     length_buckets, patch_capacities = LENGTH_BUCKETS[length]
+    settings = TRAINING_SETTINGS[length]
     return [
         ConfigPatch("model.patchify_mode", patchify),
         ConfigPatch("model.coarse_pair_position", pair_position),
         ConfigPatch("model.coarse_pair_transition", pair_transition),
         ConfigPatch("data.metadata_path", str(METADATA)),
+        ConfigPatch("data.min_length", settings["min_length"]),
         ConfigPatch("data.max_length", length),
+        ConfigPatch("data.mean_plddt_min", 80.0),
+        ConfigPatch("data.loop_length_max", settings["loop_length_max"]),
+        ConfigPatch("data.loop_content_max", settings["loop_content_max"]),
+        ConfigPatch("data.packing_density_min", settings["packing_density_min"]),
         ConfigPatch("data.length_buckets", list(length_buckets)),
         ConfigPatch("data.patch_capacities", list(patch_capacities)),
-        ConfigPatch("data.batch_size", TRAIN_BATCH_SIZE),
+        ConfigPatch("data.batch_size", settings["batch_size"]),
         ConfigPatch("data.num_workers", TRAIN_NUM_WORKERS),
+        ConfigPatch("data.prefetch_factor", 1),
+        ConfigPatch("data.pin_memory", True),
+        ConfigPatch("data.persistent_workers", True),
+        ConfigPatch("data.shard_cache_size", None),
         ConfigPatch("train.grad_accum", TRAIN_GRAD_ACCUM),
         ConfigPatch("train.ddp", False),
         ConfigPatch("train.max_steps", max_steps),
         ConfigPatch("train.ckpt_every", 50_000),
-        ConfigPatch("train.keep_last_k", 12),
+        ConfigPatch("train.keep_last_k", settings["keep_last_k"]),
+        ConfigPatch("train.grad_clip_norm", 1.0),
+        ConfigPatch("train.amp", "bf16"),
+        ConfigPatch("train.prefetch_batches", 2),
+        ConfigPatch("train.prefetch_pipeline", "two_stage"),
+        ConfigPatch("train.prefetch_threaded", True),
+        ConfigPatch("train.self_conditioning_probability", settings["self_conditioning_probability"]),
+        ConfigPatch("train.compile.enabled", True),
+        ConfigPatch("train.compile.mode", "default"),
+        ConfigPatch("train.compile.fullgraph", False),
+        ConfigPatch("train.compile.dynamic", False),
+        ConfigPatch("train.require_compile", True),
+        ConfigPatch("train.require_fused", True),
         ConfigPatch("train.evacuation_enabled", True),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
@@ -209,7 +253,7 @@ def build_workflow(code_commit: str, lengths: tuple[int, ...]) -> PreparedWorkfl
                 patches=patches,
             )
             _assert_config(train, patches)
-            tasks.append(PreparedTask(train_id, train, RESOURCES["train"], recovery=RECOVERY))
+            tasks.append(PreparedTask(train_id, train, TRAIN_RESOURCES[length], recovery=RECOVERY))
 
             for step in MILESTONES:
                 tag = _tag(step)
@@ -260,7 +304,7 @@ def build_workflow(code_commit: str, lengths: tuple[int, ...]) -> PreparedWorkfl
                         "--variant", name, "--step", str(step), "--length", str(length),
                         "--expected-count", str(SAMPLES_PER_LENGTH),
                         "--wrapper", "{cwd}/scripts/esmfold_predict_container",
-                        "--chunk-size", "64", "--bf16",
+                        "--chunk-size", "8", "--bf16",
                     ],
                 )
                 tasks.append(PreparedTask(
