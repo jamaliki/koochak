@@ -31,7 +31,7 @@ from koochak.jobs import (  # noqa: E402
 
 PROJECT_ID = "hierarchical-kaveh-patch-coarse-factorial"
 KOOCHAK_COMMIT = "eec841f0261c77c31d55100b1dd8af1e753903f5"
-SCRUFFY_COMMIT = "d60afabf82693c8c8e2108439696526c6bd2bd32"
+SCRUFFY_COMMIT = "f8f9cad0a548341c3ad2f21dfbb4f2c2bcfdbbfc"
 REMOTE_CODE_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code")
 REMOTE_RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs")
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
