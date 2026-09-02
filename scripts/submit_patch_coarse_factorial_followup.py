@@ -130,7 +130,11 @@ def _load_profile(source: Path):
 
 def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
     variant = next(item for item in VARIANTS if item[0] == cell.architecture)
-    patches = strict_patches(variant=variant, length=LENGTH, run_dir=run_dir, workflow=workflow)
+    patches = [
+        patch
+        for patch in strict_patches(variant=variant, length=LENGTH, run_dir=run_dir, workflow=workflow)
+        if patch.path != "loss.smooth_lddt_checkpoint"
+    ]
     filters = FILTERS[cell.filter_regime]
     patches.extend(
         [
