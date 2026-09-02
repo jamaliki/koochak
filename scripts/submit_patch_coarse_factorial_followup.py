@@ -393,7 +393,7 @@ def _validate_online(code_commit: str) -> None:
     expected = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{code_commit[:7]}"
     if REPO_ROOT.resolve() != expected:
         raise RuntimeError(f"run from the independent checkout {expected}")
-    missing = [str(item) for item in (SCRUFFY_ROOT, METADATA)]
+    missing = [str(item) for item in (SCRUFFY_ROOT, METADATA) if not item.exists()]
     missing.extend(str(details["config"]) for details in PARENT_CELLS.values() if not details["config"].is_file())
     if missing:
         raise RuntimeError(f"required launch locations are missing: {missing}")
