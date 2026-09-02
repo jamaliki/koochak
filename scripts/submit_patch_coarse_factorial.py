@@ -77,7 +77,9 @@ TRAINING_SETTINGS = {
         "keep_last_k": 12,
     },
     256: {
-        "batch_size": 280,
+        # Batch 280 OOMs in smooth_lddt_loss for this factorial; keep the
+        # proven single-GPU fallback without changing accumulation or DDP.
+        "batch_size": 256,
         "min_length": 4,
         "loop_length_max": None,
         "loop_content_max": 0.5,
