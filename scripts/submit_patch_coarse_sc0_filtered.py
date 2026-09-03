@@ -114,13 +114,17 @@ def _resolved_diff(parent_config: Path, child: dict[str, Any], cell: Cell) -> di
             "classification": (
                 "factor"
                 if key == "train.self_conditioning_probability"
+                else "schema_default"
+                if key == "loss.smooth_lddt_checkpoint"
                 else "run_identity_or_output"
             ),
         }
         for key in sorted(set(parent_flat) | set(child_flat))
         if parent_flat.get(key) != child_flat.get(key)
     ]
-    expected = set(OUTPUT_DIFF_PATHS)
+    # The immutable parent predates this serialized false default. It is not a
+    # training-factor change and cannot be removed from the current base schema.
+    expected = set(OUTPUT_DIFF_PATHS) | {"loss.smooth_lddt_checkpoint"}
     if parent_flat.get("train.self_conditioning_probability") != SELF_CONDITIONING:
         expected.add("train.self_conditioning_probability")
     observed = {item["path"] for item in differences}
