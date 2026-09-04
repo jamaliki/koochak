@@ -23,9 +23,9 @@ sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
 from koochak.jobs import ConfigPatch, PreparedTask, PreparedWorkflow, load_environment_profile, prepare_run, submit_scruffy_workflow  # noqa: E402
 from hierarchical_kaveh.data.progres import ProgresSidecarReader, sha256_file  # noqa: E402
 from scripts.submit_patch_coarse_factorial import (  # noqa: E402
-    BASE_CONFIG, KOOCHAK_COMMIT, METADATA, MILESTONES, RECOVERY, REMOTE_CODE_ROOT,
-    REMOTE_RUN_ROOT, RESOURCES, TRAIN_RESOURCES, VARIANTS, _assert_config,
-    _disabled_wandb, _git, _output, _patches as parent_patches, _stage_run, _tag,
+    KOOCHAK_COMMIT, METADATA, MILESTONES, RECOVERY, REMOTE_CODE_ROOT,
+    REMOTE_RUN_ROOT, RESOURCES, TRAIN_RESOURCES, _assert_config,
+    _disabled_wandb, _git, _output, _stage_run, _tag,
 )
 
 
@@ -35,19 +35,19 @@ SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105"
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-d60afabf-py310-cpython310-linux-x86_64/site")
 SIDECAR_INDEX = Path("/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/progres_sidecars/progres-v1.1.0-128d-49830e1/index.json")
 PROGRES_DATA = Path("/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0")
-PARENT_COMMIT = "97ce298cf0f5909ac0cbf50bdf94ab0481fbea8c"
-PARENT_WORKFLOW = "hk-patch-coarse-factorial-500k-L128-followup-97ce298"
-PARENT_RUN_ROOT = REMOTE_RUN_ROOT / "patch-coarse-factorial-500k-followup" / PARENT_COMMIT
+PARENT_COMMIT = "3ccc69aebb673ff556bcc59d2cba0fc0e4ddc6ba"
+PARENT_WORKFLOW = "hk-patch-coarse-mixture-unconditioned-L128-3ccc69a"
+PARENT_RUN_ROOT = REMOTE_RUN_ROOT / "patch-coarse-mixture-unconditioned-L128" / PARENT_COMMIT
 LENGTH = 128
 ARCHITECTURES = ("flat_after_node_no_transition", "pool_before_attention_pair_transition")
 MIXTURES = (("mix50_50", 0.50, 0.50), ("mix75_25", 0.75, 0.25))
-PARENT_CELLS = {architecture: PARENT_RUN_ROOT / "train" / "L128" / f"{architecture}-strict-sc0p5" / "config.yaml" for architecture in ARCHITECTURES}
-MIXTURE_PATHS = {
-    "data.mixture.strict_probability", "data.mixture.broader_probability",
-    "data.mixture.broader_mean_plddt_min", "data.mixture.broader_loop_content_max",
-    "data.mixture.broader_loop_length_max", "data.mixture.broader_packing_density_min",
-    "data.mixture.broader_exclusive", "data.mixture.seed",
+PARENT_CELLS = {
+    (architecture, mixture_id): PARENT_RUN_ROOT / "train" / "L128" / f"{architecture}-{mixture_id}-sc0p5" / "config.yaml"
+    for architecture in ARCHITECTURES
+    for mixture_id, _, _ in MIXTURES
 }
+# Mixture values are inherited verbatim from the matched unconditioned parent.
+MIXTURE_PATHS: set[str] = set()
 CONDITION_PATHS = {
     "model.progres_conditioning", "model.progres_embedding_dim",
     "data.progres_sidecar_index_path", "train.progres_condition_dropout",
@@ -80,30 +80,13 @@ def _load_profile(source: Path):
 
 
 def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
-    variant = next(item for item in VARIANTS if item[0] == cell.architecture)
-    patches = list(parent_patches(variant=variant, length=LENGTH, run_dir=run_dir, workflow=workflow))
-    # The parent predates this optional default and omits false from its YAML;
-    # do not materialize a semantically identical field just to create a diff.
-    patches = [
-        patch for patch in patches
-        if not (patch.path == "loss.smooth_lddt_checkpoint" and patch.value is False)
-    ]
-    patches.extend([
-        ConfigPatch("train.self_conditioning_probability", 0.5),
+    del cell, run_dir, workflow
+    return [
         ConfigPatch("train.progres_condition_dropout", 0.5),
         ConfigPatch("model.progres_conditioning", True),
         ConfigPatch("model.progres_embedding_dim", 128),
         ConfigPatch("data.progres_sidecar_index_path", str(SIDECAR_INDEX)),
-        ConfigPatch("data.mixture.strict_probability", cell.strict_probability),
-        ConfigPatch("data.mixture.broader_probability", cell.broader_probability),
-        ConfigPatch("data.mixture.broader_mean_plddt_min", 80.0),
-        ConfigPatch("data.mixture.broader_loop_content_max", 0.5),
-        ConfigPatch("data.mixture.broader_loop_length_max", None),
-        ConfigPatch("data.mixture.broader_packing_density_min", None),
-        ConfigPatch("data.mixture.broader_exclusive", True),
-        ConfigPatch("data.mixture.seed", 42),
-    ])
-    return patches
+    ]
 
 
 def _flatten(value: object, prefix: str = "") -> dict[str, object]:
@@ -123,10 +106,10 @@ def resolved_diff(parent_config: Path, child: Mapping[str, object], cell: Cell) 
         left, right = parent_flat.get(key, _MISSING), child_flat.get(key, _MISSING)
         if left is not _MISSING and right is not _MISSING and left == right:
             continue
-        classification = "mixture" if key in MIXTURE_PATHS else "conditioning" if key in CONDITION_PATHS else "run_identity_or_output" if key in OUTPUT_PATHS else "unexpected"
+        classification = "conditioning" if key in CONDITION_PATHS else "run_identity_or_output" if key in OUTPUT_PATHS else "unexpected"
         differences.append({"path": key, "parent": None if left is _MISSING else left, "child": None if right is _MISSING else right, "parent_present": left is not _MISSING, "child_present": right is not _MISSING, "classification": classification})
     observed = {item["path"] for item in differences}
-    allowed = MIXTURE_PATHS | CONDITION_PATHS | OUTPUT_PATHS
+    allowed = CONDITION_PATHS | OUTPUT_PATHS
     if observed != allowed:
         raise AssertionError(f"unexpected resolved-config differences for {cell.cell_id}: {sorted(observed ^ allowed)}")
     return {"cell_id": cell.cell_id, "architecture": cell.architecture, "mixture_id": cell.mixture_id, "parent_config": str(parent_config), "parent_config_sha256": hashlib.sha256(parent_config.read_bytes()).hexdigest(), "differences": differences, "allowed_paths": sorted(allowed)}
@@ -138,11 +121,12 @@ def _config_container(prepared) -> dict[str, object]:
 
 
 def _cell_train(cell: Cell, workflow: str, output_root: Path, profile):
+    parent_config = PARENT_CELLS[(cell.architecture, cell.mixture_id)]
     train_dir = output_root / "train" / "L128" / cell.cell_id
     patches = _patches(cell, train_dir, workflow)
-    run = prepare_run(name=f"hk-mixture-conditioned-train-{cell.cell_id}-{_git('rev-parse', 'HEAD')[:7]}", profile=profile, python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"], cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{_git('rev-parse', 'HEAD')[:7]}"), run_dir=str(train_dir), base_config=BASE_CONFIG, patches=patches)
-    _assert_config(run, patches)
-    return run, train_dir, patches
+    run = prepare_run(name=f"hk-mixture-conditioned-train-{cell.cell_id}-{_git('rev-parse', 'HEAD')[:7]}", profile=profile, python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"], cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{_git('rev-parse', 'HEAD')[:7]}"), run_dir=str(train_dir), base_config=parent_config, patches=patches)
+    _assert_config(run, patches, base_config=parent_config)
+    return run, train_dir, patches, parent_config
 
 
 def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, list[dict[str, object]]]:
@@ -158,8 +142,8 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, list[dict[str, o
     diffs: list[dict[str, object]] = []
     analysis_by_step: dict[int, list[tuple[str, str]]] = {step: [] for step in MILESTONES}
     for cell in CELLS:
-        train, train_dir, patches = _cell_train(cell, workflow, output_root, profiles["gpu"])
-        diffs.append(resolved_diff(PARENT_CELLS[cell.architecture], _config_container(train), cell))
+        train, train_dir, patches, parent_config = _cell_train(cell, workflow, output_root, profiles["gpu"])
+        diffs.append(resolved_diff(parent_config, _config_container(train), cell))
         train_id = f"train-{cell.cell_id}"
         tasks.append(PreparedTask(train_id, train, TRAIN_RESOURCES[LENGTH], wait_for=({"kind": "artifact", "task_id": bank_task, "artifact_id": bank_output.artifact_id},), recovery=RECOVERY))
         for step in MILESTONES:
@@ -168,7 +152,7 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, list[dict[str, o
             sample_id = f"sample-{cell.cell_id}-{tag}"
             sample_dir = output_root / "samples" / tag / cell.cell_id
             sample_output = _output(f"samples/{tag}/{cell.cell_id}", sample_dir, stage="sample", workflow=workflow, task=sample_id, kind="directory", expected_records=64)
-            sample = _stage_run(stage="sample", task=sample_id, workflow=workflow, artifact=sample_output, run_dir=sample_dir.with_name(sample_dir.name + ".managed"), profile=profiles["gpu"], base_config=BASE_CONFIG, patches=[*patches, *_disabled_wandb()], command=["{cwd}/scripts/sample_progres_conditioned_milestone.py", "--config", "{config}", "--checkpoint", str(checkpoint), "--condition-bank", str(bank_path), "--output-dir", str(sample_dir), "--seed", "20260905", "--batch-size", "4", "--precision", "bf16", "--compile"])
+            sample = _stage_run(stage="sample", task=sample_id, workflow=workflow, artifact=sample_output, run_dir=sample_dir.with_name(sample_dir.name + ".managed"), profile=profiles["gpu"], base_config=parent_config, patches=[*patches, *_disabled_wandb()], command=["{cwd}/scripts/sample_progres_conditioned_milestone.py", "--config", "{config}", "--checkpoint", str(checkpoint), "--condition-bank", str(bank_path), "--output-dir", str(sample_dir), "--seed", "20260905", "--batch-size", "4", "--precision", "bf16", "--compile"])
             tasks.append(PreparedTask(sample_id, sample, RESOURCES["sample"], wait_for=({"kind": "artifact", "task_id": train_id, "artifact_id": f"checkpoint/{tag}.pt"}, {"kind": "artifact", "task_id": bank_task, "artifact_id": bank_output.artifact_id}), recovery=RECOVERY))
             esm_id = f"esmfold-{cell.cell_id}-{tag}"
             esm_dir = output_root / "esmfold" / tag / cell.cell_id

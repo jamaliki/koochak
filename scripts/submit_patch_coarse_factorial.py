@@ -181,10 +181,12 @@ def _disabled_wandb() -> list[ConfigPatch]:
     return [ConfigPatch("wandb.enabled", False), ConfigPatch("wandb.mode", "disabled")]
 
 
-def _assert_config(prepared, patches: list[ConfigPatch]) -> None:
+def _assert_config(
+    prepared, patches: list[ConfigPatch], *, base_config: Path = BASE_CONFIG
+) -> None:
     artifact = next(item for item in prepared.artifacts if item.path.endswith("config.yaml"))
     actual = OmegaConf.to_container(OmegaConf.create(artifact.content.decode()), resolve=True)
-    expected = OmegaConf.load(BASE_CONFIG)
+    expected = OmegaConf.load(base_config)
     OmegaConf.update(expected, "train.out_dir", prepared.run_dir, force_add=True)
     for patch in patches:
         OmegaConf.update(expected, patch.path, patch.value, merge=patch.merge, force_add=True)
@@ -227,7 +229,7 @@ def _stage_run(
         declared_outputs=[artifact],
     )
     if base_config is not None:
-        _assert_config(run, patches or [])
+        _assert_config(run, patches or [], base_config=base_config)
     return run
 
 
