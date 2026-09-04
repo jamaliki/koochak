@@ -16,13 +16,11 @@ environment:
 requirements:
   executables: []
   files:
-    - /usr/bin/apptainer
     - "{cwd}/pyproject.toml"
-    - "{cwd}/containers/progres-v1.1.0.def"
-    - "{cwd}/scripts/build_progres_container.py"
     - "{cwd}/scripts/prepare_progres_data.py"
     - "{cwd}/scripts/analyze_progres_diversity.py"
     - "{cwd}/scripts/diversity_common.py"
+    - "{cwd}/scripts/progres_inference.py"
     - "{cwd}/scripts/robust_factorial_stage.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
   packages:

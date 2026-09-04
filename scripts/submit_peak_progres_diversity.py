@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Progres and analyze the two best L128 panels through Koochak/Scruffy."""
+"""Analyze the two best L128 panels with lightweight Progres inference."""
 
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ from scripts.submit_patch_coarse_step_scale_sweep import (
 from scripts.submit_peak_structural_diversity import PANELS, SCALE_ROOT
 
 PROFILE = REPO_ROOT / "environments" / "tokyo-progres-cpu.yaml"
-CONTAINER = REMOTE_RUN_ROOT.parent / "containers" / "progres-v1.1.0-py39-torch1.11.sif"
 DATA_DIR = REMOTE_RUN_ROOT.parent / "progres-data" / "v1.1.0"
+ANALYSIS_PYTHON = "/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh/bin/python"
 RESOURCES = {"nodes": 1, "gpus_per_node": 0, "cpus_per_node": 8, "memory_gb_per_node": 32, "time_limit_seconds": 14_400}
 
 
@@ -50,19 +50,6 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     workflow = f"hk-peak-progres-diversity-L128-{short}"
     output_root = REMOTE_RUN_ROOT / "peak-progres-diversity-L128" / code_commit
     profile = load_environment_profile(PROFILE)
-    container_artifact = _output(
-        "progres/container", CONTAINER, stage="analysis", workflow=workflow,
-        task="build-container", kind="file", expected_records=1,
-    )
-    build = _stage_run(
-        stage="analysis", task="build-container", workflow=workflow, artifact=container_artifact,
-        run_dir=output_root / "build-container.managed", profile=profile,
-        command=[
-            "{cwd}/scripts/build_progres_container.py",
-            "--definition", "{cwd}/containers/progres-v1.1.0.def",
-            "--output", str(CONTAINER),
-        ],
-    )
     data_manifest = output_root / "progres-data-manifest.json"
     data_artifact = _output(
         "progres/data-manifest", data_manifest, stage="analysis", workflow=workflow,
@@ -72,19 +59,12 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
         stage="analysis", task="prepare-data", workflow=workflow, artifact=data_artifact,
         run_dir=output_root / "prepare-data.managed", profile=profile,
         command=[
-            "/usr/bin/apptainer", "exec", "--cleanenv",
-            "--env", f"PROGRES_DATA_DIR={DATA_DIR}", str(CONTAINER),
-            "/pub/conda/envs/progres_env/bin/python", "{cwd}/scripts/prepare_progres_data.py",
-            "--output", str(data_manifest),
+            ANALYSIS_PYTHON, "{cwd}/scripts/prepare_progres_data.py",
+            "--data-dir", str(DATA_DIR), "--output", str(data_manifest),
         ],
     )
     tasks = [
-        PreparedTask("build-container", build, RESOURCES, recovery=RECOVERY),
-        PreparedTask(
-            "prepare-data", prepare, RESOURCES,
-            wait_for=({"kind": "artifact", "task_id": "build-container", "artifact_id": "progres/container"},),
-            recovery=RECOVERY,
-        ),
+        PreparedTask("prepare-data", prepare, RESOURCES, recovery=RECOVERY),
     ]
     for panel in PANELS:
         task_id = f"analyze-{panel}"
@@ -98,12 +78,10 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
             stage="analysis", task=task_id, workflow=workflow, artifact=artifact,
             run_dir=output.parent.with_name(output.parent.name + ".managed"), profile=profile,
             command=[
-                "/usr/bin/apptainer", "exec", "--cleanenv",
-                "--env", f"PROGRES_DATA_DIR={DATA_DIR}", str(CONTAINER),
-                "/pub/conda/envs/progres_env/bin/python", "{cwd}/scripts/analyze_progres_diversity.py",
+                ANALYSIS_PYTHON, "{cwd}/scripts/analyze_progres_diversity.py",
                 "--sample-dir", str(SCALE_ROOT / "samples" / panel / "scale2p50" / "L0128"),
                 "--esmfold-dir", str(SCALE_ROOT / "esmfold" / panel / "scale2p50" / "L0128"),
-                "--expected-count", "32", "--output", str(output),
+                "--data-dir", str(DATA_DIR), "--expected-count", "32", "--output", str(output),
             ],
         )
         tasks.append(PreparedTask(
@@ -126,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     description = {
         "workflow_id": workflow.workflow_id, "request_id": workflow.request_id,
         "code_commit": code_commit, "task_count": len(workflow.tasks),
-        "container": str(CONTAINER), "data_dir": str(DATA_DIR),
+        "data_dir": str(DATA_DIR),
     }
     if args.dry_run:
         print(json.dumps(description, indent=2, sort_keys=True))
