@@ -22,7 +22,8 @@ def main() -> None:
     temporary = args.output.with_suffix(args.output.suffix + f".tmp.{os.getpid()}")
     try:
         subprocess.run([
-            "/usr/bin/apptainer", "build", "--fakeroot", str(temporary), str(args.definition),
+            "/usr/bin/apptainer", "build", "--fakeroot", "--ignore-fakeroot-command",
+            str(temporary), str(args.definition),
         ], check=True)
         subprocess.run(["/usr/bin/apptainer", "test", str(temporary)], check=True)
         os.replace(temporary, args.output)
