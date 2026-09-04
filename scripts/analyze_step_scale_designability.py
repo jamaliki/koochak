@@ -27,8 +27,8 @@ TM_CUTOFF = 0.5
 
 def _parse_variants(value: str) -> tuple[str, ...]:
     variants = tuple(item.strip() for item in value.split(",") if item.strip())
-    if len(variants) != 2 or len(set(variants)) != len(variants):
-        raise ValueError("exactly two unique variants are required")
+    if not variants or len(set(variants)) != len(variants):
+        raise ValueError("at least one unique variant is required")
     return variants
 
 
