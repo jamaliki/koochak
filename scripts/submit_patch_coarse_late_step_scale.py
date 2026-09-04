@@ -31,7 +31,6 @@ from scripts.submit_patch_coarse_factorial import (  # noqa: E402
     RECOVERY,
     REMOTE_CODE_ROOT,
     REMOTE_RUN_ROOT,
-    SCRUFFY_COMMIT,
     SCRUFFY_ROOT,
     SCRUFFY_SITE,
     SAMPLES_PER_LENGTH,
@@ -40,6 +39,7 @@ from scripts.submit_patch_coarse_factorial import (  # noqa: E402
 from scripts.submit_patch_coarse_factorial_followup import (  # noqa: E402
     Cell,
     OUTPUT_DIFF_PATHS,
+    SCRUFFY_COMMIT,
     _config_container,
     _flatten,
     _load_profile,

@@ -1,9 +1,15 @@
 from scripts.analyze_step_scale_designability import _parse_variants
-from scripts.submit_patch_coarse_late_step_scale import SOURCE_CELLS, STEP_SCALES, build_workflow
+from scripts.submit_patch_coarse_late_step_scale import (
+    SCRUFFY_COMMIT,
+    SOURCE_CELLS,
+    STEP_SCALES,
+    build_workflow,
+)
 
 
 def test_single_variant_step_scale_analysis_is_supported() -> None:
     assert _parse_variants("scale2p50") == ("scale2p50",)
+    assert SCRUFFY_COMMIT == "d9d89c45a232602aca2b7af790fde31a755b90a1"
 
 
 def test_late_step_scale_workflow_has_complete_three_stage_panels(monkeypatch) -> None:
