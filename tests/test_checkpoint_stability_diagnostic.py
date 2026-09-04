@@ -6,9 +6,11 @@ import pytest
 
 from scripts.diagnose_checkpoint_stability import (
     ActivationRecorder,
+    _model_kwargs,
     _tensor_stats,
     parameter_statistics,
 )
+from hierarchical_kaveh.config import ModelConfig, RunConfig
 
 
 class TinyModel(nn.Module):
@@ -48,3 +50,11 @@ def test_activation_recorder_measures_gate_probabilities() -> None:
     assert 0.0 <= row["sigmoid_mean"] <= 1.0
     assert 0.0 <= row["saturated_low_fraction"] <= 1.0
     assert 0.0 <= row["saturated_high_fraction"] <= 1.0
+
+
+def test_default_factorial_model_does_not_request_intermediate_distograms() -> None:
+    config = RunConfig(model=ModelConfig(intermediate_distograms=False))
+    assert _model_kwargs(config) == {
+        "compute_distogram": False,
+        "compute_intermediate_distograms": False,
+    }

@@ -164,6 +164,13 @@ def _prediction_stats(prediction) -> dict[str, object]:
     }
 
 
+def _model_kwargs(config) -> dict[str, bool]:
+    return {
+        "compute_distogram": False,
+        "compute_intermediate_distograms": bool(config.model.intermediate_distograms),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -210,9 +217,7 @@ def main() -> None:
                         topology.chain_break, topology.atom_mask, unknown, previous,
                     )
                     with autocast():
-                        prediction = model(
-                            inputs, compute_distogram=False, compute_intermediate_distograms=True,
-                        )
+                        prediction = model(inputs, **_model_kwargs(config))
                     key = f"sigma={sigma_value:g}/sc={str(self_conditioned).lower()}"
                     conditions[key] = {
                         "prediction": _prediction_stats(prediction),
