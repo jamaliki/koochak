@@ -25,6 +25,7 @@ def test_replacement_preserves_original_artifact_identity_and_uses_verified_weig
     manifest_text = manifest.content.decode()
     assert output.artifact_id == "progres-db/partition-plan"
     assert output.path == str(REPLACEMENT_OUTPUT_ROOT / "partition_plan.json")
+    assert output.provenance["task_id"] == "prepare"
     assert str(REPLACEMENT_SIDECAR_ROOT) in manifest_text
     assert str(WEIGHTS_DIR) == "/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0"
     assert str(WEIGHTS_DIR) in manifest_text

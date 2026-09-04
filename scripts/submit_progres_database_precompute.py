@@ -135,7 +135,7 @@ def build_prepare_replacement(code_commit: str) -> PreparedWorkflow:
     ]
     run = _stage(
         workflow=REPLACEMENT_WORKFLOW,
-        task="prepare-replacement",
+        task="prepare",
         run_dir=REPLACEMENT_OUTPUT_ROOT / f"prepare-replacement-{short}.managed",
         output=output,
         profile=profile,
