@@ -20,6 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
 
+from hierarchical_kaveh.config import RunConfig  # noqa: E402
+
 from koochak.jobs import (  # noqa: E402
     ConfigPatch,
     PreparedRun,
@@ -176,12 +178,27 @@ def _flatten(value: object, prefix: str = "") -> dict[str, object]:
 _MISSING = object()
 
 
+def _resolved_config_with_defaults(config: object) -> dict[str, object]:
+    defaults = OmegaConf.to_container(OmegaConf.structured(RunConfig), resolve=True)
+    resolved = OmegaConf.to_container(
+        OmegaConf.merge(OmegaConf.create(defaults), OmegaConf.create(config)),
+        resolve=True,
+    )
+    if isinstance(resolved, dict) and isinstance(resolved.get("data"), dict):
+        if resolved["data"].get("mixture") is None:
+            # Optional sections absent from the parent are compared against
+            # the child's concrete fields, not against a synthetic null node.
+            resolved["data"].pop("mixture", None)
+    if not isinstance(resolved, dict):
+        raise TypeError("resolved configuration must be a mapping")
+    return resolved
+
+
 def _resolved_diff(parent_config: Path, child: dict[str, object], cell: Cell) -> dict[str, object]:
     if not parent_config.is_file():
         raise FileNotFoundError(parent_config)
-    parent = OmegaConf.to_container(OmegaConf.load(parent_config), resolve=True)
-    parent_flat = _flatten(parent)
-    child_flat = _flatten(child)
+    parent_flat = _flatten(_resolved_config_with_defaults(OmegaConf.load(parent_config)))
+    child_flat = _flatten(_resolved_config_with_defaults(child))
     differences = []
     for key in sorted(set(parent_flat) | set(child_flat)):
         parent_value = parent_flat.get(key, _MISSING)
