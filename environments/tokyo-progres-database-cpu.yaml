@@ -1,0 +1,28 @@
+version: 1
+id: hierarchical-kaveh-progres-database-cpu-v1
+python: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin/python
+environment:
+  set:
+    PATH: /mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh-koochak-8069043/bin:/usr/local/bin:/usr/bin:/bin
+    PYTHONPATH: /mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-mcp-current/site:{cwd}/external/koochak:{cwd}
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    PYTHONUNBUFFERED: "1"
+    KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS: "30"
+  secrets: []
+  create_directories: []
+requirements:
+  executables: []
+  files:
+    - "{cwd}/pyproject.toml"
+    - "{cwd}/scripts/precompute_progres_database.py"
+    - "{cwd}/scripts/progres_inference.py"
+    - "{cwd}/scripts/run_with_kaveh_python.py"
+    - "{cwd}/scripts/robust_factorial_stage.py"
+    - "{cwd}/external/koochak/koochak/jobs/runner.py"
+  packages:
+    koochak: "*"
+    scruffy: "*"
+    numpy: 2.2.6
+preflight: []
