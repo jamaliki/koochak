@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import sys
 
@@ -60,17 +63,22 @@ SCRUFFY_SITE = Path(
     "scruffy-d60afabf-py310-cpython310-linux-x86_64/site"
 )
 PROGRES_DATA = Path("/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0")
-PARENT_COMMIT = "1339d7d2abbd2f21c296daa23b8aa7ae3659a484"
-PARENT_WORKFLOW = "hk-patch-coarse-factorial-500k-L128-strict-sc0p5-missing6-1339d7d"
+PARENT_COMMIT = "97ce298cf0f5909ac0cbf50bdf94ab0481fbea8c"
+PARENT_WORKFLOW = "hk-patch-coarse-factorial-500k-L128-followup-97ce298"
 PARENT_RUN_ROOT = (
     REMOTE_RUN_ROOT
-    / "patch-coarse-factorial-500k-L128-strict-sc0p5-missing6-1339d7d"
+    / "patch-coarse-factorial-500k-followup"
+    / PARENT_COMMIT
 )
 LENGTH = 128
 ARCHITECTURES = (
     "flat_after_node_no_transition",
     "pool_before_attention_pair_transition",
 )
+# All four trainer cells may be admitted concurrently by Scruffy.
+REQUIRED_TRAINER_GPUS = len(ARCHITECTURES) * 2
+MIN_REMAINING_SECONDS = TRAIN_RESOURCES[LENGTH]["time_limit_seconds"] + 3_600
+HEARTBEAT_MAX_AGE_SECONDS = 120
 MIXTURES = (
     ("mix50_50", 0.50, 0.50),
     ("mix75_25", 0.75, 0.25),
@@ -165,6 +173,9 @@ def _flatten(value: object, prefix: str = "") -> dict[str, object]:
     return {prefix: value}
 
 
+_MISSING = object()
+
+
 def _resolved_diff(parent_config: Path, child: dict[str, object], cell: Cell) -> dict[str, object]:
     if not parent_config.is_file():
         raise FileNotFoundError(parent_config)
@@ -173,12 +184,20 @@ def _resolved_diff(parent_config: Path, child: dict[str, object], cell: Cell) ->
     child_flat = _flatten(child)
     differences = []
     for key in sorted(set(parent_flat) | set(child_flat)):
-        if parent_flat.get(key) == child_flat.get(key):
+        parent_value = parent_flat.get(key, _MISSING)
+        child_value = child_flat.get(key, _MISSING)
+        if (
+            parent_value is not _MISSING
+            and child_value is not _MISSING
+            and parent_value == child_value
+        ):
             continue
         differences.append({
             "path": key,
-            "parent": parent_flat.get(key),
-            "child": child_flat.get(key),
+            "parent": None if parent_value is _MISSING else parent_value,
+            "child": None if child_value is _MISSING else child_value,
+            "parent_present": parent_value is not _MISSING,
+            "child_present": child_value is not _MISSING,
             "classification": "mixture" if key in MIXTURE_PATHS else "run_identity_or_output",
         })
     observed = {item["path"] for item in differences}
@@ -373,7 +392,146 @@ def _describe(workflow: PreparedWorkflow, diffs: list[dict[str, object]], code_c
             "esmfold": len(CELLS) * len(MILESTONES), "progres": len(CELLS) * len(MILESTONES),
             "designability_analysis": len(MILESTONES),
         },
+        "mixture_resume_contract": (
+            "deterministic_restart_from_canonical_source_stream; exact sample-level "
+            "continuation is not claimed because length-bucket buffers and DataLoader "
+            "prefetch state are not checkpointed"
+        ),
         "config_diffs": diffs,
+    }
+
+
+def _status_value(*mappings: Mapping[str, object], keys: tuple[str, ...]) -> object | None:
+    for mapping in mappings:
+        for key in keys:
+            if key in mapping:
+                return mapping[key]
+    return None
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_scruffy_snapshot(
+    snapshot: Mapping[str, object],
+    *,
+    now: datetime | None = None,
+    expected_allocation_id: str | None = None,
+) -> dict[str, object]:
+    """Attest the live allocation before allowing workflow submission."""
+
+    allocation = snapshot.get("allocation")
+    if not isinstance(allocation, Mapping):
+        raise RuntimeError("Scruffy status has no allocation mapping")
+    state = allocation.get("state")
+    if not isinstance(state, str) or state.lower() != "running":
+        raise RuntimeError(f"Scruffy allocation is not RUNNING: {state!r}")
+
+    allocation_id = _status_value(
+        allocation,
+        snapshot,
+        keys=("allocation_id", "allocation_identity", "id", "job_id"),
+    )
+    if allocation_id is None or not str(allocation_id).strip():
+        raise RuntimeError("Scruffy status has no current allocation identity")
+    allocation_id = str(allocation_id)
+    if expected_allocation_id is not None and allocation_id != str(expected_allocation_id):
+        raise RuntimeError(
+            f"unexpected Scruffy allocation identity: expected {expected_allocation_id}, "
+            f"got {allocation_id}"
+        )
+
+    for name, keys in {
+        "draining": ("draining",),
+        "launches_paused": ("launches_paused", "launch_paused"),
+    }.items():
+        value = _status_value(allocation, snapshot, keys=keys)
+        if value is not False:
+            raise RuntimeError(f"Scruffy allocation {name} is not explicitly false: {value!r}")
+
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_value = _status_value(
+        allocation,
+        snapshot,
+        keys=("heartbeat_age_seconds", "last_heartbeat_age_seconds"),
+    )
+    if age_value is not None:
+        if not isinstance(age_value, (int, float)) or isinstance(age_value, bool) or not math.isfinite(float(age_value)):
+            raise RuntimeError(f"invalid Scruffy heartbeat age: {age_value!r}")
+        heartbeat_age = float(age_value)
+    else:
+        heartbeat_value = _status_value(
+            allocation,
+            snapshot,
+            keys=("heartbeat_at", "last_heartbeat_at", "last_heartbeat", "heartbeat"),
+        )
+        heartbeat_at = _parse_timestamp(heartbeat_value)
+        if heartbeat_at is None:
+            raise RuntimeError("Scruffy status has no parseable heartbeat")
+        heartbeat_age = max(0.0, (now - heartbeat_at).total_seconds())
+    if heartbeat_age > HEARTBEAT_MAX_AGE_SECONDS:
+        raise RuntimeError(f"Scruffy heartbeat is stale: {heartbeat_age:.1f}s")
+
+    remaining_value = _status_value(
+        allocation,
+        snapshot,
+        keys=("remaining_seconds", "remaining_time_seconds", "time_remaining_seconds", "seconds_remaining"),
+    )
+    if remaining_value is None:
+        end_value = _status_value(
+            allocation,
+            snapshot,
+            keys=("expires_at", "end_time", "deadline", "allocation_end"),
+        )
+        end_at = _parse_timestamp(end_value)
+        remaining_value = None if end_at is None else (end_at - now).total_seconds()
+    if not isinstance(remaining_value, (int, float)) or isinstance(remaining_value, bool) or not math.isfinite(float(remaining_value)):
+        raise RuntimeError("Scruffy status has no usable remaining lifetime")
+    remaining_seconds = float(remaining_value)
+    if remaining_seconds < MIN_REMAINING_SECONDS:
+        raise RuntimeError(
+            f"Scruffy allocation has insufficient remaining lifetime: {remaining_seconds:.0f}s "
+            f"< {MIN_REMAINING_SECONDS}s"
+        )
+
+    resource_maps = [allocation, snapshot]
+    for key in ("resources", "capacity", "available_resources"):
+        value = allocation.get(key)
+        if isinstance(value, Mapping):
+            resource_maps.append(value)
+        value = snapshot.get(key)
+        if isinstance(value, Mapping):
+            resource_maps.append(value)
+    available_gpus = _status_value(
+        *resource_maps,
+        keys=("available_gpus", "gpus_available", "free_gpus", "gpus_free"),
+    )
+    if not isinstance(available_gpus, (int, float)) or isinstance(available_gpus, bool) or not math.isfinite(float(available_gpus)):
+        raise RuntimeError("Scruffy status has no usable available-GPU capacity")
+    available_gpus = float(available_gpus)
+    if available_gpus < REQUIRED_TRAINER_GPUS:
+        raise RuntimeError(
+            f"Scruffy allocation has insufficient free GPUs: {available_gpus:g} "
+            f"< {REQUIRED_TRAINER_GPUS}"
+        )
+    return {
+        "allocation_id": allocation_id,
+        "state": "RUNNING",
+        "draining": False,
+        "launches_paused": False,
+        "heartbeat_age_seconds": heartbeat_age,
+        "remaining_seconds": remaining_seconds,
+        "available_gpus": available_gpus,
+        "controller_release": allocation.get("controller_release"),
     }
 
 
@@ -386,7 +544,15 @@ def _validate_online(code_commit: str) -> None:
     expected = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{code_commit[:7]}"
     if REPO_ROOT.resolve() != expected:
         raise RuntimeError(f"run from independent checkout {expected}")
-    missing = [str(item) for item in (SCRUFFY_ROOT, SCRUFFY_SITE, METADATA, PROGRES_DATA)]
+    missing = []
+    if not SCRUFFY_ROOT.is_dir():
+        missing.append(f"SCRUFFY_ROOT (directory): {SCRUFFY_ROOT}")
+    if not SCRUFFY_SITE.is_dir():
+        missing.append(f"SCRUFFY_SITE (directory): {SCRUFFY_SITE}")
+    if not METADATA.is_file():
+        missing.append(f"METADATA (file): {METADATA}")
+    if not PROGRES_DATA.is_dir():
+        missing.append(f"PROGRES_DATA (directory): {PROGRES_DATA}")
     missing.extend(str(config) for config in PARENT_CELLS.values() if not config.is_file())
     if missing:
         raise RuntimeError(f"required launch locations are missing: {missing}")
@@ -411,12 +577,19 @@ def main(argv: list[str] | None = None) -> None:
     sys.path.insert(0, str(SCRUFFY_SITE))
     from scruffy import status  # noqa: PLC0415
     snapshot = status(SCRUFFY_ROOT)
-    allocation = snapshot.get("allocation") if isinstance(snapshot, Mapping) else None
-    release = allocation.get("controller_release") if isinstance(allocation, Mapping) else None
-    if release != SCRUFFY_COMMIT:
-        raise RuntimeError(f"Scruffy controller release mismatch: expected {SCRUFFY_COMMIT}, got {release}")
+    if not isinstance(snapshot, Mapping):
+        raise RuntimeError("Scruffy status response is not a mapping")
+    attestation = _validate_scruffy_snapshot(
+        snapshot,
+        expected_allocation_id=os.environ.get("SCRUFFY_ALLOCATION_ID"),
+    )
+    if attestation["controller_release"] != SCRUFFY_COMMIT:
+        raise RuntimeError(
+            f"Scruffy controller release mismatch: expected {SCRUFFY_COMMIT}, "
+            f"got {attestation['controller_release']}"
+        )
     submission = submit_scruffy_workflow(workflow, root=SCRUFFY_ROOT)
-    print(json.dumps({"workflow": description, "diff_path": str(diff_path), "submission": submission}, indent=2, sort_keys=True, default=str))
+    print(json.dumps({"workflow": description, "diff_path": str(diff_path), "allocation": attestation, "submission": submission}, indent=2, sort_keys=True, default=str))
 
 
 if __name__ == "__main__":

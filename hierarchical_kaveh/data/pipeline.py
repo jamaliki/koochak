@@ -89,7 +89,13 @@ class _CyclicPool:
 
 
 class _MixtureSchedule:
-    """A resumable periodic source schedule with exact rational frequencies."""
+    """A periodic source schedule with exact rational frequencies.
+
+    An explicit ``offset`` is an exact sample-stream cursor.  The training
+    dataset intentionally starts at offset zero on every iterator restart:
+    checkpoint state does not include the length-bucket buffers or DataLoader
+    prefetch queue, so optimizer ``global_step`` cannot recover that cursor.
+    """
 
     def __init__(self, strict_probability: float, *, offset: int = 0, seed: int = 0):
         fraction = Fraction(str(strict_probability)).limit_denominator(1000)
@@ -151,18 +157,35 @@ def _mixture_references(data: DataConfig) -> dict[str, tuple[SampleReference, ..
 
 def _assign_mixture_sources(
     source_references: Mapping[str, Sequence[SampleReference]],
-    assigned: Sequence[SampleReference],
-) -> tuple[dict[str, tuple[SampleReference, ...]], dict[str, bool]]:
-    """Use local whole-shard sources, falling back only when a source is absent."""
+    *,
+    worker_index: int,
+    worker_count: int,
+) -> dict[str, tuple[SampleReference, ...]]:
+    """Partition each source by reference without a global fallback.
 
-    assigned_shards = {reference.shard for reference in assigned}
-    source_assigned: dict[str, tuple[SampleReference, ...]] = {}
-    source_fallbacks: dict[str, bool] = {}
+    Mixture strata are intentionally assigned independently at reference
+    granularity.  Whole-shard ownership cannot guarantee that every worker
+    sees both strata when their shard coverage is imbalanced.  Round-robin
+    assignment is deterministic, disjoint within each source, and gives every
+    worker a source whenever that source has at least ``worker_count``
+    references.  The same physical shard can therefore be opened by more than
+    one worker, but no reference is duplicated and callers derive owned shards
+    from these actual assignments.
+    """
+
+    if worker_count <= 0 or not 0 <= worker_index < worker_count:
+        raise ValueError("invalid mixture worker partition")
+    assigned: dict[str, tuple[SampleReference, ...]] = {}
     for source, references in source_references.items():
-        local = tuple(reference for reference in references if reference.shard in assigned_shards)
-        source_fallbacks[source] = not local
-        source_assigned[source] = local or tuple(references)
-    return source_assigned, source_fallbacks
+        ordered = tuple(
+            sorted(references, key=lambda reference: (str(reference.shard), reference.index))
+        )
+        assigned[source] = tuple(
+            reference
+            for position, reference in enumerate(ordered)
+            if position % worker_count == worker_index
+        )
+    return assigned
 
 
 def _crop(clean: dict[str, Any], max_length: int, generator: torch.Generator) -> dict[str, Any]:
@@ -323,33 +346,57 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
         worker = get_worker_info()
         worker_id, worker_count = (worker.id, worker.num_workers) if worker else (0, 1)
         rank, world = dist.rank(), dist.world_size()
-        assigned = shard_references(
-            self.references,
-            rank=rank,
-            world_size=world,
-            worker_id=worker_id,
-            num_workers=worker_count,
-        )
-        if not assigned:
-            global_worker = rank * worker_count + worker_id
-            raise RuntimeError(
-                f"worker {global_worker}/{world * worker_count} received no samples; "
-                "reduce data workers"
+        global_worker = rank * worker_count + worker_id
+        global_workers = world * worker_count
+        if self.mixture_references:
+            source_assigned = _assign_mixture_sources(
+                self.mixture_references,
+                worker_index=global_worker,
+                worker_count=global_workers,
             )
+            missing_sources = [source for source, references in source_assigned.items() if not references]
+            if missing_sources:
+                raise RuntimeError(
+                    f"mixture worker {global_worker}/{global_workers} has no references for "
+                    f"{missing_sources}; each source needs at least {global_workers} references"
+                )
+            assigned = tuple(
+                reference
+                for references in source_assigned.values()
+                for reference in references
+            )
+        else:
+            assigned = shard_references(
+                self.references,
+                rank=rank,
+                world_size=world,
+                worker_id=worker_id,
+                num_workers=worker_count,
+            )
+            if not assigned:
+                raise RuntimeError(
+                    f"worker {global_worker}/{global_workers} received no samples; "
+                    "reduce data workers"
+                )
+        # A resumed iterator cannot reconstruct bucket-buffer/prefetch draws
+        # from global_step.  Keep mixture retries on one canonical stream;
+        # non-mixture behavior retains its existing step-dependent seed.
+        seed_step = 0 if self.mixture_references else self.global_step
         generator = torch.Generator().manual_seed(
-            _seed(self.data.seed, rank, worker_id, self.global_step)
+            _seed(self.data.seed, rank, worker_id, seed_step)
         )
         if self.mixture_references:
-            source_assigned, source_fallbacks = _assign_mixture_sources(
-                self.mixture_references, assigned
-            )
             pools = {
                 source: _CyclicPool(references, generator)
                 for source, references in source_assigned.items()
             }
             schedule = _MixtureSchedule(
                 self.data.mixture.strict_probability,
-                offset=self.global_step * self.data.batch_size,
+                # Exact continuation requires the true consumed-draw cursor,
+                # not global_step * batch_size; bucket buffers can consume
+                # extra references before yielding a batch.  That cursor is
+                # not checkpointed, so restarts use the canonical stream.
+                offset=0,
                 seed=self.data.mixture.seed,
             )
         else:
@@ -421,8 +468,6 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                             "data_mixture_broader_cumulative_count": torch.tensor(cumulative_counts["broader_exclusive"], dtype=torch.long),
                             "data_mixture_strict_pool_count": torch.tensor(len(self.mixture_references["strict"]), dtype=torch.long),
                             "data_mixture_broader_pool_count": torch.tensor(len(self.mixture_references["broader_exclusive"]), dtype=torch.long),
-                            "data_mixture_strict_worker_fallback": torch.tensor(int(source_fallbacks["strict"]), dtype=torch.long),
-                            "data_mixture_broader_worker_fallback": torch.tensor(int(source_fallbacks["broader_exclusive"]), dtype=torch.long),
                         }
                     )
                 batch.update(

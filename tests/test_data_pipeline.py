@@ -213,29 +213,58 @@ def test_mixture_uses_exclusive_pool_and_exact_periodic_source_ratio(monkeypatch
     assert observed.count("broader_exclusive") == 2
 
 
-def test_mixture_worker_assignment_falls_back_for_imbalanced_whole_shards(tmp_path) -> None:
+def test_mixture_worker_assignment_is_disjoint_with_imbalanced_shard_coverage(tmp_path) -> None:
     strict = tuple(
-        shard_module.SampleReference(tmp_path / f"strict-{index}.npz", index, 0, 1, 32)
+        shard_module.SampleReference(tmp_path / "strict-only-shard.npz", index, 0, 1, 32)
+        for index in range(8)
+    )
+    broader = tuple(
+        shard_module.SampleReference(tmp_path / "broader-only-shard.npz", index, 0, 1, 32)
+        for index in range(8)
+    )
+    sources = {"strict": strict, "broader_exclusive": broader}
+
+    workers = [
+        pipeline_module._assign_mixture_sources(
+            sources, worker_index=worker_index, worker_count=4
+        )
+        for worker_index in range(4)
+    ]
+
+    for assigned in workers:
+        assert len(assigned["strict"]) == 2
+        assert len(assigned["broader_exclusive"]) == 2
+    for source in sources:
+        observed = [reference for worker in workers for reference in worker[source]]
+        assert len(observed) == len(set((reference.shard, reference.index) for reference in observed))
+        assert set(observed) == set(sources[source])
+
+
+def test_mixture_worker_assignment_does_not_fallback_when_a_pool_is_too_small(tmp_path) -> None:
+    strict = tuple(
+        shard_module.SampleReference(tmp_path / "strict.npz", index, 0, 1, 32)
         for index in range(2)
     )
     broader = tuple(
-        shard_module.SampleReference(tmp_path / f"broader-{index}.npz", index, 0, 1, 32)
-        for index in range(2)
+        shard_module.SampleReference(tmp_path / "broader.npz", index, 0, 1, 32)
+        for index in range(8)
     )
 
-    assigned, fallbacks = pipeline_module._assign_mixture_sources(
-        {"strict": strict, "broader_exclusive": broader}, assigned=strict[:1]
+    assigned = pipeline_module._assign_mixture_sources(
+        {"strict": strict, "broader_exclusive": broader},
+        worker_index=3,
+        worker_count=4,
     )
 
-    assert assigned["strict"] == strict[:1]
-    assert assigned["broader_exclusive"] == broader
-    assert fallbacks == {"strict": False, "broader_exclusive": True}
+    assert assigned["strict"] == ()
+    assert assigned["broader_exclusive"]
+    assert not set(assigned["broader_exclusive"]) & set(strict)
 
 
 @pytest.mark.parametrize(
     ("strict_probability", "strict_count"), ((0.5, 256), (0.75, 384))
 )
-def test_mixture_schedule_is_exact_and_resume_deterministic(
+def test_mixture_schedule_is_exact_and_explicit_offset_is_deterministic(
     strict_probability: float, strict_count: int
 ) -> None:
     full_schedule = pipeline_module._MixtureSchedule(
@@ -250,6 +279,68 @@ def test_mixture_schedule_is_exact_and_resume_deterministic(
     assert full.count("strict") == strict_count
     assert full.count("broader_exclusive") == 512 - strict_count
     assert resumed == full[256:]
+
+
+def test_mixture_dataset_restart_does_not_infer_draw_offset_from_global_step(monkeypatch, tmp_path) -> None:
+    references = [
+        shard_module.SampleReference(tmp_path / f"shard-{index}.npz", index, 0, 1, 32)
+        for index in range(4)
+    ]
+
+    def fake_index_shards(_metadata_path, **filters):
+        return references[:2] if filters["loop_content_max"] == 0.4 else references
+
+    offsets = []
+
+    class SpySchedule(pipeline_module._MixtureSchedule):
+        def __init__(self, strict_probability, *, offset=0, seed=0):
+            offsets.append(offset)
+            super().__init__(strict_probability, offset=offset, seed=seed)
+
+    monkeypatch.setattr(pipeline_module, "index_shards", fake_index_shards)
+    monkeypatch.setattr(pipeline_module, "_MixtureSchedule", SpySchedule)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_sample",
+        lambda *_args, **_kwargs: {
+            "aatype": torch.zeros(32, dtype=torch.long),
+            "chain_idx": torch.zeros(32, dtype=torch.long),
+            "res_idx": torch.arange(32),
+        },
+    )
+    monkeypatch.setattr(pipeline_module, "corrupt_structure", lambda clean, **_kwargs: clean)
+    monkeypatch.setattr(pipeline_module, "sample_training_sigma", lambda *_args, **_kwargs: torch.tensor(1.0))
+    class EmptyCache:
+        hits = misses = resident_bytes = 0
+
+        def __init__(self, _capacity):
+            pass
+
+        def preload(self, _shards):
+            return None
+
+        def __len__(self):
+            return 0
+
+    monkeypatch.setattr(pipeline_module, "ShardCache", EmptyCache)
+    monkeypatch.setattr(
+        pipeline_module,
+        "collate_samples",
+        lambda buffer, **_kwargs: {"lengths": torch.tensor([len(buffer[0]["aatype"])])},
+    )
+    data = DataConfig(
+        metadata_path="/data/metadata.json",
+        min_length=32,
+        max_length=128,
+        loop_content_max=0.4,
+        batch_size=1,
+        length_buckets=(64,),
+        mixture=DataMixtureConfig(),
+    )
+
+    next(iter(pipeline_module.TrainingBatchDataset(data, DiffusionConfig(), sigma_data=1.0, global_step=123)))
+
+    assert offsets == [0]
 
 
 def test_index_excludes_sample_with_overlong_consecutive_ca_step(tmp_path) -> None:

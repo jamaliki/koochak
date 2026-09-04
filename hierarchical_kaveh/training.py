@@ -45,8 +45,6 @@ _BATCH_TELEMETRY = (
     "data_mixture_broader_cumulative_count",
     "data_mixture_strict_pool_count",
     "data_mixture_broader_pool_count",
-    "data_mixture_strict_worker_fallback",
-    "data_mixture_broader_worker_fallback",
     "koochak_prefetch_cpu_fetch_time_s",
     "koochak_prefetch_get_wait_s",
     "koochak_prefetch_event_ready",
