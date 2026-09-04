@@ -7,7 +7,7 @@ import torch
 
 import hierarchical_kaveh.data.shards as shard_module
 import hierarchical_kaveh.data.pipeline as pipeline_module
-from hierarchical_kaveh.config import DataConfig, DiffusionConfig
+from hierarchical_kaveh.config import DataConfig, DataMixtureConfig, DiffusionConfig
 from hierarchical_kaveh.data import (
     ShardCache,
     build_train_dataloader,
@@ -171,6 +171,85 @@ def test_training_dataset_forwards_all_data_filters(monkeypatch) -> None:
         "loop_content_max": 0.4,
         "packing_density_min": 0.3,
     }
+
+
+def test_mixture_uses_exclusive_pool_and_exact_periodic_source_ratio(monkeypatch, tmp_path) -> None:
+    references = [
+        shard_module.SampleReference(tmp_path / "s.npz", index, 0, 1, 32)
+        for index in range(5)
+    ]
+    calls = []
+
+    def fake_index_shards(_metadata_path, **filters):
+        calls.append(filters)
+        return references[:4] if filters["loop_content_max"] == 0.4 else references
+
+    monkeypatch.setattr(pipeline_module, "index_shards", fake_index_shards)
+    data = DataConfig(
+        metadata_path="/data/metadata.json",
+        min_length=32,
+        max_length=128,
+        mean_plddt_min=80.0,
+        loop_length_max=15,
+        loop_content_max=0.4,
+        packing_density_min=0.3,
+        mixture=DataMixtureConfig(strict_probability=0.75, broader_probability=0.25),
+    )
+    pools = pipeline_module._mixture_references(data)
+    schedule = pipeline_module._MixtureSchedule(0.75)
+    observed = [schedule.pop() for _ in range(8)]
+
+    assert len(pools["strict"]) == 4
+    assert len(pools["broader_exclusive"]) == 1
+    assert calls[1] == {
+        "min_length": 32,
+        "max_length": 128,
+        "mean_plddt_min": 80.0,
+        "loop_length_max": None,
+        "loop_content_max": 0.5,
+        "packing_density_min": None,
+    }
+    assert observed.count("strict") == 6
+    assert observed.count("broader_exclusive") == 2
+
+
+def test_mixture_worker_assignment_falls_back_for_imbalanced_whole_shards(tmp_path) -> None:
+    strict = tuple(
+        shard_module.SampleReference(tmp_path / f"strict-{index}.npz", index, 0, 1, 32)
+        for index in range(2)
+    )
+    broader = tuple(
+        shard_module.SampleReference(tmp_path / f"broader-{index}.npz", index, 0, 1, 32)
+        for index in range(2)
+    )
+
+    assigned, fallbacks = pipeline_module._assign_mixture_sources(
+        {"strict": strict, "broader_exclusive": broader}, assigned=strict[:1]
+    )
+
+    assert assigned["strict"] == strict[:1]
+    assert assigned["broader_exclusive"] == broader
+    assert fallbacks == {"strict": False, "broader_exclusive": True}
+
+
+@pytest.mark.parametrize(
+    ("strict_probability", "strict_count"), ((0.5, 256), (0.75, 384))
+)
+def test_mixture_schedule_is_exact_and_resume_deterministic(
+    strict_probability: float, strict_count: int
+) -> None:
+    full_schedule = pipeline_module._MixtureSchedule(
+        strict_probability, seed=42
+    )
+    full = [full_schedule.pop() for _ in range(512)]
+    resumed_schedule = pipeline_module._MixtureSchedule(
+        strict_probability, offset=256, seed=42
+    )
+    resumed = [resumed_schedule.pop() for _ in range(256)]
+
+    assert full.count("strict") == strict_count
+    assert full.count("broader_exclusive") == 512 - strict_count
+    assert resumed == full[256:]
 
 
 def test_index_excludes_sample_with_overlong_consecutive_ca_step(tmp_path) -> None:

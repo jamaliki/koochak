@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from fractions import Fraction
 from typing import Any
 
 import torch
@@ -85,6 +86,83 @@ class _CyclicPool:
         reference = self.references[self.permutation[self.offset]]
         self.offset += 1
         return reference
+
+
+class _MixtureSchedule:
+    """A resumable periodic source schedule with exact rational frequencies."""
+
+    def __init__(self, strict_probability: float, *, offset: int = 0, seed: int = 0):
+        fraction = Fraction(str(strict_probability)).limit_denominator(1000)
+        if float(fraction) != float(strict_probability):
+            raise ValueError("mixture probability must have a finite exact schedule")
+        schedule = ("strict",) * fraction.numerator + ("broader_exclusive",) * (
+            fraction.denominator - fraction.numerator
+        )
+        rotation = int(seed) % len(schedule)
+        self.schedule = schedule[rotation:] + schedule[:rotation]
+        self.position = int(offset) % len(self.schedule)
+
+    def pop(self) -> str:
+        source = self.schedule[self.position]
+        self.position = (self.position + 1) % len(self.schedule)
+        return source
+
+
+def _reference_key(reference: SampleReference) -> tuple[Path, int]:
+    return reference.shard, reference.index
+
+
+def _mixture_references(data: DataConfig) -> dict[str, tuple[SampleReference, ...]]:
+    """Build mutually exclusive source pools using the same strict predicates."""
+
+    mixture = data.mixture
+    if mixture is None:
+        return {}
+    strict = tuple(
+        index_shards(
+            data.metadata_path,
+            min_length=data.min_length,
+            max_length=data.max_length,
+            mean_plddt_min=data.mean_plddt_min,
+            loop_length_max=data.loop_length_max,
+            loop_content_max=data.loop_content_max,
+            packing_density_min=data.packing_density_min,
+        )
+    )
+    broader = tuple(
+        index_shards(
+            data.metadata_path,
+            min_length=data.min_length,
+            max_length=data.max_length,
+            mean_plddt_min=mixture.broader_mean_plddt_min,
+            loop_length_max=mixture.broader_loop_length_max,
+            loop_content_max=mixture.broader_loop_content_max,
+            packing_density_min=mixture.broader_packing_density_min,
+        )
+    )
+    strict_keys = {_reference_key(reference) for reference in strict}
+    broader_exclusive = tuple(
+        reference for reference in broader if _reference_key(reference) not in strict_keys
+    )
+    if not broader_exclusive:
+        raise ValueError("data.mixture broader-exclusive pool is empty")
+    return {"strict": strict, "broader_exclusive": broader_exclusive}
+
+
+def _assign_mixture_sources(
+    source_references: Mapping[str, Sequence[SampleReference]],
+    assigned: Sequence[SampleReference],
+) -> tuple[dict[str, tuple[SampleReference, ...]], dict[str, bool]]:
+    """Use local whole-shard sources, falling back only when a source is absent."""
+
+    assigned_shards = {reference.shard for reference in assigned}
+    source_assigned: dict[str, tuple[SampleReference, ...]] = {}
+    source_fallbacks: dict[str, bool] = {}
+    for source, references in source_references.items():
+        local = tuple(reference for reference in references if reference.shard in assigned_shards)
+        source_fallbacks[source] = not local
+        source_assigned[source] = local or tuple(references)
+    return source_assigned, source_fallbacks
 
 
 def _crop(clean: dict[str, Any], max_length: int, generator: torch.Generator) -> dict[str, Any]:
@@ -223,6 +301,13 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                 packing_density_min=data.packing_density_min,
             )
         )
+        self.mixture_references = _mixture_references(data)
+        if self.mixture_references:
+            self.references = tuple(
+                reference
+                for source in self.mixture_references.values()
+                for reference in source
+            )
         self.length_buckets = data.effective_length_buckets
         capacities = data.patch_capacities or tuple(
             bucket_patch_capacity((edge + 3) // 4)
@@ -254,7 +339,21 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
         generator = torch.Generator().manual_seed(
             _seed(self.data.seed, rank, worker_id, self.global_step)
         )
-        pool = _CyclicPool(assigned, generator)
+        if self.mixture_references:
+            source_assigned, source_fallbacks = _assign_mixture_sources(
+                self.mixture_references, assigned
+            )
+            pools = {
+                source: _CyclicPool(references, generator)
+                for source, references in source_assigned.items()
+            }
+            schedule = _MixtureSchedule(
+                self.data.mixture.strict_probability,
+                offset=self.global_step * self.data.batch_size,
+                seed=self.data.mixture.seed,
+            )
+        else:
+            pool = _CyclicPool(assigned, generator)
         buffers: dict[int, list[dict[str, Tensor]]] = {
             edge: [] for edge in self.length_buckets
         }
@@ -264,10 +363,15 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
         if cache_all:
             shard_cache.preload(owned_shards)
 
+        cumulative_counts = {"strict": 0, "broader_exclusive": 0}
+        source_buffers: dict[int, list[str]] = {edge: [] for edge in self.length_buckets}
+
         while True:
+            source = schedule.pop() if self.mixture_references else "single"
+            reference = pools[source].pop() if self.mixture_references else pool.pop()
             clean = _crop(
                 load_sample(
-                    pool.pop(),
+                    reference,
                     cache=shard_cache,
                     include_secondary_structure=self.data.secondary_structure,
                 ),
@@ -295,12 +399,32 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
             edge = next(edge for edge in self.length_buckets if len(sample["aatype"]) <= edge)
             buffer = buffers[edge]
             buffer.append(sample)
+            source_buffers[edge].append(source)
             if len(buffer) == self.data.batch_size:
                 batch = collate_samples(
                     buffer,
                     pad_to=edge,
                     patch_capacity=self.patch_capacities[edge],
                 )
+                if self.mixture_references:
+                    current_counts = {
+                        name: source_buffers[edge].count(name)
+                        for name in ("strict", "broader_exclusive")
+                    }
+                    for name, count in current_counts.items():
+                        cumulative_counts[name] += count
+                    batch.update(
+                        {
+                            "data_mixture_strict_count": torch.tensor(current_counts["strict"], dtype=torch.long),
+                            "data_mixture_broader_count": torch.tensor(current_counts["broader_exclusive"], dtype=torch.long),
+                            "data_mixture_strict_cumulative_count": torch.tensor(cumulative_counts["strict"], dtype=torch.long),
+                            "data_mixture_broader_cumulative_count": torch.tensor(cumulative_counts["broader_exclusive"], dtype=torch.long),
+                            "data_mixture_strict_pool_count": torch.tensor(len(self.mixture_references["strict"]), dtype=torch.long),
+                            "data_mixture_broader_pool_count": torch.tensor(len(self.mixture_references["broader_exclusive"]), dtype=torch.long),
+                            "data_mixture_strict_worker_fallback": torch.tensor(int(source_fallbacks["strict"]), dtype=torch.long),
+                            "data_mixture_broader_worker_fallback": torch.tensor(int(source_fallbacks["broader_exclusive"]), dtype=torch.long),
+                        }
+                    )
                 batch.update(
                     {
                         "data_worker_id": torch.tensor(
@@ -325,6 +449,7 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                 )
                 yield batch
                 buffer.clear()
+                source_buffers[edge].clear()
 
 
 def build_train_dataloader(

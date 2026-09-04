@@ -120,6 +120,42 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class DataMixtureConfig:
+    """Deterministic mixture of the configured strict and broader pools."""
+
+    strict_probability: float = 0.5
+    broader_probability: float = 0.5
+    broader_mean_plddt_min: float = 80.0
+    broader_loop_content_max: float = 0.5
+    broader_loop_length_max: int | None = None
+    broader_packing_density_min: float | None = None
+    broader_exclusive: bool = True
+    seed: int = 42
+
+    def __post_init__(self) -> None:
+        probabilities = (self.strict_probability, self.broader_probability)
+        if any(not 0.0 <= value <= 1.0 for value in probabilities):
+            raise ValueError("data.mixture probabilities must lie in [0, 1]")
+        if abs(sum(probabilities) - 1.0) > 1e-9:
+            raise ValueError("data.mixture probabilities must sum to one")
+        if self.strict_probability == 0.0 or self.broader_probability == 0.0:
+            raise ValueError("data.mixture must contain both strata")
+        if not 0.0 <= self.broader_mean_plddt_min <= 100.0:
+            raise ValueError("data.mixture.broader_mean_plddt_min must lie in [0, 100]")
+        if not 0.0 <= self.broader_loop_content_max <= 1.0:
+            raise ValueError("data.mixture.broader_loop_content_max must lie in [0, 1]")
+        if self.broader_loop_length_max is not None and self.broader_loop_length_max < 0:
+            raise ValueError("data.mixture.broader_loop_length_max must be non-negative")
+        if (
+            self.broader_packing_density_min is not None
+            and not 0.0 <= self.broader_packing_density_min <= 1.0
+        ):
+            raise ValueError("data.mixture.broader_packing_density_min must lie in [0, 1]")
+        if not self.broader_exclusive:
+            raise ValueError("data.mixture.broader_exclusive must be true")
+
+
+@dataclass(frozen=True)
 class DataConfig:
     """Existing Ragged Atom14 shards and DataLoader settings."""
 
@@ -147,6 +183,7 @@ class DataConfig:
     # explicit calibration, use the compact single-segment capacity and reject
     # discontinuous overflows eagerly instead of recompiling the model.
     patch_capacities: tuple[int, ...] | None = None
+    mixture: DataMixtureConfig | None = None
 
     def __post_init__(self) -> None:
         if self.min_length <= 0 or self.max_length < self.min_length:
@@ -429,6 +466,21 @@ def load_config(file: str | Path) -> RunConfig:
                 normalized[key] = tuple(normalized[key])
         return _strict_construct(cls, normalized)
 
+    data_values = raw.get("data", {})
+    if not isinstance(data_values, Mapping):
+        raise ValueError("configuration section 'data' must be a mapping")
+    data_values = dict(data_values)
+    mixture_values = data_values.pop("mixture", None)
+    for key in ("length_buckets", "patch_capacities"):
+        if key in data_values and isinstance(data_values[key], list):
+            data_values[key] = tuple(data_values[key])
+    if mixture_values is not None:
+        if not isinstance(mixture_values, Mapping):
+            raise ValueError("configuration section 'data.mixture' must be a mapping")
+        mixture = _strict_construct(DataMixtureConfig, mixture_values)
+    else:
+        mixture = None
+
     train_values = raw.get("train", {})
     if not isinstance(train_values, Mapping):
         raise ValueError("configuration section 'train' must be a mapping")
@@ -449,7 +501,7 @@ def load_config(file: str | Path) -> RunConfig:
     )
     config = RunConfig(
         model=section("model", ModelConfig),
-        data=section("data", DataConfig),
+        data=_strict_construct(DataConfig, {**data_values, "mixture": mixture}),
         diffusion=section("diffusion", DiffusionConfig),
         loss=section("loss", LossConfig),
         train=train,
