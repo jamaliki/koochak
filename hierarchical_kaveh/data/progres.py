@@ -28,11 +28,16 @@ def sha256_file(file: Path) -> str:
     return digest.hexdigest()
 
 
-def _read_json(file: Path, description: str) -> dict[str, Any]:
+def _read_json_value(file: Path, description: str) -> Any:
     try:
         value = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise ValueError(f"{description} is unavailable or invalid: {file}") from error
+    return value
+
+
+def _read_json(file: Path, description: str) -> dict[str, Any]:
+    value = _read_json_value(file, description)
     if not isinstance(value, dict):
         raise ValueError(f"{description} must be a JSON object: {file}")
     return value
@@ -89,10 +94,10 @@ class ProgresSidecarReader:
         self.metadata_path = Path(metadata_path).resolve() if metadata_path is not None else _resolve_source(self.index_path, metadata["path"])
         if not self.metadata_path.is_file() or sha256_file(self.metadata_path) != metadata["sha256"]:
             raise ValueError("sidecar metadata path or checksum does not match the aggregate index")
-        self.metadata = _read_json(self.metadata_path, "sidecar metadata")
-        entries = self.metadata.get("shards") if isinstance(self.metadata, dict) else None
-        if not isinstance(entries, list):
-            entries = self.metadata.get("entries") if isinstance(self.metadata, dict) else None
+        self.metadata = _read_json_value(self.metadata_path, "sidecar metadata")
+        entries = self.metadata.get("shards") if isinstance(self.metadata, dict) else self.metadata
+        if not isinstance(entries, list) and isinstance(self.metadata, dict):
+            entries = self.metadata.get("entries")
         if not isinstance(entries, list):
             raise ValueError("sidecar metadata has no shard entries")
         sidecars = self.index.get("sidecars")
