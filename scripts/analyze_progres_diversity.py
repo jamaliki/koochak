@@ -53,7 +53,7 @@ def _embed(files: list[Path], model: ProgresModel) -> tuple[torch.Tensor, np.nda
 
 
 def _cath_hits(files: list[Path], embeddings: torch.Tensor, database_file: Path) -> list[dict[str, object]]:
-    database = torch.load(database_file, map_location="cpu", weights_only=True)
+    database = torch.load(database_file, map_location="cpu", weights_only=False)
     scores = (1.0 + embeddings @ database["embeddings"].float().T) / 2.0
     best_scores, best_indices = scores.max(dim=1)
     return [{

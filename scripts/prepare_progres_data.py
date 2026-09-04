@@ -44,7 +44,7 @@ def main() -> None:
     for name, (url, digest) in FILES.items():
         _download(args.data_dir / name, url, digest)
     model = torch.load(args.data_dir / "trained_model.pt", map_location="cpu", weights_only=True)
-    cath = torch.load(args.data_dir / "cath40.pt", map_location="cpu", weights_only=True)
+    cath = torch.load(args.data_dir / "cath40.pt", map_location="cpu", weights_only=False)
     if "model" not in model or not {"ids", "embeddings", "nres", "notes"} <= cath.keys():
         raise RuntimeError("Progres artifacts have unexpected schemas")
     result = {
