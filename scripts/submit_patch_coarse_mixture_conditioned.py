@@ -263,7 +263,10 @@ def validate_online(code_commit: str) -> dict[str, object]:
         raise RuntimeError(f"pinned Progres weights are missing: {PROGRES_DATA / 'trained_model.pt'}")
     if any(not config.is_file() for config in PARENT_CELLS.values()):
         raise RuntimeError("one or more immutable parent configs are missing")
-    reader = ProgresSidecarReader(SIDECAR_INDEX, metadata_path=METADATA, eager=True)
+    # The aggregate job already validated every sidecar.  Revalidate the
+    # immutable index and all per-shard publications on the login node; the
+    # first CPU condition-bank task performs the full row/embedding scan.
+    reader = ProgresSidecarReader(SIDECAR_INDEX, metadata_path=METADATA, eager=False)
     if reader.index["progres"]["weights"]["sha256"] != "3fa3de9af77527da3efb8f2ee33ad05e678303d4e9cbe1f25a3916a106e56be3":
         raise RuntimeError("Progres weight checksum is not the pinned v1.1.0 checksum")
     if sha256_file(PROGRES_DATA / "trained_model.pt") != reader.index["progres"]["weights"]["sha256"]:
