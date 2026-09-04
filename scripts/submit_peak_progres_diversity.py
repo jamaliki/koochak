@@ -41,7 +41,7 @@ from scripts.submit_peak_structural_diversity import PANELS, SCALE_ROOT
 
 PROFILE = REPO_ROOT / "environments" / "tokyo-progres-cpu.yaml"
 DATA_DIR = REMOTE_RUN_ROOT.parent / "progres-data" / "v1.1.0"
-ANALYSIS_PYTHON = "/mnt/lustre/users/kiarash-eitgbi/micromamba/envs/kaveh/bin/python"
+ANALYSIS_RUNNER = "{cwd}/scripts/run_with_kaveh_python.py"
 RESOURCES = {"nodes": 1, "gpus_per_node": 0, "cpus_per_node": 8, "memory_gb_per_node": 32, "time_limit_seconds": 14_400}
 
 
@@ -59,7 +59,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
         stage="analysis", task="prepare-data", workflow=workflow, artifact=data_artifact,
         run_dir=output_root / "prepare-data.managed", profile=profile,
         command=[
-            ANALYSIS_PYTHON, "{cwd}/scripts/prepare_progres_data.py",
+            ANALYSIS_RUNNER, "{cwd}/scripts/prepare_progres_data.py",
             "--data-dir", str(DATA_DIR), "--output", str(data_manifest),
         ],
     )
@@ -78,7 +78,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
             stage="analysis", task=task_id, workflow=workflow, artifact=artifact,
             run_dir=output.parent.with_name(output.parent.name + ".managed"), profile=profile,
             command=[
-                ANALYSIS_PYTHON, "{cwd}/scripts/analyze_progres_diversity.py",
+                ANALYSIS_RUNNER, "{cwd}/scripts/analyze_progres_diversity.py",
                 "--sample-dir", str(SCALE_ROOT / "samples" / panel / "scale2p50" / "L0128"),
                 "--esmfold-dir", str(SCALE_ROOT / "esmfold" / panel / "scale2p50" / "L0128"),
                 "--data-dir", str(DATA_DIR), "--expected-count", "32", "--output", str(output),

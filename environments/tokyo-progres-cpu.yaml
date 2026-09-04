@@ -21,6 +21,7 @@ requirements:
     - "{cwd}/scripts/analyze_progres_diversity.py"
     - "{cwd}/scripts/diversity_common.py"
     - "{cwd}/scripts/progres_inference.py"
+    - "{cwd}/scripts/run_with_kaveh_python.py"
     - "{cwd}/scripts/robust_factorial_stage.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
   packages:
