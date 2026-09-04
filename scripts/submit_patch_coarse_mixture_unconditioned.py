@@ -436,6 +436,8 @@ def _status_flag(*mappings: Mapping[str, object], keys: tuple[str, ...]) -> bool
 
 
 def _parse_timestamp(value: object) -> datetime | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
     if not isinstance(value, str) or not value.strip():
         return None
     try:
@@ -516,7 +518,7 @@ def _validate_scruffy_snapshot(
         end_value = _status_value(
             allocation,
             snapshot,
-            keys=("expires_at", "end_time", "deadline", "allocation_end"),
+            keys=("expires_at", "end_time", "deadline_at", "deadline", "allocation_end"),
         )
         end_at = _parse_timestamp(end_value)
         remaining_value = None if end_at is None else (end_at - now).total_seconds()

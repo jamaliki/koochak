@@ -106,6 +106,26 @@ def test_scruffy_snapshot_attestation_uses_top_level_flags_and_inventory() -> No
     assert attestation["available_gpus"] == 4.0
 
 
+def test_scruffy_snapshot_attestation_accepts_live_deadline_schema() -> None:
+    snapshot = _healthy_snapshot(remaining_seconds=None)
+    snapshot["allocation"].pop("remaining_seconds")
+    snapshot["allocation"]["deadline_at"] = (NOW + timedelta(seconds=launcher.MIN_REMAINING_SECONDS + 60)).isoformat()
+
+    attestation = launcher._validate_scruffy_snapshot(snapshot, now=NOW)
+
+    assert attestation["remaining_seconds"] == launcher.MIN_REMAINING_SECONDS + 60.0
+
+
+def test_scruffy_snapshot_attestation_accepts_epoch_deadline_schema() -> None:
+    snapshot = _healthy_snapshot(remaining_seconds=None)
+    snapshot["allocation"].pop("remaining_seconds")
+    snapshot["allocation"]["deadline"] = int((NOW + timedelta(seconds=launcher.MIN_REMAINING_SECONDS + 60)).timestamp())
+
+    attestation = launcher._validate_scruffy_snapshot(snapshot, now=NOW)
+
+    assert attestation["remaining_seconds"] == launcher.MIN_REMAINING_SECONDS + 60.0
+
+
 @pytest.mark.parametrize(
     "overrides",
     (
