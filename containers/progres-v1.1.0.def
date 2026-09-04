@@ -1,0 +1,25 @@
+Bootstrap: docker
+From: debian:12
+
+%post
+    set -eu
+    apt-get -y update
+    apt-get -y install --no-install-recommends ca-certificates git wget
+    wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-py311_24.1.2-0-Linux-x86_64.sh
+    bash Miniconda3-py311_24.1.2-0-Linux-x86_64.sh -bfp /pub/conda
+    rm Miniconda3-py311_24.1.2-0-Linux-x86_64.sh
+    /pub/conda/bin/conda create --yes -n progres_env python=3.9
+    /pub/conda/bin/conda install --yes -n progres_env pytorch=1.11 -c pytorch
+    /pub/conda/bin/conda install --yes -n progres_env pytorch-scatter pyg -c pyg
+    /pub/conda/bin/conda run -n progres_env pip install progres==1.1.0
+    /pub/conda/bin/conda clean --yes --all
+    apt-get -y remove git wget
+    apt-get -y autoremove
+    apt-get -y clean
+    rm -rf /var/lib/apt/lists/*
+
+%environment
+    export PATH=/pub/conda/envs/progres_env/bin:/pub/conda/bin:/usr/local/bin:/usr/bin:/bin
+
+%test
+    /pub/conda/envs/progres_env/bin/python -c 'import progres, torch; assert torch.__version__.startswith("1.11.")'
