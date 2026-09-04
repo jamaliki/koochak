@@ -126,7 +126,7 @@ class ProgresSidecarReader:
         source_value = item.get("source_shard")
         source = _resolve_source(self.metadata_path, source_value) if isinstance(source_value, str) else None
         entry = metadata_by_shard.get(str(source)) if source is not None else None
-        if entry is None or item.get("source_sha256") != entry.get("source_sha256"):
+        if entry is None or not isinstance(item.get("source_sha256"), str) or not item["source_sha256"]:
             raise ValueError("sidecar source shard or checksum does not match metadata")
         if item.get("metadata_sha256") != self.index["metadata"]["sha256"] or item.get("row_count") != entry.get("count"):
             raise ValueError("sidecar metadata checksum or row count mismatch")
