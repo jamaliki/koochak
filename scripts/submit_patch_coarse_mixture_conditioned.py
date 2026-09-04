@@ -80,12 +80,14 @@ def _load_profile(source: Path):
 
 
 def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
-    del cell, run_dir, workflow
+    del cell, workflow
     return [
         ConfigPatch("train.progres_condition_dropout", 0.5),
         ConfigPatch("model.progres_conditioning", True),
         ConfigPatch("model.progres_embedding_dim", 128),
         ConfigPatch("data.progres_sidecar_index_path", str(SIDECAR_INDEX)),
+        ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
+        ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
     ]
 
 
