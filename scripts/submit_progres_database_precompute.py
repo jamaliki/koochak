@@ -39,17 +39,8 @@ PROFILE = REPO_ROOT / "environments" / "tokyo-progres-database-cpu.yaml"
 METADATA = Path("/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/metadata_ca4_patch4.json")
 DATABASE_ROOT = METADATA.parent
 WEIGHTS_DIR = Path("/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0")
-REPLACEMENT_WORKFLOW = "hk-progres-database-precompute-6d2241c"
-REPLACEMENT_REQUEST_PREFIX = (
-    "hierarchical-kaveh-patch-coarse-factorial/"
-    "hk-progres-database-precompute-6d2241c/v1/retry-prepare-weight-source"
-)
-REPLACEMENT_OUTPUT_ROOT = (
-    REMOTE_RUN_ROOT / "progres-database-precompute" / "6d2241c627588096f3be0c69cf18821c06bede70"
-)
-REPLACEMENT_SIDECAR_ROOT = (
-    DATABASE_ROOT / "progres_sidecars" / "progres-v1.1.0-128d-6d2241c"
-)
+WEIGHTS_MD5 = "c490293eb8d0bb350e68a8229c6884da"
+WEIGHTS_SHA256 = "3fa3de9af77527da3efb8f2ee33ad05e678303d4e9cbe1f25a3916a106e56be3"
 PARTITIONS = 64
 RECOVERY = {"max_attempts": 3, "retry_on": ["allocation_replaced", "allocation_incarnation_changed", "evacuated"], "evacuation": {"signal": "USR1", "grace_seconds": 600}}
 RESOURCES = {
@@ -103,61 +94,6 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     return PreparedWorkflow(request_id=f"{PROJECT_ID}/{workflow}/v1", workflow_id=workflow, project_id=PROJECT_ID, tasks=tuple(tasks))
 
 
-def build_prepare_replacement(code_commit: str) -> PreparedWorkflow:
-    """Build only the failed prepare task for the already accepted workflow.
-
-    The output and artifact identities deliberately remain those of the original
-    workflow so its existing benchmark and partition tasks can consume the
-    replacement's published partition plan. The run directory is new and the
-    code checkout is pinned to the corrected commit.
-    """
-
-    short = code_commit[:7]
-    profile = load_environment_profile(PROFILE)
-    plan = REPLACEMENT_OUTPUT_ROOT / "partition_plan.json"
-    output = _output(
-        "progres-db/partition-plan",
-        plan,
-        workflow=REPLACEMENT_WORKFLOW,
-        task="prepare",
-    )
-    common = [
-        "{cwd}/scripts/run_with_kaveh_python.py",
-        "{cwd}/scripts/precompute_progres_database.py",
-        "--metadata",
-        str(METADATA),
-        "--weights-dir",
-        str(WEIGHTS_DIR),
-        "--plan",
-        str(plan),
-        "--sidecar-root",
-        str(REPLACEMENT_SIDECAR_ROOT),
-    ]
-    run = _stage(
-        workflow=REPLACEMENT_WORKFLOW,
-        task="prepare",
-        run_dir=REPLACEMENT_OUTPUT_ROOT / f"prepare-replacement-{short}.managed",
-        output=output,
-        profile=profile,
-        command=[
-            *common,
-            "--mode",
-            "prepare",
-            "--partitions",
-            str(PARTITIONS),
-            "--output",
-            str(plan),
-        ],
-    )
-    request_id = f"{REPLACEMENT_REQUEST_PREFIX}-{short}"
-    return PreparedWorkflow(
-        request_id=request_id,
-        workflow_id=REPLACEMENT_WORKFLOW,
-        project_id=PROJECT_ID,
-        tasks=(PreparedTask("prepare", run, RESOURCES["prepare"], recovery=RECOVERY),),
-    )
-
-
 def validate_online(code_commit: str) -> None:
     if _git("status", "--porcelain"):
         raise RuntimeError("remote submission checkout is not clean")
@@ -168,23 +104,21 @@ def validate_online(code_commit: str) -> None:
         raise RuntimeError(f"requires Koochak {KOOCHAK_COMMIT}")
     if not METADATA.name.endswith(".json"):
         raise RuntimeError("metadata path is not configured")
+    output_root = REMOTE_RUN_ROOT / "progres-database-precompute" / code_commit
+    sidecar_root = DATABASE_ROOT / "progres_sidecars" / f"progres-v1.1.0-128d-{code_commit[:7]}"
+    if output_root.exists() or sidecar_root.exists():
+        raise RuntimeError(
+            "clean workflow requires absent commit-derived output and sidecar roots: "
+            f"{output_root}, {sidecar_root}"
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--prepare-replacement",
-        action="store_true",
-        help="submit only the corrected prepare task for the accepted 6d2241c workflow",
-    )
     args = parser.parse_args()
     code_commit = _git("rev-parse", "HEAD")
-    workflow = (
-        build_prepare_replacement(code_commit)
-        if args.prepare_replacement
-        else build_workflow(code_commit)
-    )
+    workflow = build_workflow(code_commit)
     description = {
         "workflow_id": workflow.workflow_id,
         "request_id": workflow.request_id,
@@ -193,9 +127,7 @@ def main() -> None:
         "partition_count": PARTITIONS,
         "metadata": str(METADATA),
         "sidecar_root": str(
-            REPLACEMENT_SIDECAR_ROOT
-            if args.prepare_replacement
-            else DATABASE_ROOT / "progres_sidecars" / f"progres-v1.1.0-128d-{code_commit[:7]}"
+            DATABASE_ROOT / "progres_sidecars" / f"progres-v1.1.0-128d-{code_commit[:7]}"
         ),
     }
     if args.dry_run:

@@ -21,6 +21,7 @@ from scripts.progres_inference import EMBEDDING_SIZE, embed_coordinates, load_mo
 
 MODEL_VERSION = "1.1.0"
 WEIGHT_MD5 = "c490293eb8d0bb350e68a8229c6884da"
+WEIGHT_SHA256 = "3fa3de9af77527da3efb8f2ee33ad05e678303d4e9cbe1f25a3916a106e56be3"
 WEIGHT_NAME = "trained_model.pt"
 SIDECAR_SCHEMA = "atom14-progres-sidecar-v1"
 PLAN_SCHEMA = "atom14-progres-partition-plan-v1"
@@ -134,6 +135,8 @@ def partition_entries(entries: list[dict[str, Any]], partitions: int) -> list[li
 def model_identity(weights: Path) -> dict[str, Any]:
     if md5_file(weights) != WEIGHT_MD5:
         raise ValueError(f"unexpected Progres weights MD5: {weights}")
+    if sha256_file(weights) != WEIGHT_SHA256:
+        raise ValueError(f"unexpected Progres weights SHA256: {weights}")
     model = load_model(weights)
     probe = embed_coordinates(model, torch.randn(8, 3, generator=torch.Generator().manual_seed(17)))
     if tuple(probe.shape) != (EMBEDDING_SIZE,) or not torch.isfinite(probe).all():
