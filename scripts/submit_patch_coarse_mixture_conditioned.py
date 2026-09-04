@@ -82,6 +82,12 @@ def _load_profile(source: Path):
 def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
     variant = next(item for item in VARIANTS if item[0] == cell.architecture)
     patches = list(parent_patches(variant=variant, length=LENGTH, run_dir=run_dir, workflow=workflow))
+    # The parent predates this optional default and omits false from its YAML;
+    # do not materialize a semantically identical field just to create a diff.
+    patches = [
+        patch for patch in patches
+        if not (patch.path == "loss.smooth_lddt_checkpoint" and patch.value is False)
+    ]
     patches.extend([
         ConfigPatch("train.self_conditioning_probability", 0.5),
         ConfigPatch("train.progres_condition_dropout", 0.5),
