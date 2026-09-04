@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -19,6 +21,12 @@ from scripts.diversity_common import (
 from scripts.progres_inference import ProgresModel, embed_structure, load_model
 
 SAME_FOLD_THRESHOLD = 0.8
+THREE_TO_ONE = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
 
 
 def _summary(files: list[Path], scores: np.ndarray, indices: list[int]) -> dict[str, object]:
@@ -43,6 +51,64 @@ def _summary(files: list[Path], scores: np.ndarray, indices: list[int]) -> dict[
         "largest_cluster_fraction": len(groups[0]) / len(indices) if groups else None,
         "cluster_sizes": [len(group) for group in groups],
         "clusters": [[files[indices[index]].stem for index in group] for group in groups],
+        "cluster_linkage": "connected components of the Progres >=0.8 same-fold graph",
+    }
+
+
+def _read_sequence(file: Path) -> str:
+    residues: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    chain_id = None
+    for line in file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("ENDMDL"):
+            break
+        if not line.startswith("ATOM  "):
+            continue
+        if chain_id is None:
+            chain_id = line[21]
+        elif line[21] != chain_id:
+            break
+        identity = (line[21], line[22:26], line[26])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        residues.append(THREE_TO_ONE.get(line[17:20].strip(), "X"))
+    return "".join(residues)
+
+
+def _sequence_summary(files: list[Path]) -> dict[str, object]:
+    sequences = [_read_sequence(file) for file in files]
+    counts = Counter(sequences)
+    lengths = {len(sequence) for sequence in sequences}
+    positional_entropy = None
+    positional_identity = None
+    if len(lengths) == 1 and sequences:
+        entropies = []
+        identities = []
+        for column in zip(*sequences, strict=True):
+            frequencies = Counter(column)
+            probabilities = [count / len(column) for count in frequencies.values()]
+            entropies.append(-sum(probability * math.log2(probability) for probability in probabilities))
+            identities.append(max(probabilities))
+        positional_entropy = statistics.fmean(entropies)
+        positional_identity = statistics.fmean(identities)
+    pairwise_identities = []
+    for left in range(len(sequences)):
+        for right in range(left + 1, len(sequences)):
+            shared = min(len(sequences[left]), len(sequences[right]))
+            denominator = max(len(sequences[left]), len(sequences[right]))
+            pairwise_identities.append(
+                sum(a == b for a, b in zip(sequences[left][:shared], sequences[right][:shared])) / denominator
+            )
+    return {
+        "sample_count": len(sequences),
+        "unique_sequence_count": len(counts),
+        "largest_identical_sequence_count": max(counts.values(), default=0),
+        "largest_identical_sequence_fraction": max(counts.values(), default=0) / len(sequences) if sequences else None,
+        "mean_positional_entropy_bits": positional_entropy,
+        "mean_modal_residue_fraction": positional_identity,
+        "pairwise_sequence_identity_mean": statistics.fmean(pairwise_identities) if pairwise_identities else None,
+        "pairwise_sequence_identity_median": statistics.median(pairwise_identities) if pairwise_identities else None,
     }
 
 
@@ -104,6 +170,7 @@ def main() -> None:
         "designability_definition": "CA RMSD < 2 A and mean ESMFold pLDDT > 80",
         "designable_count": len(designable_stems),
         "designable_samples": sorted(designable_stems),
+        "generated_sequence_diversity": _sequence_summary(generated),
         "generated": generated_result,
         "esmfold": esmfold_result,
         "esmfold_cath40_nearest_hits": _cath_hits(

@@ -149,6 +149,17 @@ def load_model(weights_file: Path) -> ProgresModel:
 
 def embed_structure(model: ProgresModel, file: Path) -> torch.Tensor:
     coordinates = read_ca_coordinates(file)
+    return embed_coordinates(model, coordinates)
+
+
+def embed_coordinates(model: ProgresModel, coordinates: torch.Tensor) -> torch.Tensor:
+    """Embed one ordered C-alpha trace with the verified Progres model."""
+
+    coordinates = torch.as_tensor(coordinates, dtype=torch.float32, device="cpu")
+    if coordinates.ndim != 2 or coordinates.shape[1] != 3 or len(coordinates) < 4:
+        raise ValueError("coordinates must have shape [n_residues, 3] with at least four residues")
+    if not bool(torch.isfinite(coordinates).all()):
+        raise ValueError("coordinates must be finite")
     features, adjacency = featurize(coordinates)
     with torch.no_grad():
         return model(features, coordinates, adjacency)

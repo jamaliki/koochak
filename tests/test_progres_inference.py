@@ -1,6 +1,6 @@
 import torch
 
-from scripts.progres_inference import ProgresModel, featurize
+from scripts.progres_inference import ProgresModel, embed_coordinates, featurize
 
 
 def test_progres_features_and_embedding_are_rigid_motion_invariant() -> None:
@@ -24,3 +24,15 @@ def test_progres_features_and_embedding_are_rigid_motion_invariant() -> None:
     assert embedding.shape == (128,)
     assert torch.linalg.vector_norm(embedding) == torch.tensor(1.0)
     assert torch.allclose(embedding, transformed_embedding, atol=1e-5)
+    assert torch.allclose(embed_coordinates(model, coordinates), embedding)
+
+
+def test_embed_coordinates_rejects_invalid_traces() -> None:
+    model = ProgresModel().eval()
+    for coordinates in (torch.zeros(3, 3), torch.zeros(4, 2), torch.full((4, 3), float("nan"))):
+        try:
+            embed_coordinates(model, coordinates)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid coordinates were accepted")
