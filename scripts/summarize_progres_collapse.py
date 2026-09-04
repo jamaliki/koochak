@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -21,6 +22,26 @@ LOG_METRICS = (
     "aatype_active_fraction",
     "step_time_s",
 )
+
+
+def _validate_ready(file: Path) -> dict[str, object]:
+    manifest_file = file.with_name(file.name + ".ready.json")
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    content = file.read_bytes()
+    observed_sha256 = hashlib.sha256(content).hexdigest()
+    if Path(manifest["path"]) != file:
+        raise ValueError(f"ready manifest path mismatch for {file}")
+    if manifest["kind"] != "file" or manifest["counts"] != {"expected": 1, "observed": 1}:
+        raise ValueError(f"ready manifest contract mismatch for {file}")
+    if manifest["size_bytes"] != len(content) or manifest["sha256"] != observed_sha256:
+        raise ValueError(f"ready manifest digest mismatch for {file}")
+    return {
+        "manifest": str(manifest_file),
+        "sha256": observed_sha256,
+        "size_bytes": len(content),
+        "producer_workflow": manifest["provenance"]["workflow_id"],
+        "producer_task": manifest["provenance"]["task_id"],
+    }
 
 
 def _mean_log_windows(log_file: Path, checkpoints: list[int], width: int) -> dict[int, dict[str, float]]:
@@ -110,6 +131,8 @@ def main() -> None:
     files = sorted(args.analysis_root.glob("step*/*/progres_diversity.json"))
     if len(files) != args.expected_count:
         raise ValueError(f"expected {args.expected_count} panel results, found {len(files)}")
+    ready_evidence = {str(file): _validate_ready(file) for file in files}
+    training_data_ready = _validate_ready(args.training_data_progres)
     rows = [_panel_row(file) for file in files]
     grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in rows:
@@ -137,6 +160,10 @@ def main() -> None:
         "panels": sorted(rows, key=lambda row: (str(row["cell"]), int(row["step"]))),
         "correlations": correlations,
         "training_data": json.loads(args.training_data_progres.read_text(encoding="utf-8")),
+        "input_ready_evidence": {
+            "panels": ready_evidence,
+            "training_data": training_data_ready,
+        },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
