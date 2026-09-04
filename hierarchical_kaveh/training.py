@@ -58,6 +58,7 @@ _BATCH_TELEMETRY = (
 def denoiser_input(
     batch: Mapping[str, Any],
     previous: Prediction | None = None,
+    progres_conditioning_mask: Tensor | None = None,
 ) -> DenoiserInput:
     """Translate one standard-EDM batch into the immutable model contract."""
 
@@ -70,6 +71,8 @@ def denoiser_input(
         atom_mask=batch["model_atom_mask"].to(torch.bool),
         aatype_input=batch["aatype_input"],
         secondary_structure_input=batch.get("secondary_structure_input"),
+        progres_embedding=batch.get("progres_embedding"),
+        progres_conditioning_mask=progres_conditioning_mask,
         patch_capacity=batch.get("patch_capacity"),
     )
     return inputs.with_self_conditioning(previous)
@@ -91,11 +94,15 @@ class PallatomTrainingStep:
         model_config: ModelConfig,
         *,
         self_conditioning_probability: float = 1.0,
+        progres_condition_dropout: float = 0.5,
         seed: int = 0,
     ) -> None:
         self.loss_config = loss_config
         self.model_config = model_config
         self.self_conditioning_probability = float(self_conditioning_probability)
+        if not 0.0 <= progres_condition_dropout <= 1.0:
+            raise ValueError("Progres condition dropout must lie in [0, 1]")
+        self.progres_condition_dropout = float(progres_condition_dropout)
         self.seed = int(seed)
 
     def _use_self_conditioning(self, step: int) -> bool:
@@ -104,22 +111,36 @@ class PallatomTrainingStep:
         generator = torch.Generator().manual_seed(self.seed + int(step))
         return bool(torch.rand((), generator=generator) < self.self_conditioning_probability)
 
+    def _progres_conditioning_mask(self, batch: Mapping[str, Any], step: int) -> Tensor | None:
+        embedding = batch.get("progres_embedding")
+        if embedding is None:
+            if self.model_config.progres_conditioning:
+                raise ValueError("conditional model batch has no Progres embedding")
+            return None
+        if embedding.ndim != 2 or embedding.shape[1] != self.model_config.progres_embedding_dim:
+            raise ValueError("batch Progres embedding has an unexpected shape")
+        generator = torch.Generator(device="cpu").manual_seed(self.seed + 0x51ED + int(step))
+        keep = torch.rand(embedding.shape[0], generator=generator) >= self.progres_condition_dropout
+        return keep.to(device=embedding.device)
+
     def __call__(
         self,
         model: nn.Module,
         batch: Mapping[str, Any],
         context: Mapping[str, Any],
     ) -> dict[str, Tensor]:
-        inputs = denoiser_input(batch)
+        step = int(context.get("step", 0))
+        progres_mask = self._progres_conditioning_mask(batch, step)
+        inputs = denoiser_input(batch, progres_conditioning_mask=progres_mask)
         autocast = context["autocast"]
-        use_self_conditioning = self._use_self_conditioning(int(context.get("step", 0)))
+        use_self_conditioning = self._use_self_conditioning(step)
         previous = None
         if use_self_conditioning:
             with torch.no_grad(), autocast():
                 previous = _self_conditioning_model(model)(
                     inputs, compute_distogram=False
                 )
-        inputs = denoiser_input(batch, previous)
+        inputs = denoiser_input(batch, previous, progres_mask)
 
         with autocast():
             model_kwargs = {"compute_distogram": self.loss_config.distogram_weight > 0.0}
@@ -198,7 +219,6 @@ def _resume_checkpoint(resume: str | Path | None, out_dir: str) -> dict[str, Any
         raise FileNotFoundError(f"no checkpoint found in {out_dir}")
     return checkpoint_lib.load(checkpoint_file)
 
-
 @contextmanager
 def _performance_policy(config: RunConfig):
     """Make configured performance fallbacks explicit and process-local."""
@@ -265,6 +285,7 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
         config.loss,
         config.model,
         self_conditioning_probability=config.train.self_conditioning_probability,
+        progres_condition_dropout=config.train.progres_condition_dropout,
         seed=config.train.seed,
     )
     hooks = _hooks(config)

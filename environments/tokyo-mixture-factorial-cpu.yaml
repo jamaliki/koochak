@@ -21,6 +21,12 @@ requirements:
   files:
     - "{cwd}/pyproject.toml"
     - "{cwd}/scripts/analyze_progres_diversity.py"
+    - "{cwd}/scripts/analyze_progres_conditioned_milestone.py"
+    - "{cwd}/scripts/prepare_progres_condition_bank.py"
+    - "{cwd}/scripts/aggregate_progres_conditioned.py"
+    - "{cwd}/hierarchical_kaveh/data/progres.py"
+    - "{cwd}/hierarchical_kaveh/data/shards.py"
+    - "{cwd}/hierarchical_kaveh/residue_constants.py"
     - "{cwd}/scripts/progres_inference.py"
     - "{cwd}/scripts/diversity_common.py"
     - "{cwd}/scripts/robust_factorial_stage.py"

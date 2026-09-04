@@ -1,0 +1,31 @@
+import scripts.submit_patch_coarse_mixture_conditioned as launcher
+from datetime import datetime, timedelta, timezone
+
+
+def test_conditioned_factorial_dag_counts_and_cells():
+    assert len(launcher.CELLS) == 4
+    assert len(set(cell.cell_id for cell in launcher.CELLS)) == 4
+    assert sum((1, 4, 40, 40, 40, 10)) == 135
+    assert launcher.CONDITION_PATHS == {
+        "model.progres_conditioning", "model.progres_embedding_dim",
+        "data.progres_sidecar_index_path", "train.progres_condition_dropout",
+    }
+
+
+def test_conditioned_diff_allowlist_has_no_unexpected_class():
+    assert "unexpected" not in launcher.MIXTURE_PATHS | launcher.CONDITION_PATHS | launcher.OUTPUT_PATHS
+
+
+def test_scruffy_attestation_uses_live_allocation_schema():
+    now = datetime.now(timezone.utc)
+    snapshot = {
+        "allocation": {
+            "state": "running", "id": "414238", "controller_release": launcher.SCRUFFY_COMMIT,
+            "heartbeat_at": now.isoformat(), "deadline_at": (now + timedelta(days=4)).isoformat(),
+            "incarnation": {"inventory": [{"gpu_ids": list(range(8))} for _ in range(4)]},
+        },
+        "draining": False, "launches_paused": False, "jobs": {},
+    }
+    result = launcher.validate_scruffy(snapshot)
+    assert result["allocation_id"] == "414238"
+    assert result["available_gpus"] == 32.0

@@ -190,6 +190,17 @@ class HierarchicalKaveh(nn.Module):
 
         self.time_embedding = TimeEmbedding(14, c.condition_dim)
         self.time_ffn = FeedForward(c.condition_dim, None, 2, 0.0)
+        if c.progres_conditioning:
+            self.progres_null = nn.Parameter(torch.zeros(c.progres_embedding_dim))
+            self.progres_condition_projection = nn.Sequential(
+                nn.LayerNorm(c.progres_embedding_dim),
+                nn.Linear(c.progres_embedding_dim, c.condition_dim),
+                nn.SiLU(),
+                init_linear(nn.Linear(c.condition_dim, c.condition_dim, bias=False), "zero"),
+            )
+        else:
+            self.register_parameter("progres_null", None)
+            self.progres_condition_projection = None
         self.residue_input = ResidueInput(
             c.node_dim,
             secondary_structure_conditioning=c.secondary_structure_conditioning,
@@ -277,12 +288,44 @@ class HierarchicalKaveh(nn.Module):
                 raise ValueError("a batch must contain at least one valid residue")
         return atom_mask & residue_mask[..., None], residue_mask
 
-    def _conditions(self, sigma: Tensor, residue_mask: Tensor) -> tuple[Tensor, Tensor]:
+    def _conditions(
+        self,
+        sigma: Tensor,
+        residue_mask: Tensor,
+        inputs: DenoiserInput,
+    ) -> tuple[Tensor, Tensor, Tensor]:
         sigma = sigma.clamp_min(1.0e-12)
         c_noise = (sigma / self.config.sigma_data).log() / 4.0
-        condition = self.time_ffn(self.time_embedding(c_noise))
-        condition = condition * residue_mask[..., None].to(condition.dtype)
-        return sigma, condition
+        time_condition = self.time_ffn(self.time_embedding(c_noise))
+        progres_condition = time_condition.new_zeros(
+            time_condition.shape[0], self.config.condition_dim
+        )
+        if self.config.progres_conditioning:
+            if self.progres_null is None or self.progres_condition_projection is None:
+                raise RuntimeError("Progres conditioning modules are not initialized")
+            embedding = inputs.progres_embedding
+            if embedding is None:
+                embedding = self.progres_null[None].expand(time_condition.shape[0], -1)
+                condition_mask = torch.zeros(
+                    time_condition.shape[0], dtype=torch.bool, device=time_condition.device
+                )
+            else:
+                if embedding.ndim != 2 or embedding.shape != (
+                    time_condition.shape[0], self.config.progres_embedding_dim
+                ):
+                    raise ValueError("progres_embedding must have [B, embedding_dim] shape")
+                condition_mask = inputs.progres_conditioning_mask
+                if condition_mask is None:
+                    condition_mask = torch.ones(
+                        time_condition.shape[0], dtype=torch.bool, device=embedding.device
+                    )
+                elif condition_mask.shape != (time_condition.shape[0],):
+                    raise ValueError("progres_conditioning_mask must have [B] shape")
+                null = self.progres_null.to(device=embedding.device, dtype=embedding.dtype)
+                embedding = torch.where(condition_mask[:, None], embedding, null[None])
+            progres_condition = self.progres_condition_projection(embedding)
+        condition = (time_condition + progres_condition[:, None, :]) * residue_mask[..., None].to(time_condition.dtype)
+        return sigma, condition, progres_condition
 
     def _residue_stage(
         self,
@@ -313,7 +356,7 @@ class HierarchicalKaveh(nn.Module):
         atom_mask, residue_mask = self._validate(inputs)
         raw_coordinates = inputs.coordinates
         sigma = _broadcast_sigma(inputs.sigma, raw_coordinates)
-        sigma, residue_condition = self._conditions(sigma, residue_mask)
+        sigma, residue_condition, progres_condition = self._conditions(sigma, residue_mask, inputs)
 
         mask_float = residue_mask.to(sigma.dtype)
         sigma_sq = (mask_float[..., None] * sigma.square()).sum((1, 2), keepdim=True)
@@ -363,7 +406,9 @@ class HierarchicalKaveh(nn.Module):
         )
         batch_size, residue_count = residue_mask.shape
         registers = self.registers[None].expand(batch_size, -1, -1)
-        register_condition = residue_condition.new_zeros(batch_size, REGISTER_COUNT, self.config.condition_dim)
+        register_condition = progres_condition[:, None, :].expand(
+            batch_size, REGISTER_COUNT, self.config.condition_dim
+        )
         token_condition = torch.cat((register_condition, residue_condition), 1)
         token_mask = torch.cat(
             (torch.ones(batch_size, REGISTER_COUNT, dtype=torch.bool, device=residue_mask.device), residue_mask), 1

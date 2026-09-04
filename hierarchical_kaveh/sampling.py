@@ -244,6 +244,8 @@ def sample(
     generator: torch.Generator | None = None,
     use_intermediate_feedback: bool | None = None,
     secondary_structure_input: Tensor | None = None,
+    progres_embedding: Tensor | None = None,
+    progres_conditioning_mask: Tensor | None = None,
     coordinate_self_conditioning_mode: str = "aligned",
 ) -> SampleBatch:
     """Run a stochastic Euler sampler on one coherent EDM time grid.
@@ -266,6 +268,14 @@ def sample(
     topology = build_topology(
         chain_lengths, batch_size, device, secondary_structure=secondary_structure_input
     )
+    if progres_embedding is not None:
+        if progres_embedding.shape != (batch_size, 128):
+            raise ValueError("progres_embedding must have [batch_size, 128] shape")
+        progres_embedding = progres_embedding.to(device=device, dtype=torch.float32)
+    if progres_conditioning_mask is not None:
+        if progres_conditioning_mask.shape != (batch_size,):
+            raise ValueError("progres_conditioning_mask must have [batch_size] shape")
+        progres_conditioning_mask = progres_conditioning_mask.to(device=device, dtype=torch.bool)
     sigma_data = float(getattr(_model_config(model), "sigma_data", ModelConfig().sigma_data))
     time_grid = _sample_time_grid(
         config.num_steps,
@@ -371,6 +381,8 @@ def sample(
                     device=device,
                 ),
                 secondary_structure_input=topology.secondary_structure_input,
+                progres_embedding=progres_embedding,
+                progres_conditioning_mask=progres_conditioning_mask,
                 self_conditioned_secondary_structure=(
                     None
                     if last_prediction is None

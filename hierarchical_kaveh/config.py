@@ -56,6 +56,8 @@ class ModelConfig:
     secondary_structure_prediction: bool = False
     secondary_structure_self_conditioning: bool = False
     secondary_structure_self_conditioning_alpha: float = 0.5
+    progres_conditioning: bool = False
+    progres_embedding_dim: int = 128
 
     def __post_init__(self) -> None:
         positive = (
@@ -73,6 +75,7 @@ class ModelConfig:
             "atom_ffn_expansion",
             "pair_rbf_bins",
             "distogram_bins",
+            "progres_embedding_dim",
         )
         if any(int(getattr(self, name)) <= 0 for name in positive):
             raise ValueError("model widths, coarse depth, and expansion factors must be positive")
@@ -184,6 +187,7 @@ class DataConfig:
     # discontinuous overflows eagerly instead of recompiling the model.
     patch_capacities: tuple[int, ...] | None = None
     mixture: DataMixtureConfig | None = None
+    progres_sidecar_index_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.min_length <= 0 or self.max_length < self.min_length:
@@ -202,6 +206,8 @@ class DataConfig:
             raise ValueError("data.loop_content_max must lie in [0, 1]")
         if self.packing_density_min is not None and not 0.0 <= self.packing_density_min <= 1.0:
             raise ValueError("data.packing_density_min must lie in [0, 1]")
+        if self.progres_sidecar_index_path is not None and not self.progres_sidecar_index_path:
+            raise ValueError("data.progres_sidecar_index_path must be a non-empty path or null")
         if any(a >= b for a, b in zip(self.length_buckets, self.length_buckets[1:])):
             raise ValueError("length_buckets must be strictly increasing")
         if self.patch_capacities is not None:
@@ -348,6 +354,7 @@ class TrainingConfig:
     profile_step_fn_timing: bool = False
     profile_step_fn_cuda_sync: bool = True
     self_conditioning_probability: float = 1.0
+    progres_condition_dropout: float = 0.5
     compile: CompileConfig = field(default_factory=CompileConfig)
     require_compile: bool = False
     require_fused: bool = False
@@ -356,6 +363,8 @@ class TrainingConfig:
     def __post_init__(self) -> None:
         if not 0.0 <= self.self_conditioning_probability <= 1.0:
             raise ValueError("train.self_conditioning_probability must lie in [0, 1]")
+        if not 0.0 <= self.progres_condition_dropout <= 1.0:
+            raise ValueError("train.progres_condition_dropout must lie in [0, 1]")
         if self.evacuation_signal != "USR1":
             raise ValueError("train.evacuation_signal must equal 'USR1'")
 
@@ -512,6 +521,10 @@ def load_config(file: str | Path) -> RunConfig:
     )
     if config.data.metadata_path == "":
         raise ValueError("data.metadata_path is required")
+    if config.model.progres_conditioning and config.data.progres_sidecar_index_path is None:
+        raise ValueError(
+            "model.progres_conditioning requires data.progres_sidecar_index_path"
+        )
     if config.train.require_compile and not config.train.compile.enabled:
         raise ValueError("train.require_compile requires train.compile.enabled")
     if config.train.require_fused and config.train.device != "cuda":

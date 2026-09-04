@@ -19,6 +19,7 @@ from hierarchical_kaveh.diffusion.schedules import sample_training_sigma
 from hierarchical_kaveh.model.patch import bucket_patch_capacity
 
 from .shards import SampleReference, ShardCache, index_shards, load_sample
+from .progres import ProgresSidecarReader
 
 
 SECONDARY_STRUCTURE_UNKNOWN = 3
@@ -279,6 +280,11 @@ def collate_samples(
             f"{required_capacity}; calibrate data.patch_capacities"
         )
     batch["patch_capacity"] = patch_capacity
+    if "progres_embedding" in samples[0]:
+        embeddings = [sample["progres_embedding"] for sample in samples]
+        if any(value.shape != embeddings[0].shape for value in embeddings):
+            raise ValueError("Progres embeddings must have a common shape")
+        batch["progres_embedding"] = torch.stack(embeddings)
     return batch
 
 
@@ -337,6 +343,15 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
             for edge in self.length_buckets
         )
         self.patch_capacities = dict(zip(self.length_buckets, capacities, strict=True))
+        self.progres_sidecar = (
+            None
+            if data.progres_sidecar_index_path is None
+            else ProgresSidecarReader(
+                data.progres_sidecar_index_path,
+                metadata_path=data.metadata_path,
+                eager=False,
+            )
+        )
         mark_sharded(self)
 
     def set_global_step(self, step: int) -> None:
@@ -416,6 +431,9 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
         while True:
             source = schedule.pop() if self.mixture_references else "single"
             reference = pools[source].pop() if self.mixture_references else pool.pop()
+            progres_embedding = (
+                None if self.progres_sidecar is None else self.progres_sidecar.embedding(reference)
+            )
             clean = _crop(
                 load_sample(
                     reference,
@@ -443,6 +461,10 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                 generator=generator,
                 translation_std=self.diffusion.translation_std,
             )
+            if progres_embedding is not None:
+                if len(clean["aatype"]) != reference.length:
+                    raise ValueError("Progres conditioning does not support cropped structures")
+                sample["progres_embedding"] = progres_embedding
             edge = next(edge for edge in self.length_buckets if len(sample["aatype"]) <= edge)
             buffer = buffers[edge]
             buffer.append(sample)

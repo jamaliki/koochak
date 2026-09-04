@@ -30,6 +30,7 @@ requirements:
     - "{cwd}/scripts/esmfold_plddt.py"
     - "{cwd}/scripts/robust_factorial_stage.py"
     - "{cwd}/scripts/run_esmfold_designability_shard.py"
+    - "{cwd}/scripts/run_progres_conditioned_esmfold.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
     - /mnt/lustre/users/kiarash-eitgbi/containers/esmfold-ngc25.01.sif
   packages:

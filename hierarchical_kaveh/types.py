@@ -24,6 +24,8 @@ class DenoiserInput:
     aatype_input: Tensor | None = None
     self_conditioned_coordinates: Tensor | None = None
     self_conditioning_mask: Tensor | None = None
+    progres_embedding: Tensor | None = None
+    progres_conditioning_mask: Tensor | None = None
     secondary_structure_input: Tensor | None = None
     self_conditioned_secondary_structure: Tensor | None = None
     patch_capacity: int | None = None
