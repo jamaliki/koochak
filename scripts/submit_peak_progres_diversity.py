@@ -51,11 +51,11 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     output_root = REMOTE_RUN_ROOT / "peak-progres-diversity-L128" / code_commit
     profile = load_environment_profile(PROFILE)
     container_artifact = _output(
-        "progres/container", CONTAINER, stage="setup", workflow=workflow,
+        "progres/container", CONTAINER, stage="analysis", workflow=workflow,
         task="build-container", kind="file", expected_records=1,
     )
     build = _stage_run(
-        stage="setup", task="build-container", workflow=workflow, artifact=container_artifact,
+        stage="analysis", task="build-container", workflow=workflow, artifact=container_artifact,
         run_dir=output_root / "build-container.managed", profile=profile,
         command=[
             "{cwd}/scripts/build_progres_container.py",
@@ -65,11 +65,11 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     )
     data_manifest = output_root / "progres-data-manifest.json"
     data_artifact = _output(
-        "progres/data-manifest", data_manifest, stage="setup", workflow=workflow,
+        "progres/data-manifest", data_manifest, stage="analysis", workflow=workflow,
         task="prepare-data", kind="file", expected_records=1,
     )
     prepare = _stage_run(
-        stage="setup", task="prepare-data", workflow=workflow, artifact=data_artifact,
+        stage="analysis", task="prepare-data", workflow=workflow, artifact=data_artifact,
         run_dir=output_root / "prepare-data.managed", profile=profile,
         command=[
             "/usr/bin/apptainer", "exec", "--cleanenv",
