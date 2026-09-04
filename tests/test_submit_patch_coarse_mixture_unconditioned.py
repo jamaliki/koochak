@@ -90,6 +90,22 @@ def test_scruffy_snapshot_attestation_reports_identity_and_capacity() -> None:
     }
 
 
+def test_scruffy_snapshot_attestation_uses_top_level_flags_and_inventory() -> None:
+    snapshot = _healthy_snapshot(
+        draining=None,
+        launches_paused=None,
+        resources=None,
+        incarnation={"inventory": [{"name": "gpu-1", "gpu_ids": [0, 1, 2, 3]}]},
+    )
+    snapshot["draining"] = False
+    snapshot["launches_paused"] = False
+    snapshot["jobs"] = {}
+
+    attestation = launcher._validate_scruffy_snapshot(snapshot, now=NOW)
+
+    assert attestation["available_gpus"] == 4.0
+
+
 @pytest.mark.parametrize(
     "overrides",
     (

@@ -409,6 +409,15 @@ def _status_value(*mappings: Mapping[str, object], keys: tuple[str, ...]) -> obj
     return None
 
 
+def _status_flag(*mappings: Mapping[str, object], keys: tuple[str, ...]) -> bool | None:
+    values = [mapping[key] for mapping in mappings for key in keys if key in mapping]
+    if any(value is True for value in values):
+        return True
+    if any(value is False for value in values):
+        return False
+    return None
+
+
 def _parse_timestamp(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -454,7 +463,7 @@ def _validate_scruffy_snapshot(
         "draining": ("draining",),
         "launches_paused": ("launches_paused", "launch_paused"),
     }.items():
-        value = _status_value(allocation, snapshot, keys=keys)
+        value = _status_flag(allocation, snapshot, keys=keys)
         if value is not False:
             raise RuntimeError(f"Scruffy allocation {name} is not explicitly false: {value!r}")
 
@@ -515,6 +524,25 @@ def _validate_scruffy_snapshot(
         *resource_maps,
         keys=("available_gpus", "gpus_available", "free_gpus", "gpus_free"),
     )
+    if available_gpus is None:
+        inventory = (allocation.get("incarnation") or {}).get("inventory")
+        jobs = snapshot.get("jobs")
+        if isinstance(inventory, list) and isinstance(jobs, Mapping):
+            inventory_slots = {
+                (item.get("name"), gpu_id)
+                for item in inventory
+                if isinstance(item, Mapping)
+                for gpu_id in item.get("gpu_ids", ())
+            }
+            reserved_slots = {
+                (reservation.get("node"), gpu_id)
+                for job in jobs.values()
+                if isinstance(job, Mapping) and job.get("state") == "running"
+                for reservation in (job.get("last_assignment") or {}).get("reservations", ())
+                if isinstance(reservation, Mapping)
+                for gpu_id in reservation.get("gpu_ids", ())
+            }
+            available_gpus = len(inventory_slots - reserved_slots)
     if not isinstance(available_gpus, (int, float)) or isinstance(available_gpus, bool) or not math.isfinite(float(available_gpus)):
         raise RuntimeError("Scruffy status has no usable available-GPU capacity")
     available_gpus = float(available_gpus)
