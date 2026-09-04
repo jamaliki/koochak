@@ -8,3 +8,8 @@ def test_peak_diversity_workflow_has_one_cpu_task_per_panel() -> None:
         f"diversity-{panel}" for panel in PANELS
     }
     assert all(task.resources["gpus_per_node"] == 0 for task in workflow.tasks)
+
+
+def test_peak_diversity_workflow_can_recover_one_panel_without_duplication() -> None:
+    workflow = build_workflow("a" * 40, panels=(PANELS[1],))
+    assert [task.task_id for task in workflow.tasks] == [f"diversity-{PANELS[1]}"]

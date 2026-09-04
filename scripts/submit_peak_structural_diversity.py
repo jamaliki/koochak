@@ -39,13 +39,13 @@ PANELS = (
 )
 
 
-def build_workflow(code_commit: str) -> PreparedWorkflow:
+def build_workflow(code_commit: str, *, panels: tuple[str, ...] = PANELS) -> PreparedWorkflow:
     short = code_commit[:7]
     workflow = f"hk-peak-structural-diversity-L128-{short}"
     output_root = REMOTE_RUN_ROOT / "peak-structural-diversity-L128" / code_commit
     profile = _load_profile(CPU_PROFILE)
     tasks = []
-    for panel in PANELS:
+    for panel in panels:
         task_id = f"diversity-{panel}"
         output = output_root / panel / "structural_homology.json"
         artifact = _output(
@@ -72,12 +72,16 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--panels", default=",".join(PANELS))
     args = parser.parse_args(argv)
+    panels = tuple(item.strip() for item in args.panels.split(",") if item.strip())
+    if not panels or not set(panels).issubset(PANELS):
+        raise ValueError(f"panels must be a non-empty subset of {PANELS}")
     code_commit = _git("rev-parse", "HEAD")
-    workflow = build_workflow(code_commit)
+    workflow = build_workflow(code_commit, panels=panels)
     description = {
         "workflow_id": workflow.workflow_id, "request_id": workflow.request_id,
-        "code_commit": code_commit, "panels": PANELS, "task_count": len(workflow.tasks),
+        "code_commit": code_commit, "panels": panels, "task_count": len(workflow.tasks),
     }
     if args.dry_run:
         print(json.dumps(description, indent=2, sort_keys=True))
@@ -89,7 +93,7 @@ def main(argv: list[str] | None = None) -> None:
     if _git("rev-parse", "HEAD", cwd=REPO_ROOT / "external" / "koochak") != KOOCHAK_COMMIT:
         raise RuntimeError(f"submission requires Koochak {KOOCHAK_COMMIT}")
     missing = [
-        str(directory) for panel in PANELS for directory in (
+        str(directory) for panel in panels for directory in (
             SCALE_ROOT / "samples" / panel / "scale2p50" / "L0128",
             SCALE_ROOT / "esmfold" / panel / "scale2p50" / "L0128",
         ) if not directory.is_dir()

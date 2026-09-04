@@ -58,9 +58,16 @@ def analyze(files: list[Path]) -> dict[str, object]:
     structures = [_load(file) for file in files]
     scores = np.eye(len(files), dtype=np.float64)
     pairwise = []
+    alignment_failures = []
     for left in range(len(files)):
         for right in range(left + 1, len(files)):
-            score = _pair_score(structures[left], structures[right])
+            try:
+                score = _pair_score(structures[left], structures[right])
+            except ValueError as error:
+                if "No anchors found" not in str(error):
+                    raise
+                score = 0.0
+                alignment_failures.append([files[left].stem, files[right].stem])
             scores[left, right] = scores[right, left] = score
             pairwise.append(score)
     thresholds = {}
@@ -78,6 +85,8 @@ def analyze(files: list[Path]) -> dict[str, object]:
     return {
         "sample_count": len(files),
         "pair_count": len(pairwise),
+        "no_anchor_pair_count": len(alignment_failures),
+        "no_anchor_pairs": alignment_failures,
         "tm_mean": statistics.fmean(pairwise),
         "tm_median": statistics.median(pairwise),
         "tm_min": min(pairwise),
