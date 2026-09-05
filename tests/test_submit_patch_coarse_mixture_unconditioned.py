@@ -25,6 +25,8 @@ def _healthy_snapshot(**allocation_overrides):
 
 
 def test_parent_configs_are_followup_immutable_top_two() -> None:
+    assert launcher.MIXTURE_SHARD_CACHE_SIZE is None
+    assert launcher.OPERATIONAL_DIFF_PATHS == set()
     assert launcher.PARENT_COMMIT == "97ce298cf0f5909ac0cbf50bdf94ab0481fbea8c"
     assert launcher.PARENT_WORKFLOW == "hk-patch-coarse-factorial-500k-L128-followup-97ce298"
     assert "patch-coarse-factorial-500k-followup" in str(launcher.PARENT_RUN_ROOT)
