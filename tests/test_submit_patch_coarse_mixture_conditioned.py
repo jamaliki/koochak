@@ -62,6 +62,34 @@ def test_diff_attestation_is_cpu_typed_and_targets_production_root():
     assert "prepare_run(" not in source
 
 
+def test_robust_stage_accepts_attestation_artifacts():
+    from scripts.robust_factorial_stage import _parser
+
+    parsed = _parser().parse_args(
+        [
+            "--stage",
+            "attestation",
+            "--artifact-id",
+            "resolved_config_diffs",
+            "--artifact-path",
+            "/tmp/resolved_config_diffs.json",
+            "--kind",
+            "file",
+            "--project",
+            "project",
+            "--workflow",
+            "workflow",
+            "--task",
+            "task",
+            "--code-commit",
+            "commit",
+            "--",
+            "true",
+        ]
+    )
+    assert parsed.stage == "attestation"
+
+
 def test_diff_attestation_writer_reuses_exact_immutable_cells():
     from scripts.write_patch_coarse_conditioned_diff_attestation import (
         CHILD_COMMIT,

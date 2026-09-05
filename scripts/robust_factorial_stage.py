@@ -14,7 +14,9 @@ from koochak.storage.artifact import DeclaredOutput, publish_artifact
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--stage", choices=("sample", "esmfold", "analysis", "canary"), required=True
+        "--stage",
+        choices=("sample", "esmfold", "analysis", "canary", "attestation"),
+        required=True,
     )
     parser.add_argument("--artifact-id", required=True)
     parser.add_argument("--artifact-path", type=Path, required=True)
