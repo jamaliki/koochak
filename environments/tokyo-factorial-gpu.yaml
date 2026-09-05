@@ -35,6 +35,7 @@ requirements:
     - "{cwd}/hierarchical_kaveh/training.py"
     - "{cwd}/hierarchical_kaveh/data/progres.py"
     - "{cwd}/hierarchical_kaveh/data/pipeline.py"
+    - "{cwd}/scripts/mixture_data_canary.py"
     - "{cwd}/hierarchical_kaveh/model/patch.py"
     - "{cwd}/hierarchical_kaveh/model/pair.py"
     - "{cwd}/hierarchical_kaveh/model/network.py"

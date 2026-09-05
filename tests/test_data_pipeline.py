@@ -215,12 +215,14 @@ def test_mixture_uses_exclusive_pool_and_exact_periodic_source_ratio(monkeypatch
 
 def test_mixture_worker_assignment_is_disjoint_with_imbalanced_shard_coverage(tmp_path) -> None:
     strict = tuple(
-        shard_module.SampleReference(tmp_path / "strict-only-shard.npz", index, 0, 1, 32)
-        for index in range(8)
+        shard_module.SampleReference(tmp_path / f"shared-{shard}.npz", index, 0, 1, 32)
+        for shard in range(4)
+        for index in range(2)
     )
     broader = tuple(
-        shard_module.SampleReference(tmp_path / "broader-only-shard.npz", index, 0, 1, 32)
-        for index in range(8)
+        shard_module.SampleReference(tmp_path / f"shared-{shard}.npz", index + 10, 0, 1, 32)
+        for shard in range(4)
+        for index in range(2)
     )
     sources = {"strict": strict, "broader_exclusive": broader}
 
@@ -238,6 +240,39 @@ def test_mixture_worker_assignment_is_disjoint_with_imbalanced_shard_coverage(tm
         observed = [reference for worker in workers for reference in worker[source]]
         assert len(observed) == len(set((reference.shard, reference.index) for reference in observed))
         assert set(observed) == set(sources[source])
+    shard_owners = {}
+    for worker_index, worker in enumerate(workers):
+        for references in worker.values():
+            for reference in references:
+                assert shard_owners.setdefault(reference.shard, worker_index) == worker_index
+    assert len(shard_owners) == 4
+
+
+def test_mixture_worker_assignment_allows_sparse_source_without_global_duplication(tmp_path) -> None:
+    strict = tuple(
+        shard_module.SampleReference(tmp_path / "strict.npz", index, 0, 1, 32)
+        for index in range(8)
+    )
+    broader = tuple(
+        shard_module.SampleReference(tmp_path / f"broader-{shard}.npz", 0, 0, 1, 32)
+        for shard in range(4)
+    )
+
+    workers = [
+        pipeline_module._assign_mixture_sources(
+            {"strict": strict, "broader_exclusive": broader},
+            worker_index=worker_index,
+            worker_count=4,
+        )
+        for worker_index in range(4)
+    ]
+
+    assert sum(len(worker["strict"]) for worker in workers) == len(strict)
+    assert sum(len(worker["broader_exclusive"]) for worker in workers) == len(broader)
+    assert len({reference.shard for worker in workers for references in worker.values() for reference in references}) == 5
+    for worker in workers:
+        for source in worker:
+            assert len(worker[source]) == len({(reference.shard, reference.index) for reference in worker[source]})
 
 
 def test_mixture_worker_assignment_does_not_fallback_when_a_pool_is_too_small(tmp_path) -> None:
@@ -256,9 +291,22 @@ def test_mixture_worker_assignment_does_not_fallback_when_a_pool_is_too_small(tm
         worker_count=4,
     )
 
-    assert assigned["strict"] == ()
-    assert assigned["broader_exclusive"]
-    assert not set(assigned["broader_exclusive"]) & set(strict)
+    assert assigned == {"strict": (), "broader_exclusive": ()}
+
+    workers = [
+        pipeline_module._assign_mixture_sources(
+            {"strict": strict, "broader_exclusive": broader},
+            worker_index=worker_index,
+            worker_count=4,
+        )
+        for worker_index in range(4)
+    ]
+    assert sum(len(worker["strict"]) for worker in workers) == len(strict)
+    assert sum(len(worker["broader_exclusive"]) for worker in workers) == len(broader)
+    assert not any(
+        set(worker["strict"]) & set(worker["broader_exclusive"])
+        for worker in workers
+    )
 
 
 @pytest.mark.parametrize(

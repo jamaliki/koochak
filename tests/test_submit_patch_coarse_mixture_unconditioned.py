@@ -49,6 +49,7 @@ def test_resolved_diff_distinguishes_missing_from_explicit_null(tmp_path) -> Non
         "train": {"out_dir": "/child"},
         "logging": {"csv_path": "/child.csv", "jsonl_path": "/child.jsonl"},
         "data": {
+            "shard_cache_size": launcher.MIXTURE_SHARD_CACHE_SIZE,
             "mixture": {
                 "strict_probability": 0.5,
                 "broader_probability": 0.5,
@@ -64,7 +65,11 @@ def test_resolved_diff_distinguishes_missing_from_explicit_null(tmp_path) -> Non
 
     diff = launcher._resolved_diff(parent, child, launcher.CELLS[0])
 
-    assert {item["path"] for item in diff["differences"]} == launcher.MIXTURE_PATHS | launcher.OUTPUT_DIFF_PATHS
+    assert {item["path"] for item in diff["differences"]} == (
+        launcher.MIXTURE_PATHS
+        | launcher.OPERATIONAL_DIFF_PATHS
+        | launcher.OUTPUT_DIFF_PATHS
+    )
     null_diffs = {
         item["path"]: item
         for item in diff["differences"]

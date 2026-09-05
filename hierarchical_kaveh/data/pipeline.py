@@ -162,31 +162,77 @@ def _assign_mixture_sources(
     worker_index: int,
     worker_count: int,
 ) -> dict[str, tuple[SampleReference, ...]]:
-    """Partition each source by reference without a global fallback.
+    """Partition the union of mixture strata by physical shard.
 
-    Mixture strata are intentionally assigned independently at reference
-    granularity.  Whole-shard ownership cannot guarantee that every worker
-    sees both strata when their shard coverage is imbalanced.  Round-robin
-    assignment is deterministic, disjoint within each source, and gives every
-    worker a source whenever that source has at least ``worker_count``
-    references.  The same physical shard can therefore be opened by more than
-    one worker, but no reference is duplicated and callers derive owned shards
-    from these actual assignments.
+    A shard is assigned to exactly one global worker, even when it contributes
+    references to both strata.  Greedy sample-count balancing is deterministic
+    and keeps the two source pools available to every worker whenever each
+    source spans at least ``worker_count`` physical shards.  Sparse strata may
+    leave some workers without that source; callers must not duplicate the
+    source globally to compensate.
     """
 
     if worker_count <= 0 or not 0 <= worker_index < worker_count:
         raise ValueError("invalid mixture worker partition")
-    assigned: dict[str, tuple[SampleReference, ...]] = {}
+    by_shard: dict[object, dict[str, list[SampleReference]]] = {}
     for source, references in source_references.items():
-        ordered = tuple(
-            sorted(references, key=lambda reference: (str(reference.shard), reference.index))
+        for reference in references:
+            by_shard.setdefault(reference.shard, {}).setdefault(source, []).append(reference)
+
+    assignments = [
+        {source: [] for source in source_references}
+        for _ in range(worker_count)
+    ]
+    loads = [0] * worker_count
+    required_workers = {
+        source: set(range(worker_count))
+        for source, references in source_references.items()
+        if len({reference.shard for reference in references}) >= worker_count
+    }
+    ordered_shards = sorted(
+        by_shard.items(),
+        key=lambda item: (
+            -sum(len(references) for references in item[1].values()),
+            str(item[0]),
+        ),
+    )
+    for _, source_groups in ordered_shards:
+        # Reserve owners for strata that have enough distinct physical shards
+        # to cover every worker.  A shared shard can satisfy both reservations
+        # without ever being assigned twice.
+        candidates = set(range(worker_count))
+        for source in source_groups:
+            if source in required_workers:
+                candidates &= required_workers[source]
+        if not candidates:
+            candidates = set(range(worker_count))
+            candidates_with_missing_source = {
+                candidate
+                for source in source_groups
+                if source in required_workers
+                for candidate in required_workers[source]
+            }
+            if candidates_with_missing_source:
+                candidates = candidates_with_missing_source
+        owner = min(
+            candidates,
+            key=lambda index: (
+                -sum(index in workers for workers in required_workers.values()),
+                loads[index],
+                index,
+            ),
         )
-        assigned[source] = tuple(
-            reference
-            for position, reference in enumerate(ordered)
-            if position % worker_count == worker_index
-        )
-    return assigned
+        for source, references in source_groups.items():
+            assignments[owner][source].extend(
+                sorted(references, key=lambda reference: reference.index)
+            )
+            loads[owner] += len(references)
+            required_workers.get(source, set()).discard(owner)
+
+    return {
+        source: tuple(assignments[worker_index][source])
+        for source in source_references
+    }
 
 
 def _crop(clean: dict[str, Any], max_length: int, generator: torch.Generator) -> dict[str, Any]:
@@ -370,10 +416,20 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                 worker_count=global_workers,
             )
             missing_sources = [source for source, references in source_assigned.items() if not references]
-            if missing_sources:
+            source_shard_counts = {
+                source: len({reference.shard for reference in references})
+                for source, references in self.mixture_references.items()
+            }
+            impossible_sources = [
+                source
+                for source in missing_sources
+                if source_shard_counts[source] >= global_workers
+            ]
+            if impossible_sources:
                 raise RuntimeError(
                     f"mixture worker {global_worker}/{global_workers} has no references for "
-                    f"{missing_sources}; each source needs at least {global_workers} references"
+                    f"{impossible_sources}; each source has enough physical shards and "
+                    "the deterministic ownership assignment is inconsistent"
                 )
             assigned = tuple(
                 reference
@@ -405,15 +461,28 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                 source: _CyclicPool(references, generator)
                 for source, references in source_assigned.items()
             }
-            schedule = _MixtureSchedule(
-                self.data.mixture.strict_probability,
-                # Exact continuation requires the true consumed-draw cursor,
-                # not global_step * batch_size; bucket buffers can consume
-                # extra references before yielding a batch.  That cursor is
-                # not checkpointed, so restarts use the canonical stream.
-                offset=0,
-                seed=self.data.mixture.seed,
+            available_sources = tuple(
+                source for source, references in source_assigned.items() if references
             )
+            if not available_sources:
+                raise RuntimeError(
+                    f"mixture worker {global_worker}/{global_workers} received no references"
+                )
+            schedule = (
+                _MixtureSchedule(
+                    self.data.mixture.strict_probability,
+                    # Exact continuation requires the true consumed-draw cursor,
+                    # not global_step * batch_size; bucket buffers can consume
+                    # extra references before yielding a batch.  That cursor is
+                    # not checkpointed, so restarts use the canonical stream.
+                    offset=0,
+                    seed=self.data.mixture.seed,
+                )
+                if len(available_sources) == len(source_assigned)
+                else _MixtureSchedule(1.0, offset=0, seed=self.data.mixture.seed)
+            )
+            if len(available_sources) == 1:
+                schedule.schedule = (available_sources[0],)
         else:
             pool = _CyclicPool(assigned, generator)
         buffers: dict[int, list[dict[str, Tensor]]] = {

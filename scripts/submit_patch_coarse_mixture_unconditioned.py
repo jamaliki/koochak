@@ -100,6 +100,8 @@ OUTPUT_DIFF_PATHS = {
     "logging.csv_path",
     "logging.jsonl_path",
 }
+OPERATIONAL_DIFF_PATHS = {"data.shard_cache_size"}
+MIXTURE_SHARD_CACHE_SIZE = 8
 PARENT_CELLS = {
     architecture: PARENT_RUN_ROOT / "train" / "L128" / f"{architecture}-strict-sc0p5" / "config.yaml"
     for architecture in ARCHITECTURES
@@ -155,6 +157,7 @@ def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
             ConfigPatch("data.mixture.broader_packing_density_min", None),
             ConfigPatch("data.mixture.broader_exclusive", True),
             ConfigPatch("data.mixture.seed", 42),
+            ConfigPatch("data.shard_cache_size", MIXTURE_SHARD_CACHE_SIZE),
         ]
     )
     return patches
@@ -209,16 +212,24 @@ def _resolved_diff(parent_config: Path, child: dict[str, object], cell: Cell) ->
             and parent_value == child_value
         ):
             continue
-        differences.append({
-            "path": key,
-            "parent": None if parent_value is _MISSING else parent_value,
-            "child": None if child_value is _MISSING else child_value,
-            "parent_present": parent_value is not _MISSING,
-            "child_present": child_value is not _MISSING,
-            "classification": "mixture" if key in MIXTURE_PATHS else "run_identity_or_output",
-        })
+        differences.append(
+            {
+                "path": key,
+                "parent": None if parent_value is _MISSING else parent_value,
+                "child": None if child_value is _MISSING else child_value,
+                "parent_present": parent_value is not _MISSING,
+                "child_present": child_value is not _MISSING,
+                "classification": (
+                    "mixture"
+                    if key in MIXTURE_PATHS
+                    else "operational_cache"
+                    if key in OPERATIONAL_DIFF_PATHS
+                    else "run_identity_or_output"
+                ),
+            }
+        )
     observed = {item["path"] for item in differences}
-    expected = MIXTURE_PATHS | OUTPUT_DIFF_PATHS
+    expected = MIXTURE_PATHS | OPERATIONAL_DIFF_PATHS | OUTPUT_DIFF_PATHS
     if observed != expected:
         raise AssertionError(
             f"unexpected resolved-config differences for {cell.cell_id}: "
@@ -244,6 +255,7 @@ def _resolved_diff(parent_config: Path, child: dict[str, object], cell: Cell) ->
         "parent_config_sha256": hashlib.sha256(parent_config.read_bytes()).hexdigest(),
         "differences": differences,
         "allowed_mixture_paths": sorted(MIXTURE_PATHS),
+        "allowed_operational_paths": sorted(OPERATIONAL_DIFF_PATHS),
         "allowed_output_paths": sorted(OUTPUT_DIFF_PATHS),
     }
 
@@ -401,6 +413,10 @@ def _describe(workflow: PreparedWorkflow, diffs: list[dict[str, object]], code_c
         "data_contract": {
             "strict": {"min_length": 32, "max_length": 128, "mean_plddt_min": 80.0, "loop_length_max": 15, "loop_content_max": 0.4, "packing_density_min": 0.3},
             "broader_exclusive": {"min_length": 32, "max_length": 128, "mean_plddt_min": 80.0, "loop_length_max": None, "loop_content_max": 0.5, "packing_density_min": None, "excludes_strict": True},
+        },
+        "operational_cache": {
+            "shard_cache_size_per_worker": MIXTURE_SHARD_CACHE_SIZE,
+            "reason": "full unique decoded mixture-shard preload is not assumed to fit the 240 GB cgroup",
         },
         "milestones": list(MILESTONES),
         "task_count": len(workflow.tasks),
