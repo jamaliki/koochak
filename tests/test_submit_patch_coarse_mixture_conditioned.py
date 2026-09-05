@@ -38,6 +38,11 @@ def test_scruffy_attestation_uses_live_allocation_schema():
     assert result["available_gpus"] == 32.0
 
 
+def test_scruffy_time_parser_accepts_epoch_deadline():
+    parsed = launcher._parse_time("1788973815")
+    assert parsed == datetime.fromtimestamp(1788973815, tz=timezone.utc)
+
+
 def test_conditioned_canary_uses_typed_artifact_stage():
     source = Path(launcher.REPO_ROOT / "scripts/submit_patch_coarse_conditioned_canary.py").read_text()
     assert "conditioned._output(" in source

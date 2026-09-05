@@ -196,6 +196,13 @@ def _status_value(*mappings: Mapping[str, object], keys: tuple[str, ...]) -> obj
 
 
 def _parse_time(value: object) -> datetime | None:
+    if isinstance(value, (int, float)) or (
+        isinstance(value, str) and value.strip().lstrip("+-").isdigit()
+    ):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     if not isinstance(value, str):
         return None
     try:
