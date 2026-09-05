@@ -107,6 +107,19 @@ def test_scruffy_snapshot_attestation_reports_identity_and_capacity() -> None:
     }
 
 
+def test_recovery_submission_requires_explicit_paused_state() -> None:
+    snapshot = _healthy_snapshot(launches_paused=True)
+    attestation = launcher._validate_scruffy_snapshot(
+        snapshot, now=NOW, allow_launches_paused=True
+    )
+    assert attestation["launches_paused"] is True
+
+    with pytest.raises(RuntimeError):
+        launcher._validate_scruffy_snapshot(
+            _healthy_snapshot(), now=NOW, allow_launches_paused=True
+        )
+
+
 def test_scruffy_snapshot_attestation_uses_top_level_flags_and_inventory() -> None:
     snapshot = _healthy_snapshot(
         draining=None,

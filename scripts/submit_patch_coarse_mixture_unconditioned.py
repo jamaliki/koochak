@@ -475,6 +475,7 @@ def _validate_scruffy_snapshot(
     *,
     now: datetime | None = None,
     expected_allocation_id: str | None = None,
+    allow_launches_paused: bool = False,
 ) -> dict[str, object]:
     """Attest the live allocation before allowing workflow submission."""
 
@@ -499,13 +500,20 @@ def _validate_scruffy_snapshot(
             f"got {allocation_id}"
         )
 
-    for name, keys in {
-        "draining": ("draining",),
-        "launches_paused": ("launches_paused", "launch_paused"),
-    }.items():
-        value = _status_flag(allocation, snapshot, keys=keys)
-        if value is not False:
-            raise RuntimeError(f"Scruffy allocation {name} is not explicitly false: {value!r}")
+    draining = _status_flag(allocation, snapshot, keys=("draining",))
+    if draining is not False:
+        raise RuntimeError(
+            f"Scruffy allocation draining is not explicitly false: {draining!r}"
+        )
+    launches_paused = _status_flag(
+        allocation, snapshot, keys=("launches_paused", "launch_paused")
+    )
+    expected_paused = True if allow_launches_paused else False
+    if launches_paused is not expected_paused:
+        raise RuntimeError(
+            "Scruffy allocation launches_paused does not match the requested "
+            f"submission mode: expected {expected_paused}, got {launches_paused!r}"
+        )
 
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     age_value = _status_value(
@@ -597,7 +605,7 @@ def _validate_scruffy_snapshot(
         "allocation_id": allocation_id,
         "state": "RUNNING",
         "draining": False,
-        "launches_paused": False,
+        "launches_paused": launches_paused,
         "heartbeat_age_seconds": heartbeat_age,
         "remaining_seconds": remaining_seconds,
         "available_gpus": available_gpus,
@@ -631,6 +639,11 @@ def _validate_online(code_commit: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--submit-while-paused",
+        action="store_true",
+        help="recovery only: require a healthy, deliberately launch-paused allocation",
+    )
     args = parser.parse_args(argv)
     code_commit = _git("rev-parse", "HEAD")
     if not args.dry_run:
@@ -652,6 +665,7 @@ def main(argv: list[str] | None = None) -> None:
     attestation = _validate_scruffy_snapshot(
         snapshot,
         expected_allocation_id=os.environ.get("SCRUFFY_ALLOCATION_ID"),
+        allow_launches_paused=args.submit_while_paused,
     )
     if attestation["controller_release"] != SCRUFFY_COMMIT:
         raise RuntimeError(

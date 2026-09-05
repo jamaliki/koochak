@@ -225,14 +225,23 @@ def _parse_time(value: object) -> datetime | None:
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
 
 
-def validate_scruffy(snapshot: Mapping[str, object], *, required_gpus: int = REQUIRED_TRAINER_GPUS) -> dict[str, object]:
+def validate_scruffy(
+    snapshot: Mapping[str, object],
+    *,
+    required_gpus: int = REQUIRED_TRAINER_GPUS,
+    allow_launches_paused: bool = False,
+) -> dict[str, object]:
     allocation = snapshot.get("allocation")
     if not isinstance(allocation, Mapping) or str(allocation.get("state", "")).lower() != "running":
         raise RuntimeError("Scruffy allocation is not RUNNING")
     draining = _status_value(allocation, snapshot, keys=("draining",))
     launches_paused = _status_value(allocation, snapshot, keys=("launches_paused", "launch_paused"))
-    if draining is not False or launches_paused is not False:
-        raise RuntimeError("Scruffy allocation is draining or launch-paused")
+    expected_paused = True if allow_launches_paused else False
+    if draining is not False or launches_paused is not expected_paused:
+        raise RuntimeError(
+            "Scruffy allocation is draining or its paused state does not match "
+            "the requested submission mode"
+        )
     age = _status_value(allocation, snapshot, keys=("heartbeat_age_seconds", "last_heartbeat_age_seconds"))
     if age is None:
         heartbeat = _parse_time(_status_value(allocation, snapshot, keys=("heartbeat_at", "last_heartbeat_at", "heartbeat")))
@@ -294,6 +303,11 @@ def validate_online(code_commit: str) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--submit-while-paused",
+        action="store_true",
+        help="recovery only: require a healthy, deliberately launch-paused allocation",
+    )
     args = parser.parse_args(argv)
     code_commit = _git("rev-parse", "HEAD")
     if not args.dry_run:
@@ -310,7 +324,9 @@ def main(argv: list[str] | None = None) -> None:
     snapshot = status(SCRUFFY_ROOT)
     if not isinstance(snapshot, Mapping):
         raise RuntimeError("Scruffy status response is not a mapping")
-    attestation = validate_scruffy(snapshot)
+    attestation = validate_scruffy(
+        snapshot, allow_launches_paused=args.submit_while_paused
+    )
     if attestation["controller_release"] != SCRUFFY_COMMIT:
         raise RuntimeError(f"Scruffy release mismatch: expected {SCRUFFY_COMMIT}, got {attestation['controller_release']}")
     result = submit_scruffy_workflow(workflow, root=SCRUFFY_ROOT)

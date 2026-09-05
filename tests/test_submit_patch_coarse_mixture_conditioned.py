@@ -50,6 +50,21 @@ def test_scruffy_attestation_uses_live_allocation_schema():
     assert result["available_gpus"] == 32.0
 
 
+def test_recovery_submission_requires_explicit_paused_state():
+    now = datetime.now(timezone.utc)
+    snapshot = {
+        "allocation": {
+            "state": "running", "id": "414238", "controller_release": launcher.SCRUFFY_COMMIT,
+            "heartbeat_at": now.isoformat(), "deadline_at": (now + timedelta(days=4)).isoformat(),
+            "incarnation": {"inventory": [{"gpu_ids": list(range(8))} for _ in range(4)]},
+        },
+        "draining": False, "launches_paused": True, "jobs": {},
+    }
+    assert launcher.validate_scruffy(
+        snapshot, allow_launches_paused=True
+    )["available_gpus"] == 32.0
+
+
 def test_scruffy_time_parser_accepts_epoch_deadline():
     parsed = launcher._parse_time("1788973815")
     assert parsed == datetime.fromtimestamp(1788973815, tz=timezone.utc)
