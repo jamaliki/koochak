@@ -24,13 +24,13 @@ from koochak.jobs import ConfigPatch, PreparedTask, PreparedWorkflow, load_envir
 from hierarchical_kaveh.data.progres import ProgresSidecarReader, sha256_file  # noqa: E402
 from scripts.submit_patch_coarse_factorial import (  # noqa: E402
     KOOCHAK_COMMIT, METADATA, MILESTONES, RECOVERY, REMOTE_CODE_ROOT,
-    REMOTE_RUN_ROOT, RESOURCES, TRAIN_RESOURCES, _assert_config,
+    REMOTE_RUN_ROOT, RESOURCES, TRAIN_CHECKPOINT_INTERVAL, TRAIN_RESOURCES, _assert_config,
     _disabled_wandb, _git, _output, _stage_run, _tag,
 )
 
 
 PROJECT_ID = "hierarchical-kaveh-patch-coarse-factorial"
-SCRUFFY_COMMIT = "d9d89c45a232602aca2b7af790fde31a755b90a1"
+SCRUFFY_COMMIT = "8573c1c94986e017d6c8ad872930bdbd0abafc0f"
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-d60afabf-py310-cpython310-linux-x86_64/site")
 SIDECAR_INDEX = Path("/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/progres_sidecars/progres-v1.1.0-128d-49830e1/index.json")
@@ -53,7 +53,7 @@ CONDITION_PATHS = {
     "data.progres_sidecar_index_path", "train.progres_condition_dropout",
 }
 OUTPUT_PATHS = {"train.out_dir", "logging.csv_path", "logging.jsonl_path"}
-OPERATIONAL_PATHS = {"data.shard_cache_size"}
+OPERATIONAL_PATHS = {"data.shard_cache_size", "train.ckpt_every"}
 PARENT_MIXTURE_SHARD_CACHE_SIZE = 8
 MIXTURE_SHARD_CACHE_SIZE = None
 REQUIRED_TRAINER_GPUS = len(ARCHITECTURES)
@@ -90,6 +90,7 @@ def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
         ConfigPatch("model.progres_embedding_dim", 128),
         ConfigPatch("data.progres_sidecar_index_path", str(SIDECAR_INDEX)),
         ConfigPatch("data.shard_cache_size", MIXTURE_SHARD_CACHE_SIZE),
+        ConfigPatch("train.ckpt_every", TRAIN_CHECKPOINT_INTERVAL),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
     ]
@@ -300,7 +301,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         sidecar = {"sidecar": "not checked in dry-run"}
     workflow, diffs = build_workflow(code_commit)
-    description = {"workflow_id": workflow.workflow_id, "request_id": workflow.request_id, "code_commit": code_commit, "task_count": len(workflow.tasks), "task_counts": {"condition_bank": 1, "trainers": 4, "sampling": 40, "esmfold": 40, "analysis": 40, "aggregate": 10}, "cells": [cell.cell_id for cell in CELLS], "sidecar": sidecar, "config_diffs": diffs}
+    description = {"workflow_id": workflow.workflow_id, "request_id": workflow.request_id, "code_commit": code_commit, "checkpoint_interval_steps": TRAIN_CHECKPOINT_INTERVAL, "milestones": list(MILESTONES), "task_count": len(workflow.tasks), "task_counts": {"condition_bank": 1, "trainers": 4, "sampling": 40, "esmfold": 40, "analysis": 40, "aggregate": 10}, "cells": [cell.cell_id for cell in CELLS], "sidecar": sidecar, "config_diffs": diffs}
     if args.dry_run:
         print(json.dumps(description, indent=2, sort_keys=True, default=str))
         return

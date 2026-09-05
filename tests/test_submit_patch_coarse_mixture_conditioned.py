@@ -17,12 +17,22 @@ def test_conditioned_diff_allowlist_has_no_unexpected_class():
     assert launcher.MIXTURE_PATHS == set()
     assert launcher.PARENT_MIXTURE_SHARD_CACHE_SIZE == 8
     assert launcher.MIXTURE_SHARD_CACHE_SIZE is None
-    assert launcher.OPERATIONAL_PATHS == {"data.shard_cache_size"}
+    assert launcher.OPERATIONAL_PATHS == {"data.shard_cache_size", "train.ckpt_every"}
     assert launcher.PARENT_COMMIT == "a6c3b7d427f62231af0a17d41f96bf1fa925e671"
     assert launcher.PARENT_WORKFLOW == "hk-patch-coarse-mixture-unconditioned-L128-a6c3b7d"
     assert launcher.CONDITION_PATHS | launcher.OUTPUT_PATHS
     assert all(isinstance(key, tuple) and len(key) == 2 for key in launcher.PARENT_CELLS)
     assert "unexpected" not in launcher.CONDITION_PATHS | launcher.OUTPUT_PATHS
+
+
+def test_checkpoint_and_evaluation_cadences_are_independent():
+    assert launcher.TRAIN_CHECKPOINT_INTERVAL == 10_000
+    assert launcher.MILESTONES == tuple(range(50_000, 500_001, 50_000))
+    patches = launcher._patches(
+        launcher.CELLS[0], Path("/tmp/run"), "workflow"
+    )
+    values = {patch.path: patch.value for patch in patches}
+    assert values["train.ckpt_every"] == 10_000
 
 
 def test_scruffy_attestation_uses_live_allocation_schema():

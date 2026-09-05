@@ -47,6 +47,7 @@ GPU_PROFILE = REPO_ROOT / "environments/tokyo-factorial-gpu.yaml"
 CPU_PROFILE = REPO_ROOT / "environments/tokyo-factorial-cpu.yaml"
 ESMFOLD_PROFILE = REPO_ROOT / "environments/tokyo-factorial-esmfold.yaml"
 MILESTONES = tuple(range(50_000, 500_001, 50_000))
+TRAIN_CHECKPOINT_INTERVAL = 10_000
 SAMPLES_PER_LENGTH = 32
 SAMPLE_SEED = 20260901
 VARIANTS = (
@@ -153,7 +154,7 @@ def _patches(
         ConfigPatch("train.grad_accum", TRAIN_GRAD_ACCUM),
         ConfigPatch("train.ddp", False),
         ConfigPatch("train.max_steps", max_steps),
-        ConfigPatch("train.ckpt_every", 50_000),
+        ConfigPatch("train.ckpt_every", TRAIN_CHECKPOINT_INTERVAL),
         ConfigPatch("train.keep_last_k", settings["keep_last_k"]),
         ConfigPatch("train.grad_clip_norm", 1.0),
         ConfigPatch("train.amp", "bf16"),

@@ -26,7 +26,7 @@ def _healthy_snapshot(**allocation_overrides):
 
 def test_parent_configs_are_followup_immutable_top_two() -> None:
     assert launcher.MIXTURE_SHARD_CACHE_SIZE is None
-    assert launcher.OPERATIONAL_DIFF_PATHS == set()
+    assert launcher.OPERATIONAL_DIFF_PATHS == {"train.ckpt_every"}
     assert launcher.PARENT_COMMIT == "97ce298cf0f5909ac0cbf50bdf94ab0481fbea8c"
     assert launcher.PARENT_WORKFLOW == "hk-patch-coarse-factorial-500k-L128-followup-97ce298"
     assert "patch-coarse-factorial-500k-followup" in str(launcher.PARENT_RUN_ROOT)
@@ -41,14 +41,14 @@ def test_resolved_diff_distinguishes_missing_from_explicit_null(tmp_path) -> Non
     OmegaConf.save(
         OmegaConf.create(
             {
-                "train": {"out_dir": "/parent"},
+                "train": {"out_dir": "/parent", "ckpt_every": 50_000},
                 "logging": {"csv_path": "/parent.csv", "jsonl_path": "/parent.jsonl"},
             }
         ),
         parent,
     )
     child = {
-        "train": {"out_dir": "/child"},
+        "train": {"out_dir": "/child", "ckpt_every": launcher.TRAIN_CHECKPOINT_INTERVAL},
         "logging": {"csv_path": "/child.csv", "jsonl_path": "/child.jsonl"},
         "data": {
             "shard_cache_size": launcher.MIXTURE_SHARD_CACHE_SIZE,
@@ -78,6 +78,16 @@ def test_resolved_diff_distinguishes_missing_from_explicit_null(tmp_path) -> Non
         if item["path"] in {"data.mixture.broader_loop_length_max", "data.mixture.broader_packing_density_min"}
     }
     assert all(item["parent_present"] is False and item["child_present"] is True for item in null_diffs.values())
+
+
+def test_checkpoint_and_evaluation_cadences_are_independent() -> None:
+    assert launcher.TRAIN_CHECKPOINT_INTERVAL == 10_000
+    assert launcher.MILESTONES == tuple(range(50_000, 500_001, 50_000))
+    patches = launcher._patches(
+        launcher.CELLS[0], launcher.Path("/tmp/run"), "workflow"
+    )
+    values = {patch.path: patch.value for patch in patches}
+    assert values["train.ckpt_every"] == 10_000
 
 
 def test_scruffy_snapshot_attestation_reports_identity_and_capacity() -> None:

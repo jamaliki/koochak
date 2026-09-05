@@ -46,6 +46,7 @@ from scripts.submit_patch_coarse_factorial import (  # noqa: E402
     SAMPLE_SEED,
     SAMPLES_PER_LENGTH,
     TRAIN_RESOURCES,
+    TRAIN_CHECKPOINT_INTERVAL,
     VARIANTS,
     _assert_config,
     _disabled_wandb,
@@ -58,7 +59,7 @@ from scripts.submit_patch_coarse_factorial import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-patch-coarse-factorial"
-SCRUFFY_COMMIT = "d9d89c45a232602aca2b7af790fde31a755b90a1"
+SCRUFFY_COMMIT = "8573c1c94986e017d6c8ad872930bdbd0abafc0f"
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path(
     "/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/"
@@ -100,7 +101,7 @@ OUTPUT_DIFF_PATHS = {
     "logging.csv_path",
     "logging.jsonl_path",
 }
-OPERATIONAL_DIFF_PATHS: set[str] = set()
+OPERATIONAL_DIFF_PATHS = {"train.ckpt_every"}
 MIXTURE_SHARD_CACHE_SIZE = None
 PARENT_CELLS = {
     architecture: PARENT_RUN_ROOT / "train" / "L128" / f"{architecture}-strict-sc0p5" / "config.yaml"
@@ -422,6 +423,7 @@ def _describe(workflow: PreparedWorkflow, diffs: list[dict[str, object]], code_c
             ),
         },
         "milestones": list(MILESTONES),
+        "checkpoint_interval_steps": TRAIN_CHECKPOINT_INTERVAL,
         "task_count": len(workflow.tasks),
         "task_counts": {
             "trainers": len(CELLS), "sampling": len(CELLS) * len(MILESTONES),
