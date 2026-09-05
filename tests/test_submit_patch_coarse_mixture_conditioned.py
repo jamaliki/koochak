@@ -49,3 +49,26 @@ def test_conditioned_canary_uses_typed_artifact_stage():
     assert "conditioned._stage_run(" in source
     assert "prepare_run(" not in source
     assert "DeclaredOutput(" not in source
+
+
+def test_diff_attestation_is_cpu_typed_and_targets_production_root():
+    source = Path(
+        launcher.REPO_ROOT / "scripts/submit_patch_coarse_conditioned_diff_attestation.py"
+    ).read_text()
+    assert "conditioned._output(" in source
+    assert "conditioned._stage_run(" in source
+    assert '"gpus_per_node": 0' in source
+    assert "resolved_config_diffs.json" in source
+    assert "prepare_run(" not in source
+
+
+def test_diff_attestation_writer_reuses_exact_immutable_cells():
+    from scripts.write_patch_coarse_conditioned_diff_attestation import (
+        CHILD_COMMIT,
+        PARENT_COMMIT,
+        _child_config,
+    )
+
+    assert PARENT_COMMIT == launcher.PARENT_COMMIT
+    assert CHILD_COMMIT == "96f0e3f970da4bd7a9fb1a74b76eff55f9a440b1"
+    assert all(_child_config(cell).name == "config.yaml" for cell in launcher.CELLS)
