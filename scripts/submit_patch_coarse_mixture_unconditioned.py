@@ -100,8 +100,8 @@ OUTPUT_DIFF_PATHS = {
     "logging.csv_path",
     "logging.jsonl_path",
 }
-OPERATIONAL_DIFF_PATHS = {"data.shard_cache_size"}
-MIXTURE_SHARD_CACHE_SIZE = 8
+OPERATIONAL_DIFF_PATHS: set[str] = set()
+MIXTURE_SHARD_CACHE_SIZE = None
 PARENT_CELLS = {
     architecture: PARENT_RUN_ROOT / "train" / "L128" / f"{architecture}-strict-sc0p5" / "config.yaml"
     for architecture in ARCHITECTURES
@@ -416,7 +416,10 @@ def _describe(workflow: PreparedWorkflow, diffs: list[dict[str, object]], code_c
         },
         "operational_cache": {
             "shard_cache_size_per_worker": MIXTURE_SHARD_CACHE_SIZE,
-            "reason": "full unique decoded mixture-shard preload is not assumed to fit the 240 GB cgroup",
+            "reason": (
+                "preload each worker's disjoint physical-shard ownership set; "
+                "the measured 124 GiB union fits the 240 GB cgroup"
+            ),
         },
         "milestones": list(MILESTONES),
         "task_count": len(workflow.tasks),
@@ -573,7 +576,9 @@ def _validate_scruffy_snapshot(
                 (reservation.get("node"), gpu_id)
                 for job in jobs.values()
                 if isinstance(job, Mapping) and job.get("state") == "running"
-                for reservation in (job.get("last_assignment") or {}).get("reservations", ())
+                for reservation in (
+                    job.get("assignment") or job.get("last_assignment") or {}
+                ).get("reservations", ())
                 if isinstance(reservation, Mapping)
                 for gpu_id in reservation.get("gpu_ids", ())
             }

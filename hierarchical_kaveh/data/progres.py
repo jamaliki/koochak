@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hashlib
 import json
 from pathlib import Path
@@ -183,6 +184,14 @@ class ProgresSidecarReader:
         if not 0 <= index < int(entry["count"]):
             raise IndexError(f"reference index is outside sidecar row range: {reference}")
         return torch.from_numpy(embedding[index].copy())
+
+    def preload(self, shards: Iterable[Path]) -> None:
+        """Load sidecars for one worker's disjoint physical-shard ownership."""
+
+        for source in dict.fromkeys(Path(shard).resolve() for shard in shards):
+            if source not in self._sidecars:
+                raise KeyError(f"owned shard is absent from sidecar index: {source}")
+            self._load_sidecar({"source_shard": str(source)})
 
     def identifier(self, reference: SampleReference) -> str:
         """Return the database ID aligned to one exact shard row."""

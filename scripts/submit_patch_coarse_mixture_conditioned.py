@@ -53,7 +53,9 @@ CONDITION_PATHS = {
     "data.progres_sidecar_index_path", "train.progres_condition_dropout",
 }
 OUTPUT_PATHS = {"train.out_dir", "logging.csv_path", "logging.jsonl_path"}
-MIXTURE_SHARD_CACHE_SIZE = 8
+OPERATIONAL_PATHS = {"data.shard_cache_size"}
+PARENT_MIXTURE_SHARD_CACHE_SIZE = 8
+MIXTURE_SHARD_CACHE_SIZE = None
 REQUIRED_TRAINER_GPUS = len(ARCHITECTURES)
 MIN_REMAINING_SECONDS = TRAIN_RESOURCES[LENGTH]["time_limit_seconds"] + 3_600
 HEARTBEAT_MAX_AGE_SECONDS = 120
@@ -87,6 +89,7 @@ def _patches(cell: Cell, run_dir: Path, workflow: str) -> list[ConfigPatch]:
         ConfigPatch("model.progres_conditioning", True),
         ConfigPatch("model.progres_embedding_dim", 128),
         ConfigPatch("data.progres_sidecar_index_path", str(SIDECAR_INDEX)),
+        ConfigPatch("data.shard_cache_size", MIXTURE_SHARD_CACHE_SIZE),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
     ]
@@ -101,22 +104,31 @@ def _flatten(value: object, prefix: str = "") -> dict[str, object]:
 _MISSING = object()
 
 
-def resolved_diff(parent_config: Path, child: Mapping[str, object], cell: Cell) -> dict[str, object]:
+def resolved_diff(
+    parent_config: Path,
+    child: Mapping[str, object],
+    cell: Cell,
+    *,
+    target_cache_size: int | None = MIXTURE_SHARD_CACHE_SIZE,
+) -> dict[str, object]:
     parent = OmegaConf.to_container(OmegaConf.load(parent_config), resolve=True)
     parent_flat, child_flat = _flatten(parent), _flatten(child)
-    if parent_flat.get("data.shard_cache_size") != MIXTURE_SHARD_CACHE_SIZE or child_flat.get("data.shard_cache_size") != MIXTURE_SHARD_CACHE_SIZE:
+    if child_flat.get("data.shard_cache_size") != target_cache_size:
         raise AssertionError(
-            f"conditioned cell {cell.cell_id} must inherit data.shard_cache_size={MIXTURE_SHARD_CACHE_SIZE}"
+            f"conditioned cell {cell.cell_id} must resolve "
+            f"data.shard_cache_size={target_cache_size}"
         )
     differences = []
     for key in sorted(set(parent_flat) | set(child_flat)):
         left, right = parent_flat.get(key, _MISSING), child_flat.get(key, _MISSING)
         if left is not _MISSING and right is not _MISSING and left == right:
             continue
-        classification = "conditioning" if key in CONDITION_PATHS else "run_identity_or_output" if key in OUTPUT_PATHS else "unexpected"
+        classification = "conditioning" if key in CONDITION_PATHS else "resident_cache" if key in OPERATIONAL_PATHS else "run_identity_or_output" if key in OUTPUT_PATHS else "unexpected"
         differences.append({"path": key, "parent": None if left is _MISSING else left, "child": None if right is _MISSING else right, "parent_present": left is not _MISSING, "child_present": right is not _MISSING, "classification": classification})
     observed = {item["path"] for item in differences}
     allowed = CONDITION_PATHS | OUTPUT_PATHS
+    if parent_flat.get("data.shard_cache_size") != target_cache_size:
+        allowed |= OPERATIONAL_PATHS
     if observed != allowed:
         raise AssertionError(f"unexpected resolved-config differences for {cell.cell_id}: {sorted(observed ^ allowed)}")
     return {"cell_id": cell.cell_id, "architecture": cell.architecture, "mixture_id": cell.mixture_id, "parent_config": str(parent_config), "parent_config_sha256": hashlib.sha256(parent_config.read_bytes()).hexdigest(), "differences": differences, "allowed_paths": sorted(allowed)}

@@ -48,6 +48,17 @@ def test_sidecar_reader_accepts_aligned_checksum_valid_fixture(tmp_path):
     assert reader.embedding(reference).shape == (128,)
 
 
+def test_sidecar_reader_preloads_each_owned_shard_once(tmp_path):
+    index, metadata, reference = _fixture(tmp_path)
+    reader = ProgresSidecarReader(index, metadata_path=metadata, eager=False)
+
+    assert "arrays" not in reader._sidecars[reference.shard.resolve()]
+    reader.preload((reference.shard, reference.shard))
+
+    assert "arrays" in reader._sidecars[reference.shard.resolve()]
+    assert reader.embedding(reference).shape == (128,)
+
+
 def test_sidecar_reader_fails_closed_on_alignment_failure(tmp_path):
     index, metadata, reference = _fixture(tmp_path, bad_alignment=True)
     with pytest.raises(ValueError, match="source ID alignment"):

@@ -111,6 +111,29 @@ def test_scruffy_snapshot_attestation_uses_top_level_flags_and_inventory() -> No
     assert attestation["available_gpus"] == 4.0
 
 
+def test_scruffy_snapshot_attestation_counts_current_assignments() -> None:
+    snapshot = _healthy_snapshot(
+        draining=None,
+        launches_paused=None,
+        resources=None,
+        incarnation={"inventory": [{"name": "gpu-1", "gpu_ids": list(range(8))}]},
+    )
+    snapshot["draining"] = False
+    snapshot["launches_paused"] = False
+    snapshot["jobs"] = {
+        "running": {
+            "state": "running",
+            "assignment": {
+                "reservations": [{"node": "gpu-1", "gpu_ids": [2]}]
+            },
+        }
+    }
+
+    attestation = launcher._validate_scruffy_snapshot(snapshot, now=NOW)
+
+    assert attestation["available_gpus"] == 7.0
+
+
 def test_scruffy_snapshot_attestation_accepts_live_deadline_schema() -> None:
     snapshot = _healthy_snapshot(remaining_seconds=None)
     snapshot["allocation"].pop("remaining_seconds")

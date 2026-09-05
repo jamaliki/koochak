@@ -15,7 +15,9 @@ def test_conditioned_factorial_dag_counts_and_cells():
 
 def test_conditioned_diff_allowlist_has_no_unexpected_class():
     assert launcher.MIXTURE_PATHS == set()
-    assert launcher.MIXTURE_SHARD_CACHE_SIZE == 8
+    assert launcher.PARENT_MIXTURE_SHARD_CACHE_SIZE == 8
+    assert launcher.MIXTURE_SHARD_CACHE_SIZE is None
+    assert launcher.OPERATIONAL_PATHS == {"data.shard_cache_size"}
     assert launcher.PARENT_COMMIT == "a6c3b7d427f62231af0a17d41f96bf1fa925e671"
     assert launcher.PARENT_WORKFLOW == "hk-patch-coarse-mixture-unconditioned-L128-a6c3b7d"
     assert launcher.CONDITION_PATHS | launcher.OUTPUT_PATHS

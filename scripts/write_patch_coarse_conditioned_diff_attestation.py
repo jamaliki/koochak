@@ -39,7 +39,9 @@ def build_attestation() -> dict[str, object]:
         if not child.is_file():
             raise FileNotFoundError(f"immutable conditioned config is missing: {child}")
         resolved_child = OmegaConf.to_container(OmegaConf.load(child), resolve=True)
-        diff = conditioned.resolved_diff(parent, resolved_child, cell)
+        diff = conditioned.resolved_diff(
+            parent, resolved_child, cell, target_cache_size=8
+        )
         if {item["classification"] for item in diff["differences"]} - {
             "conditioning",
             "run_identity_or_output",
@@ -54,7 +56,7 @@ def build_attestation() -> dict[str, object]:
         "child_root": str(CHILD_ROOT),
         "allowed_paths": sorted(conditioned.CONDITION_PATHS | conditioned.OUTPUT_PATHS),
         "required_operational_invariants": {
-            "data.shard_cache_size": conditioned.MIXTURE_SHARD_CACHE_SIZE,
+            "data.shard_cache_size": 8,
             "mixture_inherited_verbatim": True,
         },
         "cells": diffs,

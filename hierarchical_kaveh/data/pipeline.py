@@ -493,6 +493,8 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
         shard_cache = ShardCache(None if cache_all else self.data.shard_cache_size)
         if cache_all:
             shard_cache.preload(owned_shards)
+            if self.progres_sidecar is not None:
+                self.progres_sidecar.preload(owned_shards)
 
         cumulative_counts = {"strict": 0, "broader_exclusive": 0}
         source_buffers: dict[int, list[str]] = {edge: [] for edge in self.length_buckets}
