@@ -1,5 +1,6 @@
 import scripts.submit_patch_coarse_mixture_conditioned as launcher
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 def test_conditioned_factorial_dag_counts_and_cells():
@@ -35,3 +36,11 @@ def test_scruffy_attestation_uses_live_allocation_schema():
     result = launcher.validate_scruffy(snapshot)
     assert result["allocation_id"] == "414238"
     assert result["available_gpus"] == 32.0
+
+
+def test_conditioned_canary_uses_typed_artifact_stage():
+    source = Path(launcher.REPO_ROOT / "scripts/submit_patch_coarse_conditioned_canary.py").read_text()
+    assert "conditioned._output(" in source
+    assert "conditioned._stage_run(" in source
+    assert "prepare_run(" not in source
+    assert "DeclaredOutput(" not in source

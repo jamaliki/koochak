@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import sys
 
-from koochak.jobs import DeclaredOutput, PreparedTask, PreparedWorkflow, prepare_run, submit_scruffy_workflow  # noqa: E402
+from koochak.jobs import PreparedTask, PreparedWorkflow, submit_scruffy_workflow  # noqa: E402
 
 import scripts.submit_patch_coarse_mixture_conditioned as conditioned  # noqa: E402
 
@@ -25,22 +25,20 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     cell = conditioned.CELLS[0]
     parent = conditioned.PARENT_CELLS[(cell.architecture, cell.mixture_id)]
     patches = conditioned._patches(cell, run_dir, workflow)
-    run = prepare_run(
-        name=f"hk-conditioned-dataloader-canary-{short}",
+    artifact = conditioned._output(
+        f"canary/{short}.json", report, stage="canary", workflow=workflow,
+        task="canary", kind="file", expected_records=1,
+    )
+    run = conditioned._stage_run(
+        stage="canary", task="canary", workflow=workflow, artifact=artifact,
+        run_dir=run_dir.with_name(run_dir.name + ".managed"),
         profile=conditioned._load_profile(conditioned.REPO_ROOT / "environments/tokyo-mixture-factorial-cpu.yaml"),
-        python_args=[
+        base_config=parent, patches=patches,
+        command=[
             "{cwd}/scripts/mixture_data_canary.py", "--config", "{config}",
             "--report", str(report), "--batches", str(CANARY_BATCHES), "--require-progres",
         ],
-        cwd=str(conditioned.REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"),
-        run_dir=str(run_dir), base_config=parent, patches=patches,
-        declared_outputs=(DeclaredOutput(
-            f"canary/{short}.json", str(report), stage="canary",
-            provenance={"project_id": conditioned.PROJECT_ID, "workflow_id": workflow, "task_id": "canary", "code_commit": code_commit, "cell": cell.cell_id},
-            expected_records=1,
-        ),),
     )
-    conditioned._assert_config(run, patches, base_config=parent)
     return PreparedWorkflow(
         request_id=f"{conditioned.PROJECT_ID}/{workflow}/v1", workflow_id=workflow,
         project_id=conditioned.PROJECT_ID,
