@@ -114,15 +114,20 @@ def _patches(run_dir: Path) -> list[ConfigPatch]:
     ]
 
 
-def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, object]]:
+def build_workflow(
+    code_commit: str, *, only: str = "all"
+) -> tuple[PreparedWorkflow, dict[str, object]]:
     short = code_commit[:7]
-    workflow_id = f"hk-patch-coarse-mixture-resident-gate-L128-{short}"
+    labels = tuple(PRODUCTION_CONFIGS) if only == "all" else (only,)
+    suffix = "" if only == "all" else f"-{only}"
+    workflow_id = f"hk-patch-coarse-mixture-resident-gate{suffix}-L128-{short}"
     output_root = unconditioned.REMOTE_RUN_ROOT / "patch-coarse-mixture-resident-gate-L128" / code_commit
     remote_cwd = unconditioned.REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"
     profile = unconditioned._load_profile(unconditioned.GPU_PROFILE)
     tasks = []
     diffs = {}
-    for label, parent_config in PRODUCTION_CONFIGS.items():
+    for label in labels:
+        parent_config = PRODUCTION_CONFIGS[label]
         run_dir = output_root / label
         patches = _patches(run_dir)
         prepared = prepare_run(
@@ -172,12 +177,15 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, object
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--only", choices=("all", *PRODUCTION_CONFIGS), default="all"
+    )
     args = parser.parse_args(argv)
     code_commit = unconditioned._git("rev-parse", "HEAD")
     if any(not file.is_file() for file in PRODUCTION_CONFIGS.values()):
         if not args.dry_run:
             raise FileNotFoundError("one or more immutable production configs are missing")
-    workflow, description = build_workflow(code_commit)
+    workflow, description = build_workflow(code_commit, only=args.only)
     if args.dry_run:
         print(json.dumps(description, indent=2, sort_keys=True))
         return
