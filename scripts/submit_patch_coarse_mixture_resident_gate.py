@@ -56,8 +56,6 @@ ALLOWED_DIFFS = {
     "train.max_steps",
     "train.out_dir",
     "train.save_final",
-    "wandb.enabled",
-    "wandb.mode",
 }
 
 
@@ -113,8 +111,6 @@ def _patches(run_dir: Path) -> list[ConfigPatch]:
         ConfigPatch("train.save_final", False),
         ConfigPatch("logging.csv_path", str(run_dir / "log.csv")),
         ConfigPatch("logging.jsonl_path", str(run_dir / "log.jsonl")),
-        ConfigPatch("wandb.enabled", False),
-        ConfigPatch("wandb.mode", "disabled"),
     ]
 
 

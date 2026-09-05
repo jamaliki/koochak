@@ -18,7 +18,7 @@ def _parent() -> dict[str, object]:
             "out_dir": "/old",
             "save_final": True,
         },
-        "wandb": {"enabled": True, "mode": "online"},
+        "wandb": {"enabled": False, "mode": "disabled"},
     }
 
 
@@ -35,8 +35,6 @@ def _child() -> dict[str, object]:
         "train.max_steps": 600,
         "train.out_dir": "/new",
         "train.save_final": False,
-        "wandb.enabled": False,
-        "wandb.mode": "disabled",
     }.items():
         section, name = key.split(".")
         child[section][name] = value
