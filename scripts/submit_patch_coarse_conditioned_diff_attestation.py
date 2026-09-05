@@ -44,7 +44,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
         task=task,
         workflow=workflow,
         artifact=artifact,
-        run_dir=OUTPUT_ROOT / "resolved-config-diff-attestation.managed",
+        run_dir=OUTPUT_ROOT / f"resolved-config-diff-attestation-{short}.managed",
         profile=profile,
         command=[
             "{cwd}/scripts/write_patch_coarse_conditioned_diff_attestation.py",
