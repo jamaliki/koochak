@@ -205,7 +205,7 @@ def _parse_time(value: object) -> datetime | None:
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
 
 
-def validate_scruffy(snapshot: Mapping[str, object]) -> dict[str, object]:
+def validate_scruffy(snapshot: Mapping[str, object], *, required_gpus: int = REQUIRED_TRAINER_GPUS) -> dict[str, object]:
     allocation = snapshot.get("allocation")
     if not isinstance(allocation, Mapping) or str(allocation.get("state", "")).lower() != "running":
         raise RuntimeError("Scruffy allocation is not RUNNING")
@@ -240,7 +240,7 @@ def validate_scruffy(snapshot: Mapping[str, object]) -> dict[str, object]:
                 reservations = assignment.get("reservations", ()) if isinstance(assignment, Mapping) else ()
                 reserved_gpus += sum(len(item.get("gpu_ids", ())) for item in reservations if isinstance(item, Mapping))
         free_gpus = total_gpus - reserved_gpus
-    if not isinstance(age, (int, float)) or float(age) > HEARTBEAT_MAX_AGE_SECONDS or not isinstance(remaining, (int, float)) or float(remaining) < MIN_REMAINING_SECONDS or not isinstance(free_gpus, (int, float)) or float(free_gpus) < REQUIRED_TRAINER_GPUS:
+    if not isinstance(age, (int, float)) or float(age) > HEARTBEAT_MAX_AGE_SECONDS or not isinstance(remaining, (int, float)) or float(remaining) < MIN_REMAINING_SECONDS or not isinstance(free_gpus, (int, float)) or float(free_gpus) < required_gpus:
         raise RuntimeError("Scruffy allocation heartbeat, lifetime, or GPU capacity is insufficient")
     return {"allocation_id": str(allocation.get("allocation_id", allocation.get("id", ""))), "heartbeat_age_seconds": float(age), "remaining_seconds": float(remaining), "available_gpus": float(free_gpus), "controller_release": allocation.get("controller_release")}
 

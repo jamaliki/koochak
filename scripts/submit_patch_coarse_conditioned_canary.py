@@ -27,7 +27,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     patches = conditioned._patches(cell, run_dir, workflow)
     run = prepare_run(
         name=f"hk-conditioned-dataloader-canary-{short}",
-        profile=conditioned._load_profile(conditioned.REPO_ROOT / "environments/tokyo-factorial-gpu.yaml"),
+        profile=conditioned._load_profile(conditioned.REPO_ROOT / "environments/tokyo-mixture-factorial-cpu.yaml"),
         python_args=[
             "{cwd}/scripts/mixture_data_canary.py", "--config", "{config}",
             "--report", str(report), "--batches", str(CANARY_BATCHES), "--require-progres",
@@ -44,7 +44,7 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     return PreparedWorkflow(
         request_id=f"{conditioned.PROJECT_ID}/{workflow}/v1", workflow_id=workflow,
         project_id=conditioned.PROJECT_ID,
-        tasks=(PreparedTask("canary", run, conditioned.TRAIN_RESOURCES[128], recovery=conditioned.RECOVERY),),
+        tasks=(PreparedTask("canary", run, {**conditioned.TRAIN_RESOURCES[128], "gpus_per_node": 0}, recovery=conditioned.RECOVERY),),
     )
 
 
@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> None:
     sys.path.insert(0, str(conditioned.SCRUFFY_SITE))
     from scruffy import status  # noqa: PLC0415
     snapshot = status(conditioned.SCRUFFY_ROOT)
-    attestation = conditioned.validate_scruffy(snapshot)
+    attestation = conditioned.validate_scruffy(snapshot, required_gpus=0)
     if attestation["controller_release"] != conditioned.SCRUFFY_COMMIT:
         raise RuntimeError("Scruffy release mismatch")
     print(json.dumps({"workflow_id": workflow.workflow_id, "request_id": workflow.request_id, "allocation": attestation, "submission": submit_scruffy_workflow(workflow, root=conditioned.SCRUFFY_ROOT)}, indent=2, default=str))

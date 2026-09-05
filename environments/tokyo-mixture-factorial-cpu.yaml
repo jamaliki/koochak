@@ -23,6 +23,8 @@ requirements:
     - "{cwd}/scripts/analyze_progres_diversity.py"
     - "{cwd}/scripts/analyze_progres_conditioned_milestone.py"
     - "{cwd}/scripts/prepare_progres_condition_bank.py"
+    - "{cwd}/scripts/mixture_data_canary.py"
+    - "{cwd}/hierarchical_kaveh/data/pipeline.py"
     - "{cwd}/scripts/aggregate_progres_conditioned.py"
     - "{cwd}/hierarchical_kaveh/data/progres.py"
     - "{cwd}/hierarchical_kaveh/data/shards.py"
