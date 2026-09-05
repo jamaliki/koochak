@@ -15,6 +15,8 @@ def test_conditioned_factorial_dag_counts_and_cells():
 def test_conditioned_diff_allowlist_has_no_unexpected_class():
     assert launcher.MIXTURE_PATHS == set()
     assert launcher.MIXTURE_SHARD_CACHE_SIZE == 8
+    assert launcher.PARENT_COMMIT is None
+    assert launcher.PARENT_WORKFLOW is None
     assert launcher.CONDITION_PATHS | launcher.OUTPUT_PATHS
     assert all(isinstance(key, tuple) and len(key) == 2 for key in launcher.PARENT_CELLS)
     assert "unexpected" not in launcher.CONDITION_PATHS | launcher.OUTPUT_PATHS
