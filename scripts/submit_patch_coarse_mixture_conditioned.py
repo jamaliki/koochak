@@ -35,14 +35,14 @@ SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105"
 SCRUFFY_SITE = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/scruffy-d60afabf-py310-cpython310-linux-x86_64/site")
 SIDECAR_INDEX = Path("/mnt/lustre/users/kiarash-eitgbi/atom14/afdb_all_parsed/parsed_np_shards_with_ss_3di/progres_sidecars/progres-v1.1.0-128d-49830e1/index.json")
 PROGRES_DATA = Path("/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0")
-PARENT_COMMIT: str | None = None
-PARENT_WORKFLOW: str | None = None
-PARENT_RUN_ROOT: Path | None = None
+PARENT_COMMIT = "a6c3b7d427f62231af0a17d41f96bf1fa925e671"
+PARENT_WORKFLOW = "hk-patch-coarse-mixture-unconditioned-L128-a6c3b7d"
+PARENT_RUN_ROOT = REMOTE_RUN_ROOT / "patch-coarse-mixture-unconditioned-L128" / PARENT_COMMIT
 LENGTH = 128
 ARCHITECTURES = ("flat_after_node_no_transition", "pool_before_attention_pair_transition")
 MIXTURES = (("mix50_50", 0.50, 0.50), ("mix75_25", 0.75, 0.25))
 PARENT_CELLS = {
-    (architecture, mixture_id): None
+    (architecture, mixture_id): PARENT_RUN_ROOT / "train" / "L128" / f"{architecture}-{mixture_id}-sc0p5" / "config.yaml"
     for architecture in ARCHITECTURES
     for mixture_id, _, _ in MIXTURES
 }
@@ -129,8 +129,6 @@ def _config_container(prepared) -> dict[str, object]:
 
 def _cell_train(cell: Cell, workflow: str, output_root: Path, profile):
     parent_config = PARENT_CELLS[(cell.architecture, cell.mixture_id)]
-    if parent_config is None:
-        raise RuntimeError("conditioned parents are not configured; await Curie's corrected unconditioned workflow")
     train_dir = output_root / "train" / "L128" / cell.cell_id
     patches = _patches(cell, train_dir, workflow)
     run = prepare_run(name=f"hk-mixture-conditioned-train-{cell.cell_id}-{_git('rev-parse', 'HEAD')[:7]}", profile=profile, python_args=["-m", "hierarchical_kaveh.train", "--config", "{config}", "--resume", "auto"], cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{_git('rev-parse', 'HEAD')[:7]}"), run_dir=str(train_dir), base_config=parent_config, patches=patches)
@@ -260,8 +258,8 @@ def validate_online(code_commit: str) -> dict[str, object]:
             raise RuntimeError(f"required launch file is missing: {file}")
     if not (PROGRES_DATA / "trained_model.pt").is_file():
         raise RuntimeError(f"pinned Progres weights are missing: {PROGRES_DATA / 'trained_model.pt'}")
-    if PARENT_COMMIT is None or PARENT_WORKFLOW is None or PARENT_RUN_ROOT is None or any(config is None or not config.is_file() for config in PARENT_CELLS.values()):
-        raise RuntimeError("corrected unconditioned workflow identity and immutable parent configs are not configured")
+    if any(not config.is_file() for config in PARENT_CELLS.values()):
+        raise RuntimeError("one or more corrected immutable parent configs are missing")
     # The aggregate job already validated every sidecar.  Revalidate the
     # immutable index and all per-shard publications on the login node; the
     # first CPU condition-bank task performs the full row/embedding scan.

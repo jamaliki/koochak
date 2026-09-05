@@ -114,7 +114,21 @@ def _scalar(batch: dict[str, Any], key: str) -> int:
     return int(value.item() if hasattr(value, "item") else value)
 
 
-def run(config_path: Path, *, report_path: Path, batches: int) -> dict[str, Any]:
+def _validate_progres_batch(batch: dict[str, Any]) -> dict[str, float | int]:
+    embedding = batch.get("progres_embedding")
+    if embedding is None or getattr(embedding, "ndim", None) != 2 or embedding.shape[1] != 128:
+        raise RuntimeError("conditioned canary batch is missing [batch, 128] Progres inputs")
+    finite = bool(np.isfinite(embedding.detach().float().cpu().numpy()).all())
+    if not finite:
+        raise RuntimeError("conditioned canary received non-finite Progres inputs")
+    norms = embedding.detach().float().norm(dim=1)
+    norm_error = float((norms - 1.0).abs().max().item())
+    if norm_error > 1e-4:
+        raise RuntimeError(f"conditioned canary received non-normalized Progres inputs: {norm_error}")
+    return {"progres_batch_size": int(embedding.shape[0]), "progres_embedding_dim": int(embedding.shape[1]), "progres_norm_error_max": norm_error}
+
+
+def run(config_path: Path, *, report_path: Path, batches: int, require_progres: bool = False) -> dict[str, Any]:
     config = load_config(config_path)
     if config.data.mixture is None:
         raise RuntimeError("canary requires data.mixture")
@@ -136,9 +150,15 @@ def run(config_path: Path, *, report_path: Path, batches: int) -> dict[str, Any]
     max_cache_bytes = 0
     max_cached_shards = 0
     finite_batches = 0
+    progres_batch_count = 0
+    progres_norm_error_max = 0.0
     batch_records = []
     try:
         for batch in loader:
+            if require_progres:
+                progres = _validate_progres_batch(batch)
+                progres_batch_count += 1
+                progres_norm_error_max = max(progres_norm_error_max, float(progres["progres_norm_error_max"]))
             strict = _scalar(batch, "data_mixture_strict_count")
             broader = _scalar(batch, "data_mixture_broader_count")
             strict_count += strict
@@ -207,6 +227,9 @@ def run(config_path: Path, *, report_path: Path, batches: int) -> dict[str, Any]
         "worker_assignments": assignments,
         "batch_records": batch_records,
         "self_rss_peak_bytes": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024,
+        "progres_required": require_progres,
+        "progres_batch_count": progres_batch_count,
+        "progres_norm_error_max": progres_norm_error_max,
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -218,10 +241,11 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--batches", type=int, default=16)
+    parser.add_argument("--require-progres", action="store_true")
     args = parser.parse_args()
     if args.batches <= 0:
         raise SystemExit("--batches must be positive")
-    print(json.dumps(run(args.config, report_path=args.report, batches=args.batches), sort_keys=True))
+    print(json.dumps(run(args.config, report_path=args.report, batches=args.batches, require_progres=args.require_progres), sort_keys=True))
 
 
 if __name__ == "__main__":
