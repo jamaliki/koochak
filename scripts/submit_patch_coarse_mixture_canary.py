@@ -8,13 +8,7 @@ import json
 from pathlib import Path
 import sys
 
-from koochak.jobs import (  # noqa: E402
-    DeclaredOutput,
-    PreparedTask,
-    PreparedWorkflow,
-    prepare_run,
-    submit_scruffy_workflow,
-)
+from koochak.jobs import PreparedTask, PreparedWorkflow, submit_scruffy_workflow  # noqa: E402
 
 import scripts.submit_patch_coarse_mixture_unconditioned as factorial  # noqa: E402
 
@@ -32,10 +26,25 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
     report = output_root / "canary.json"
     cell = factorial.CELLS[0]
     patches = factorial._patches(cell, run_dir, workflow)
-    run = prepare_run(
-        name=f"hk-mixture-dataloader-canary-{short}",
+    artifact = factorial._output(
+        f"canary/{short}.json",
+        report,
+        stage="canary",
+        workflow=workflow,
+        task="canary",
+        kind="file",
+        expected_records=1,
+    )
+    run = factorial._stage_run(
+        stage="canary",
+        task="canary",
+        workflow=workflow,
+        artifact=artifact,
+        run_dir=run_dir.with_name(run_dir.name + ".managed"),
         profile=factorial._load_profile(factorial.GPU_PROFILE),
-        python_args=[
+        base_config=factorial.BASE_CONFIG,
+        patches=patches,
+        command=[
             "{cwd}/scripts/mixture_data_canary.py",
             "--config",
             "{config}",
@@ -44,32 +53,16 @@ def build_workflow(code_commit: str) -> PreparedWorkflow:
             "--batches",
             str(CANARY_BATCHES),
         ],
-        cwd=str(factorial.REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"),
-        run_dir=str(run_dir),
-        base_config=factorial.BASE_CONFIG,
-        patches=patches,
-        declared_outputs=(
-            DeclaredOutput(
-                f"canary/{short}.json",
-                str(report),
-                stage="canary",
-                provenance={
-                    "project_id": factorial.PROJECT_ID,
-                    "workflow_id": workflow,
-                    "task_id": "canary",
-                    "code_commit": code_commit,
-                    "cell": cell.cell_id,
-                },
-                expected_records=1,
-            ),
-        ),
     )
-    factorial._assert_config(run, patches)
     return PreparedWorkflow(
         request_id=f"{factorial.PROJECT_ID}/{workflow}/v1",
         workflow_id=workflow,
         project_id=factorial.PROJECT_ID,
-        tasks=(PreparedTask("canary", run, factorial.TRAIN_RESOURCES[128], recovery=factorial.RECOVERY),),
+        tasks=(
+            PreparedTask(
+                "canary", run, factorial.TRAIN_RESOURCES[128], recovery=factorial.RECOVERY
+            ),
+        ),
     )
 
 

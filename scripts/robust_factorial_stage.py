@@ -13,7 +13,9 @@ from koochak.storage.artifact import DeclaredOutput, publish_artifact
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("sample", "esmfold", "analysis"), required=True)
+    parser.add_argument(
+        "--stage", choices=("sample", "esmfold", "analysis", "canary"), required=True
+    )
     parser.add_argument("--artifact-id", required=True)
     parser.add_argument("--artifact-path", type=Path, required=True)
     parser.add_argument("--kind", choices=("file", "directory"), required=True)
@@ -43,7 +45,7 @@ def _validate(stage: str, output: Path, expected_records: int | None) -> int | N
             raise RuntimeError("ESMFold output contains no PDB files")
         return expected_records
     if output != output.resolve() or not output.is_file():
-        raise RuntimeError("analysis output is not a regular file")
+        raise RuntimeError(f"{stage} output is not a regular file")
     return 1
 
 
