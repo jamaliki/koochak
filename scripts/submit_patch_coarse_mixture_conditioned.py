@@ -53,6 +53,7 @@ CONDITION_PATHS = {
     "data.progres_sidecar_index_path", "train.progres_condition_dropout",
 }
 OUTPUT_PATHS = {"train.out_dir", "logging.csv_path", "logging.jsonl_path"}
+MIXTURE_SHARD_CACHE_SIZE = 8
 REQUIRED_TRAINER_GPUS = len(ARCHITECTURES)
 MIN_REMAINING_SECONDS = TRAIN_RESOURCES[LENGTH]["time_limit_seconds"] + 3_600
 HEARTBEAT_MAX_AGE_SECONDS = 120
@@ -103,6 +104,10 @@ _MISSING = object()
 def resolved_diff(parent_config: Path, child: Mapping[str, object], cell: Cell) -> dict[str, object]:
     parent = OmegaConf.to_container(OmegaConf.load(parent_config), resolve=True)
     parent_flat, child_flat = _flatten(parent), _flatten(child)
+    if parent_flat.get("data.shard_cache_size") != MIXTURE_SHARD_CACHE_SIZE or child_flat.get("data.shard_cache_size") != MIXTURE_SHARD_CACHE_SIZE:
+        raise AssertionError(
+            f"conditioned cell {cell.cell_id} must inherit data.shard_cache_size={MIXTURE_SHARD_CACHE_SIZE}"
+        )
     differences = []
     for key in sorted(set(parent_flat) | set(child_flat)):
         left, right = parent_flat.get(key, _MISSING), child_flat.get(key, _MISSING)
