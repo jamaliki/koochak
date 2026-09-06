@@ -93,7 +93,8 @@ def _panel_row(file: Path) -> dict[str, object]:
     )
     top_topology, top_count = topology_counts.most_common(1)[0] if topology_counts else (None, 0)
     generated = result["generated"]["all_samples"]
-    folded = result["esmfold"]["designable_subset"]
+    generated_designable = result["generated"]["designable_subset"]
+    refolded_designable = result["esmfold"]["designable_subset"]
     sequence = result["generated_sequence_diversity"]
     return {
         "cell": cell,
@@ -105,10 +106,23 @@ def _panel_row(file: Path) -> dict[str, object]:
         "generated_progres_largest_cluster_fraction": generated["largest_cluster_fraction"],
         "generated_progres_same_fold_pair_fraction": generated["same_fold_pair_fraction"],
         "generated_progres_nearest_neighbor_similarity_mean": generated["nearest_neighbor_similarity_mean"],
-        "designable_progres_cluster_count": folded["cluster_count"],
-        "designable_progres_effective_cluster_count": folded["effective_cluster_count"],
-        "designable_progres_largest_cluster_fraction": folded["largest_cluster_fraction"],
-        "designable_progres_same_fold_pair_fraction": folded["same_fold_pair_fraction"],
+        # The primary endpoint is generated-structure clustering restricted by
+        # the ESMFold designable IDs.  Keep refolded clustering separate so a
+        # disagreement cannot be mistaken for the primary result.
+        "designable_progres_cluster_count": generated_designable["cluster_count"],
+        "designable_progres_effective_cluster_count": generated_designable["effective_cluster_count"],
+        "designable_progres_largest_cluster_fraction": generated_designable["largest_cluster_fraction"],
+        "designable_progres_same_fold_pair_fraction": generated_designable["same_fold_pair_fraction"],
+        "designable_progres_cluster_sizes": generated_designable.get("cluster_sizes"),
+        "designable_progres_cluster_medoids": generated_designable.get("cluster_medoids"),
+        "designable_progres_same_cluster_pair_fraction": generated_designable.get("same_cluster_pair_fraction"),
+        "esmfold_designable_subset_progres_cluster_count": refolded_designable["cluster_count"],
+        "esmfold_designable_subset_progres_effective_cluster_count": refolded_designable["effective_cluster_count"],
+        "esmfold_designable_subset_progres_largest_cluster_fraction": refolded_designable["largest_cluster_fraction"],
+        "esmfold_designable_subset_progres_same_cluster_pair_fraction": refolded_designable.get("same_cluster_pair_fraction"),
+        "designable_progres_cluster_count_disagreement": (
+            generated_designable["cluster_count"] != refolded_designable["cluster_count"]
+        ),
         "sequence_unique_count": sequence["unique_sequence_count"],
         "sequence_mean_positional_entropy_bits": sequence["mean_positional_entropy_bits"],
         "sequence_pairwise_identity_mean": sequence["pairwise_sequence_identity_mean"],

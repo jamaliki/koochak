@@ -15,8 +15,10 @@ from .layers import (
     AdaptiveRMSNorm,
     FeedForward,
     GEGLU,
+    NonAffineRMSNorm,
     RMSNorm,
     RotaryEmbedding,
+    apply_residual_stage,
     init_linear,
     signed_log_separation,
 )
@@ -478,6 +480,8 @@ class CoarseBlock(nn.Module):
         pair_position: str = "after_node",
         pair_transition: bool = False,
         pair_ffn_expansion: int = 4,
+        attention_residual_scale: float | None = None,
+        sandwich_rmsnorm: bool = False,
     ):
         super().__init__()
         if pair_position not in {"after_node", "before_attention"}:
@@ -487,6 +491,16 @@ class CoarseBlock(nn.Module):
             node_dim, condition_dim, pair_dim, heads, head_dim, registers
         )
         self.ffn = FeedForward(node_dim, condition_dim, expansion, dropout, residual_scale)
+        self.register_buffer(
+            "attention_residual_scale",
+            torch.tensor(
+                float(residual_scale if attention_residual_scale is None else attention_residual_scale)
+            ),
+            persistent=False,
+        )
+        self.attention_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
+        self.ffn_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
+        self.pair_ffn_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
         self.pair_multiplication = PairMultiplicationBlock(pair_dim, dropout)
         self.pair_ffn = (
             FeedForward(pair_dim, None, pair_ffn_expansion, dropout, residual_scale)
@@ -502,20 +516,50 @@ class CoarseBlock(nn.Module):
         mask: Tensor,
         positions: Tensor,
         pair_mask: Tensor,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        pair_stats = pair.new_zeros(4, dtype=torch.float32)
         if self.pair_position == "before_attention":
             pair = self._update_pair(pair, pair_mask)
-        x = x + self.attention(x, condition, pair, mask, positions)
-        x = self.ffn(x, condition) * mask[..., None].to(x.dtype)
+            pair, pair_stats = self._apply_pair_ffn(pair, pair_mask)
+        x, attention_stats = apply_residual_stage(
+            x,
+            self.attention(x, condition, pair, mask, positions),
+            scale=self.attention_residual_scale,
+            post_norm=self.attention_post_norm,
+            mask=mask,
+        )
+        x, ffn_stats = apply_residual_stage(
+            x,
+            self.ffn.update(x, condition),
+            scale=self.ffn.residual_scale,
+            post_norm=self.ffn_post_norm,
+            mask=mask,
+        )
         if self.pair_position == "after_node":
             pair = self._update_pair(pair, pair_mask)
-        return x, pair
+            pair, pair_stats = self._apply_pair_ffn(pair, pair_mask)
+        return x, pair, torch.stack((attention_stats, ffn_stats, pair_stats))
 
     def _update_pair(self, pair: Tensor, pair_mask: Tensor) -> Tensor:
-        pair = self.pair_multiplication(pair, pair_mask)
-        if self.pair_ffn is not None:
-            pair = self.pair_ffn(pair) * pair_mask[..., None].to(pair.dtype)
-        return pair
+        return self.pair_multiplication(pair, pair_mask)
+
+    def _apply_pair_ffn(
+        self, pair: Tensor, pair_mask: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        pair_stats = pair.new_zeros(4, dtype=torch.float32)
+        if self.pair_ffn is None:
+            return pair, pair_stats
+        # Pair multiplication is intentionally not normalized here: it is
+        # neither an attention nor an FFN residual stage.  The optional pair
+        # transition is an FFN stage and is normalized after its residual add
+        # when sandwich mode is enabled.
+        return apply_residual_stage(
+            pair,
+            self.pair_ffn.update(pair),
+            scale=self.pair_ffn.residual_scale,
+            post_norm=self.pair_ffn_post_norm,
+            mask=pair_mask,
+        )
 
 
 class IntermediateDistogramHead(nn.Module):

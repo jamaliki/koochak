@@ -15,6 +15,8 @@ model:
   atom_decoder_depth: 1
   atom_window_radius: 1
   pair_ffn_expansion: 4
+  attention_residual_scale: full
+  sandwich_rmsnorm: false
   patchify_mode: masked_pool
   coarse_pair_position: after_node
   coarse_pair_transition: false

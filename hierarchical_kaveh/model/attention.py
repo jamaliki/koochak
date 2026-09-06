@@ -7,7 +7,15 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .backend import fused_failure
-from .layers import BoundedFiLM, FeedForward, RMSNorm, RotaryEmbedding, init_linear
+from .layers import (
+    BoundedFiLM,
+    FeedForward,
+    NonAffineRMSNorm,
+    RMSNorm,
+    RotaryEmbedding,
+    apply_residual_stage,
+    init_linear,
+)
 
 
 ATOM_SLOTS = 14
@@ -154,15 +162,40 @@ class AtomBlock(nn.Module):
         radius: int,
         expansion: int,
         dropout: float,
+        attention_residual_scale: float = 1.0,
+        sandwich_rmsnorm: bool = False,
     ):
         super().__init__()
         self.attention = AtomAttention(atom_dim, condition_dim, heads, head_dim, radius)
         self.ffn = FeedForward(atom_dim, condition_dim, expansion, dropout)
+        self.register_buffer(
+            "attention_residual_scale",
+            torch.tensor(float(attention_residual_scale)),
+            persistent=False,
+        )
+        self.attention_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
+        self.ffn_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
 
-    def forward(self, x: Tensor, condition: Tensor, atom_mask: Tensor, segment_index: Tensor) -> Tensor:
-        x = x + self.attention(x, condition, atom_mask, segment_index)
+    def forward(
+        self, x: Tensor, condition: Tensor, atom_mask: Tensor, segment_index: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        x, attention_stats = apply_residual_stage(
+            x,
+            self.attention(x, condition, atom_mask, segment_index),
+            scale=self.attention_residual_scale,
+            post_norm=self.attention_post_norm,
+            mask=atom_mask,
+        )
         atom_condition = condition[:, :, None].expand(-1, -1, ATOM_SLOTS, -1)
-        return self.ffn(x, atom_condition) * atom_mask[..., None].to(x.dtype)
+        x, ffn_stats = apply_residual_stage(
+            x,
+            self.ffn.update(x, atom_condition),
+            scale=self.ffn.residual_scale,
+            post_norm=self.ffn_post_norm,
+            mask=atom_mask,
+        )
+        pair_stats = attention_stats.new_zeros(4)
+        return x, torch.stack((attention_stats, ffn_stats, pair_stats))
 
 
 class AtomToResidue(nn.Module):
@@ -250,11 +283,38 @@ class GlobalBlock(nn.Module):
         expansion: int,
         dropout: float,
         residual_scale: float,
+        attention_residual_scale: float = 1.0,
+        sandwich_rmsnorm: bool = False,
     ):
         super().__init__()
         self.attention = GlobalAttention(node_dim, condition_dim, heads, head_dim)
         self.ffn = FeedForward(node_dim, condition_dim, expansion, dropout, residual_scale)
+        self.register_buffer(
+            "attention_residual_scale",
+            torch.tensor(float(attention_residual_scale)),
+            persistent=False,
+        )
+        self.sandwich_rmsnorm = bool(sandwich_rmsnorm)
+        self.attention_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
+        self.ffn_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
 
-    def forward(self, x: Tensor, condition: Tensor, mask: Tensor, positions: Tensor) -> Tensor:
+    def forward(
+        self, x: Tensor, condition: Tensor, mask: Tensor, positions: Tensor
+    ) -> tuple[Tensor, Tensor]:
         x = x * mask[..., None].to(x.dtype)
-        return self.ffn(x + self.attention(x, condition, mask, positions), condition) * mask[..., None].to(x.dtype)
+        x, attention_stats = apply_residual_stage(
+            x,
+            self.attention(x, condition, mask, positions),
+            scale=self.attention_residual_scale,
+            post_norm=self.attention_post_norm,
+            mask=mask,
+        )
+        x, ffn_stats = apply_residual_stage(
+            x,
+            self.ffn.update(x, condition),
+            scale=self.ffn.residual_scale,
+            post_norm=self.ffn_post_norm,
+            mask=mask,
+        )
+        pair_stats = attention_stats.new_zeros(4)
+        return x, torch.stack((attention_stats, ffn_stats, pair_stats))

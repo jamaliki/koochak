@@ -115,6 +115,9 @@ class Prediction:
     distogram: Tensor | CompactDistogram | None = None
     intermediate_distograms: tuple[CompactDistogram, ...] = ()
     secondary_structure_logits: Tensor | None = None
+    # [3, 3] float32 summary: rows attention/node-FFN/pair-FFN, columns raw
+    # branch update RMS/post-add stream RMS/post-norm stream RMS.
+    residual_diagnostics: Tensor | None = None
 
     def detach(self) -> "Prediction":
         """Detach a prediction for reuse as self-conditioning."""
@@ -135,5 +138,10 @@ class Prediction:
                 None
                 if self.secondary_structure_logits is None
                 else self.secondary_structure_logits.detach()
+            ),
+            residual_diagnostics=(
+                None
+                if self.residual_diagnostics is None
+                else self.residual_diagnostics.detach()
             ),
         )

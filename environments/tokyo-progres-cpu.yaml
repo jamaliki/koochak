@@ -18,11 +18,18 @@ requirements:
   files:
     - "{cwd}/pyproject.toml"
     - "{cwd}/scripts/prepare_progres_data.py"
+    - "{cwd}/scripts/attest_progres_data.py"
     - "{cwd}/scripts/analyze_progres_diversity.py"
+    - "{cwd}/scripts/progres_clustering.py"
+    - "{cwd}/scripts/recluster_progres_matrices.py"
+    - "{cwd}/scripts/write_progres_reanalysis_manifest.py"
+    - "{cwd}/scripts/summarize_progres_reanalysis.py"
     - "{cwd}/scripts/diversity_common.py"
     - "{cwd}/scripts/progres_inference.py"
     - "{cwd}/scripts/run_with_kaveh_python.py"
     - "{cwd}/scripts/robust_factorial_stage.py"
+    - "/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0/trained_model.pt"
+    - "/mnt/lustre/users/kiarash-eitgbi/code/progres-data/v1.1.0/cath40.pt"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
   packages:
     koochak: "*"

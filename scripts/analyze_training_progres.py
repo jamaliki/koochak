@@ -133,7 +133,7 @@ def main() -> None:
         "method": "Progres protein graph embeddings",
         "progres_version": "1.1.0",
         "same_fold_threshold": SAME_FOLD_THRESHOLD,
-        "cluster_linkage": "connected components of the Progres >=0.8 same-fold graph",
+        "cluster_linkage": "complete linkage using minimum within-cluster Progres similarity at >= 0.8",
         "population": "exactly 128 resolved C-alpha residues, sampled from eligible 32-128-residue training references",
         "regimes": {
             regime.name: _regime_result(regime, args, model, database)

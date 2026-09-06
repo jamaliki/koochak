@@ -41,6 +41,7 @@ def _prediction(batch: dict[str, torch.Tensor]) -> Prediction:
         coordinates=batch["x_t"] * 0.5,
         aatype_logits=torch.randn(batch_size, residues, 20),
         distogram=torch.randn(batch_size, residues, residues, 64),
+        residual_diagnostics=torch.arange(9, dtype=torch.float32).reshape(3, 3),
     )
 
 
@@ -147,6 +148,8 @@ def test_training_step_can_skip_self_conditioning_and_distogram(monkeypatch) -> 
     assert output["self_conditioned"].item() == 0.0
     assert output["data_owned_shard_count"].item() == 17
     assert output["koochak_prefetch_get_wait_s"] == 0.125
+    assert output["residual_attention_branch_update_rms"].item() == 0.0
+    assert output["residual_pair_ffn_post_norm_stream_rms"].item() == 8.0
 
 
 def test_half_self_conditioning_schedule_is_deterministic_and_nontrivial() -> None:

@@ -40,6 +40,65 @@ class RMSNorm(nn.Module):
         return (normalized * self.weight.float()).to(x.dtype)
 
 
+class NonAffineRMSNorm(nn.Module):
+    """Post-residual RMS normalization without a learned affine transform."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x: Tensor) -> Tensor:
+        normalized = x.float() * torch.rsqrt(
+            x.float().square().mean(-1, keepdim=True) + self.eps
+        )
+        return normalized.to(x.dtype)
+
+
+def _masked_rms(x: Tensor, mask: Tensor | None) -> Tensor:
+    """Return one float32 RMS, excluding padded stream positions."""
+
+    values = x.float().square().mean(-1)
+    if mask is None:
+        return values.mean().sqrt()
+    weights = mask.to(device=x.device, dtype=values.dtype)
+    return ((values * weights).sum() / weights.sum().clamp_min(1.0)).sqrt()
+
+
+def apply_residual_stage(
+    x: Tensor,
+    update: Tensor,
+    *,
+    scale: Tensor,
+    post_norm: NonAffineRMSNorm | None,
+    mask: Tensor | None,
+) -> tuple[Tensor, Tensor]:
+    """Add one branch, optionally sandwich-normalize the post-add stream.
+
+    The returned diagnostics are ``[raw_update_rms, post_add_rms,
+    post_norm_rms, active]``.  The raw update is measured before residual
+    scaling.  Both stream measurements are taken after masking, and the
+    normalization is deliberately applied to the residual stream after the
+    addition rather than to the branch update itself.
+    """
+
+    x = x + scale.to(dtype=update.dtype) * update
+    if mask is not None:
+        x = x * mask[..., None].to(dtype=x.dtype)
+    with torch.no_grad():
+        raw_rms = _masked_rms(update, mask)
+        post_add_rms = _masked_rms(x, mask)
+    if post_norm is not None:
+        x = post_norm(x)
+        if mask is not None:
+            x = x * mask[..., None].to(dtype=x.dtype)
+    with torch.no_grad():
+        post_norm_rms = _masked_rms(x, mask)
+    diagnostics = torch.stack(
+        (raw_rms, post_add_rms, post_norm_rms, raw_rms.new_ones(()))
+    )
+    return x, diagnostics
+
+
 class AdaptiveRMSNorm(nn.Module):
     """RMSNorm whose scale receives a zero-initialized condition delta."""
 
@@ -83,9 +142,14 @@ class FeedForward(nn.Module):
         self.register_buffer("residual_scale", torch.tensor(residual_scale), persistent=False)
 
     def forward(self, x: Tensor, condition: Tensor | None = None) -> Tensor:
-        normalized = self.norm(x) if condition is None else self.norm(x, condition)
-        update = self.down(self.dropout(self.up(normalized)))
+        update = self.update(x, condition)
         return x + self.residual_scale.to(update.dtype) * update
+
+    def update(self, x: Tensor, condition: Tensor | None = None) -> Tensor:
+        """Return the unscaled branch update used by the residual stage."""
+
+        normalized = self.norm(x) if condition is None else self.norm(x, condition)
+        return self.down(self.dropout(self.up(normalized)))
 
 
 class BoundedFiLM(nn.Module):
@@ -155,7 +219,7 @@ def signed_log_separation(delta: Tensor, max_distance: float = 1024.0) -> Tensor
     )
 
 
-def checkpoint(module: nn.Module, *args: Tensor, enabled: bool) -> Tensor:
+def checkpoint(module: nn.Module, *args: Tensor, enabled: bool) -> object:
     """Non-reentrant activation checkpointing with an inference fast path."""
 
     if not enabled or not torch.is_grad_enabled():

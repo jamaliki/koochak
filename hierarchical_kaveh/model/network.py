@@ -56,6 +56,17 @@ def _broadcast_sigma(sigma: Tensor, coordinates: Tensor) -> Tensor:
     return sigma.to(device=coordinates.device, dtype=coordinates.dtype)
 
 
+def _aggregate_residual_diagnostics(blocks: list[Tensor], device: torch.device) -> Tensor:
+    """Average residual diagnostics by attention, node-FFN, and pair-FFN."""
+
+    if not blocks:
+        return torch.zeros(3, 3, device=device, dtype=torch.float32)
+    values = torch.stack(blocks).float()
+    active = values[..., 3:4]
+    counts = active.sum(0)
+    return (values[..., :3] * active).sum(0) / counts.clamp_min(1.0)
+
+
 class ResidueInput(nn.Module):
     """Masked residue metadata, optionally including secondary structure."""
 
@@ -187,6 +198,7 @@ class HierarchicalKaveh(nn.Module):
         c = config
         trunk_depth = c.residue_encoder_depth + c.coarse_depth + c.residue_decoder_depth
         residual_scale = 1.0 / math.sqrt(2.0 * trunk_depth)
+        attention_scale = 1.0 if c.attention_residual_scale == "full" else residual_scale
 
         self.time_embedding = TimeEmbedding(14, c.condition_dim)
         self.time_ffn = FeedForward(c.condition_dim, None, 2, 0.0)
@@ -213,13 +225,15 @@ class HierarchicalKaveh(nn.Module):
         atom_args = (
             c.atom_dim, c.condition_dim, c.atom_heads, c.atom_head_dim,
             c.atom_window_radius, c.atom_ffn_expansion, c.dropout,
+            attention_scale, c.sandwich_rmsnorm,
         )
         self.atom_encoder = nn.ModuleList(AtomBlock(*atom_args) for _ in range(c.atom_encoder_depth))
         self.atom_to_residue = AtomToResidue(c.atom_dim, c.node_dim, c.condition_dim)
 
         global_args = (
             c.node_dim, c.condition_dim, c.attention_heads, c.attention_head_dim,
-            c.residue_ffn_expansion, c.dropout, residual_scale,
+            c.residue_ffn_expansion, c.dropout, residual_scale, attention_scale,
+            c.sandwich_rmsnorm,
         )
         self.residue_encoder = nn.ModuleList(
             GlobalBlock(*global_args) for _ in range(c.residue_encoder_depth)
@@ -241,6 +255,7 @@ class HierarchicalKaveh(nn.Module):
                 c.attention_heads, c.attention_head_dim,
                 c.residue_ffn_expansion, c.dropout, residual_scale, REGISTER_COUNT,
                 c.coarse_pair_position, c.coarse_pair_transition, c.pair_ffn_expansion,
+                attention_scale, c.sandwich_rmsnorm,
             )
             for _ in range(c.coarse_depth)
         )
@@ -334,9 +349,10 @@ class HierarchicalKaveh(nn.Module):
         condition: Tensor,
         mask: Tensor,
         positions: Tensor,
-    ) -> Tensor:
+    ) -> tuple[Tensor, list[Tensor]]:
+        diagnostics = []
         for block in blocks:
-            x = checkpoint(
+            x, block_diagnostics = checkpoint(
                 block,
                 x,
                 condition,
@@ -344,7 +360,8 @@ class HierarchicalKaveh(nn.Module):
                 positions,
                 enabled=self.config.checkpoint_blocks,
             )
-        return x
+            diagnostics.append(block_diagnostics)
+        return x, diagnostics
 
     def forward(
         self,
@@ -423,20 +440,23 @@ class HierarchicalKaveh(nn.Module):
             residue_condition,
             atom_mask,
         )
+        residual_diagnostics: list[Tensor] = []
         segment_index = layout.segment_index
         for block in self.atom_encoder:
-            atoms = checkpoint(
+            atoms, block_diagnostics = checkpoint(
                 block, atoms, residue_condition, atom_mask, segment_index,
                 enabled=self.config.checkpoint_blocks,
             )
+            residual_diagnostics.append(block_diagnostics)
         atom_skip = atoms
         atom_update = self.atom_to_residue(atoms, residue_condition, atom_mask)
         residue_x = residue_x + atom_update
 
         tokens = torch.cat((registers, residue_x), 1)
-        tokens = self._residue_stage(
+        tokens, block_diagnostics = self._residue_stage(
             self.residue_encoder, tokens, token_condition, token_mask, token_positions
         )
+        residual_diagnostics.extend(block_diagnostics)
         residue_skip = tokens[:, REGISTER_COUNT:]
         patches, patch_condition = self.patchify(residue_skip, residue_condition, layout)
         coarse_x = torch.cat((tokens[:, :REGISTER_COUNT], patches), 1)
@@ -466,14 +486,15 @@ class HierarchicalKaveh(nn.Module):
         intermediate_distograms = []
         for layer_index, block in enumerate(self.coarse):
             if self.config.checkpoint_blocks and torch.is_grad_enabled():
-                coarse_x, pair = torch.utils.checkpoint.checkpoint(
+                coarse_x, pair, coarse_diagnostics = torch.utils.checkpoint.checkpoint(
                     block, coarse_x, coarse_condition, pair, coarse_mask,
                     coarse_positions, layout.pair_mask, use_reentrant=False,
                 )
             else:
-                coarse_x, pair = block(
+                coarse_x, pair, coarse_diagnostics = block(
                     coarse_x, coarse_condition, pair, coarse_mask, coarse_positions, layout.pair_mask
                 )
+            residual_diagnostics.append(coarse_diagnostics)
             if compute_intermediate_distograms and layer_index + 1 < len(self.coarse):
                 if self.intermediate_distogram is None:
                     raise ValueError(
@@ -488,17 +509,19 @@ class HierarchicalKaveh(nn.Module):
 
         residue_x = self.unpatchify(residue_skip, coarse_x[:, REGISTER_COUNT:], layout)
         tokens = torch.cat((coarse_x[:, :REGISTER_COUNT], residue_x), 1)
-        tokens = self._residue_stage(
+        tokens, block_diagnostics = self._residue_stage(
             self.residue_decoder, tokens, token_condition, token_mask, token_positions
         )
+        residual_diagnostics.extend(block_diagnostics)
         residue_x = tokens[:, REGISTER_COUNT:]
 
         atoms = self.atom_output.inject(atom_skip, residue_x, atom_mask)
         for block in self.atom_decoder:
-            atoms = checkpoint(
+            atoms, block_diagnostics = checkpoint(
                 block, atoms, residue_condition, atom_mask, segment_index,
                 enabled=self.config.checkpoint_blocks,
             )
+            residual_diagnostics.append(block_diagnostics)
         raw_update = self.atom_output.decode(atoms, atom_mask)
         aatype_logits = self.aatype_output(atoms, atom_mask, residue_count)
         secondary_structure_logits = (
@@ -513,6 +536,9 @@ class HierarchicalKaveh(nn.Module):
         c_out = sigma * self.config.sigma_data / denominator.sqrt()
         predicted_coordinates = c_skip[..., None] * raw_coordinates + c_out[..., None] * raw_update
         predicted_coordinates = predicted_coordinates * atom_mask[..., None].to(predicted_coordinates.dtype)
+        residual_summary = _aggregate_residual_diagnostics(
+            residual_diagnostics, predicted_coordinates.device
+        )
 
         return Prediction(
             coordinates=predicted_coordinates,
@@ -520,6 +546,7 @@ class HierarchicalKaveh(nn.Module):
             distogram=self.distogram(pair, layout) if compute_distogram else None,
             intermediate_distograms=tuple(intermediate_distograms),
             secondary_structure_logits=secondary_structure_logits,
+            residual_diagnostics=residual_summary,
         )
 
     def denoise(

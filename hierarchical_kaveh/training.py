@@ -54,6 +54,17 @@ _BATCH_TELEMETRY = (
     "koochak_prefetch_prepare_submit_s",
 )
 
+_RESIDUAL_DIAGNOSTIC_NAMES = (
+    "attention",
+    "node_ffn",
+    "pair_ffn",
+)
+_RESIDUAL_DIAGNOSTIC_COLUMNS = (
+    "branch_update_rms",
+    "post_add_stream_rms",
+    "post_norm_stream_rms",
+)
+
 
 def denoiser_input(
     batch: Mapping[str, Any],
@@ -180,6 +191,14 @@ class PallatomTrainingStep:
             "node_slot_count": batch["model_atom_mask"].sum(),
             "supervised_slot_count": batch["coordinate_mask"].sum(),
         }
+        if output.residual_diagnostics is not None:
+            if output.residual_diagnostics.shape != (3, 3):
+                raise ValueError("residual diagnostics must have shape [3, 3]")
+            for row, name in enumerate(_RESIDUAL_DIAGNOSTIC_NAMES):
+                for column, metric_name in enumerate(_RESIDUAL_DIAGNOSTIC_COLUMNS):
+                    metrics[f"residual_{name}_{metric_name}"] = output.residual_diagnostics[
+                        row, column
+                    ].detach()
         if "intermediate_distogram_loss" in losses:
             metrics["intermediate_distogram_loss"] = losses["intermediate_distogram_loss"].detach()
         metrics.update({key: batch[key] for key in _BATCH_TELEMETRY if key in batch})

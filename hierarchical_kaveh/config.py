@@ -35,6 +35,14 @@ class ModelConfig:
     pair_ffn_expansion: int = 4
     atom_ffn_expansion: int = 2
     dropout: float = 0.2
+    # Attention outputs historically enter each residual stream at full
+    # scale.  ``depth`` uses the same depth-dependent scale as the residue
+    # and coarse FFNs, across atom, residue, and coarse attention blocks.
+    attention_residual_scale: str = "full"
+    # When enabled, normalize the residual stream after each attention and
+    # FFN addition.  The norm is non-affine and is applied after the add; it
+    # never rescales a raw zero-initialized branch update.
+    sandwich_rmsnorm: bool = False
     patchify_mode: str = "masked_pool"
     coarse_pair_position: str = "after_node"
     coarse_pair_transition: bool = False
@@ -96,6 +104,8 @@ class ModelConfig:
             raise ValueError("atom_heads * atom_head_dim must equal atom_dim")
         if self.patchify_mode not in {"masked_pool", "flat_linear"}:
             raise ValueError("patchify_mode must be 'masked_pool' or 'flat_linear'")
+        if self.attention_residual_scale not in {"full", "depth"}:
+            raise ValueError("attention_residual_scale must be 'full' or 'depth'")
         if self.coarse_pair_position not in {"after_node", "before_attention"}:
             raise ValueError(
                 "coarse_pair_position must be 'after_node' or 'before_attention'"

@@ -15,7 +15,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--stage",
-        choices=("sample", "esmfold", "analysis", "canary", "attestation"),
+        choices=("preflight", "sample", "esmfold", "analysis", "canary", "attestation"),
         required=True,
     )
     parser.add_argument("--artifact-id", required=True)
