@@ -287,6 +287,7 @@ def collate_samples(
         "t": 0.0,
         "model_atom_mask": False,
         "coordinate_mask": False,
+        "resolved_atom_mask": False,
         "residue_mask": False,
         "aatype": 21,
         "aatype_input": 21,
@@ -303,7 +304,15 @@ def collate_samples(
     def padded(key: str) -> Tensor:
         values = []
         for sample in samples:
-            value = sample[key]
+            if key in sample:
+                value = sample[key]
+            elif key == "resolved_atom_mask":
+                # Keep direct callers built against the pre-sidecar sample
+                # contract compatible; shard-reader samples carry the exact
+                # resolved mask through corrupt_structure.
+                value = sample["coordinate_mask"]
+            else:
+                raise KeyError(f"sample is missing required field: {key}")
             out = torch.full(
                 (target, *value.shape[1:]),
                 pad_values[key],

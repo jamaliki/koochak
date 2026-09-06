@@ -199,6 +199,10 @@ class HierarchicalKaveh(nn.Module):
         trunk_depth = c.residue_encoder_depth + c.coarse_depth + c.residue_decoder_depth
         residual_scale = 1.0 / math.sqrt(2.0 * trunk_depth)
         attention_scale = 1.0 if c.attention_residual_scale == "full" else residual_scale
+        atom_ffn_scale = 1.0 if c.atom_ffn_residual_scale == "full" else residual_scale
+        atom_to_residue_scale = (
+            1.0 if c.atom_to_residue_residual_scale == "full" else residual_scale
+        )
 
         self.time_embedding = TimeEmbedding(14, c.condition_dim)
         self.time_ffn = FeedForward(c.condition_dim, None, 2, 0.0)
@@ -225,10 +229,19 @@ class HierarchicalKaveh(nn.Module):
         atom_args = (
             c.atom_dim, c.condition_dim, c.atom_heads, c.atom_head_dim,
             c.atom_window_radius, c.atom_ffn_expansion, c.dropout,
-            attention_scale, c.sandwich_rmsnorm,
+            attention_scale, c.sandwich_rmsnorm, atom_ffn_scale,
         )
         self.atom_encoder = nn.ModuleList(AtomBlock(*atom_args) for _ in range(c.atom_encoder_depth))
-        self.atom_to_residue = AtomToResidue(c.atom_dim, c.node_dim, c.condition_dim)
+        self.atom_to_residue = AtomToResidue(
+            c.atom_dim,
+            c.node_dim,
+            c.condition_dim,
+            mean_rmsnorm=c.atom_to_residue_mean_rmsnorm,
+            residual_scale=atom_to_residue_scale,
+            transport=c.atom_to_residue_transport,
+            sidechain_sigma_full=c.atom_to_residue_sidechain_sigma_full,
+            sidechain_sigma_zero=c.atom_to_residue_sidechain_sigma_zero,
+        )
 
         global_args = (
             c.node_dim, c.condition_dim, c.attention_heads, c.attention_head_dim,
@@ -449,7 +462,12 @@ class HierarchicalKaveh(nn.Module):
             )
             residual_diagnostics.append(block_diagnostics)
         atom_skip = atoms
-        atom_update = self.atom_to_residue(atoms, residue_condition, atom_mask)
+        atom_update = self.atom_to_residue(
+            atoms,
+            residue_condition,
+            atom_mask,
+            sigma,
+        )
         residue_x = residue_x + atom_update
 
         tokens = torch.cat((registers, residue_x), 1)

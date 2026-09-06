@@ -183,6 +183,43 @@ def aatype_marginal_js(
     return torch.where(denominator > 0, js, logits.sum() * 0.0)
 
 
+def smooth_lddt_sigma_weights(
+    sigma: Tensor,
+    *,
+    sigma_data: float = 16.0,
+    sigma_max: float | None = None,
+    c_out_compensation: bool = False,
+) -> Tensor:
+    """Return per-example lDDT gates and EDM ``c_out`` compensation weights.
+
+    The model predicts ``c_skip * x_t + c_out * raw_update``.  Multiplying
+    lDDT by ``1 / c_out`` cancels its one raw-update chain-rule factor, giving
+    ``dL/ddenoised_coordinates`` rather than
+    ``c_out * dL/ddenoised_coordinates``.  The tiny denominator clamp only
+    prevents division by zero at sigma zero; it does not cap the exact
+    compensation at positive sigma.  This helper changes only the lDDT scalar
+    weighting; it never changes the coordinate prediction itself.
+    """
+
+    if sigma.ndim != 1:
+        raise ValueError("sigma must have shape [batch]")
+    if sigma_data <= 0:
+        raise ValueError("sigma_data must be positive")
+    if sigma_max is not None and sigma_max <= 0:
+        raise ValueError("sigma_max must be positive")
+    weights = torch.ones_like(sigma, dtype=torch.float32)
+    if sigma_max is not None:
+        weights = weights * sigma.float().le(float(sigma_max))
+    if c_out_compensation:
+        sigma_float = sigma.float()
+        sigma_data_float = float(sigma_data)
+        c_out = sigma_float * sigma_data_float / (
+            sigma_float.square() + sigma_data_float**2
+        ).sqrt()
+        weights = weights / c_out.clamp_min(torch.finfo(torch.float32).tiny)
+    return weights
+
+
 def secondary_structure_cross_entropy(
     logits: Tensor,
     target: Tensor,
@@ -209,14 +246,29 @@ def smooth_lddt_loss(
     cutoff: float = 15.0,
     chunk_size: int = 128,
     checkpoint_chunks: bool = False,
+    sigma: Tensor | None = None,
+    sigma_data: float = 16.0,
+    sigma_max: float | None = None,
+    c_out_compensation: bool = False,
 ) -> Tensor:
-    """Exact all-atom smooth lDDT, evaluated in bounded query chunks."""
+    """Exact smooth lDDT with optional sigma gating and EDM compensation.
+
+    ``atom_mask`` is deliberately supplied by the caller: the historical
+    default can include virtual Atom14 slots, while a causal intervention can
+    pass the resolved physical-atom mask without changing coordinate MSE.
+    When ``sigma_max`` is set, inactive examples are excluded from the
+    reduction denominator; compensation alone keeps the ordinary batch mean.
+    """
 
     if prediction.shape != target.shape or atom_mask.shape != prediction.shape[:-1]:
         raise ValueError("smooth lDDT coordinate and mask shapes do not match")
     if cutoff <= 0 or chunk_size <= 0:
         raise ValueError("smooth lDDT cutoff and chunk_size must be positive")
     batch = prediction.shape[0]
+    if (sigma_max is not None or c_out_compensation) and sigma is None:
+        raise ValueError("sigma is required for lDDT gating or c_out compensation")
+    if sigma is not None and sigma.shape != (batch,):
+        raise ValueError("sigma must have shape [batch]")
     predicted = prediction.float().reshape(batch, -1, 3)
     truth = target.float().reshape(batch, -1, 3)
     valid = atom_mask.bool().reshape(batch, -1)
@@ -270,7 +322,22 @@ def smooth_lddt_loss(
 
     lddt = scores / counts.clamp_min(1.0)
     loss = torch.where(counts > 0, 1.0 - lddt, torch.zeros_like(lddt))
-    return loss.mean()
+    if sigma_max is not None or c_out_compensation:
+        weights = smooth_lddt_sigma_weights(
+            sigma,
+            sigma_data=sigma_data,
+            sigma_max=sigma_max,
+            c_out_compensation=c_out_compensation,
+        ).to(device=loss.device, dtype=loss.dtype)
+        loss = loss * weights
+    if sigma_max is None:
+        # With compensation alone, every batch item remains active and the
+        # historical batch mean is unchanged.
+        return loss.mean()
+    active = sigma.to(device=loss.device).float().le(float(sigma_max))
+    active_count = active.sum()
+    reduced = loss.sum() / active_count.clamp_min(1.0)
+    return torch.where(active_count > 0, reduced, loss.new_zeros(()))
 
 
 def _distogram_targets(
@@ -376,13 +443,24 @@ def compute_losses(
             batch["residue_mask"],
             sample_weights=aatype_weights,
         )
+    lddt_atom_mask = batch["coordinate_mask"]
+    if loss_config.smooth_lddt_resolved_atom_only:
+        if "resolved_atom_mask" not in batch:
+            raise ValueError(
+                "resolved_atom_mask is required for resolved-atom-only lDDT"
+            )
+        lddt_atom_mask = batch["resolved_atom_mask"]
     smooth_lddt = smooth_lddt_loss(
         prediction.coordinates,
         batch["x0"],
-        batch["coordinate_mask"],
+        lddt_atom_mask,
         cutoff=loss_config.smooth_lddt_cutoff,
         chunk_size=loss_config.smooth_lddt_chunk_size,
         checkpoint_chunks=loss_config.smooth_lddt_checkpoint,
+        sigma=batch["sigma"],
+        sigma_data=model_config.sigma_data,
+        sigma_max=loss_config.smooth_lddt_sigma_max,
+        c_out_compensation=loss_config.smooth_lddt_c_out_compensation,
     )
     if prediction.distogram is None and loss_config.distogram_weight != 0.0:
         raise ValueError("Prediction.distogram is required when distogram_weight is nonzero")
@@ -483,6 +561,7 @@ __all__ = [
     "distogram_cross_entropy",
     "edm_coordinate_loss",
     "smooth_lddt_loss",
+    "smooth_lddt_sigma_weights",
     "SS_ALPHABET",
     "secondary_structure_cross_entropy",
 ]

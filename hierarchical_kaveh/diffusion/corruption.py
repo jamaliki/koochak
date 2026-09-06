@@ -149,14 +149,25 @@ def corrupt_structure(
     coordinates = torch.as_tensor(clean["atom14_coordinates"]).to(torch.float32)
     model_atom_mask = torch.as_tensor(clean["model_atom_mask"]).to(torch.bool)
     coordinate_mask = torch.as_tensor(clean["coordinate_mask"]).to(torch.bool)
+    # Older callers may not provide the reader's physical-resolution mask;
+    # falling back preserves their historical all-coordinate behavior.  The
+    # shard-reader path always provides this key and therefore retains the
+    # distinction between resolved atoms and virtual Atom14 slots.
+    resolved_atom_mask = torch.as_tensor(
+        clean.get("resolved_atom_mask", coordinate_mask)
+    ).to(torch.bool)
     if coordinates.ndim != 3 or coordinates.shape[-2:] != (14, 3):
         raise ValueError("atom14_coordinates must have shape [N,14,3]")
     if model_atom_mask.shape != coordinates.shape[:-1]:
         raise ValueError("model_atom_mask must have shape [N,14]")
     if coordinate_mask.shape != coordinates.shape[:-1]:
         raise ValueError("coordinate_mask must have shape [N,14]")
+    if resolved_atom_mask.shape != coordinates.shape[:-1]:
+        raise ValueError("resolved_atom_mask must have shape [N,14]")
     if bool((coordinate_mask & ~model_atom_mask).any()):
         raise ValueError("coordinate_mask must be a subset of model_atom_mask")
+    if bool((resolved_atom_mask & ~coordinate_mask).any()):
+        raise ValueError("resolved_atom_mask must be a subset of coordinate_mask")
     sigma_scalar = torch.as_tensor(
         sigma,
         device=coordinates.device,
@@ -186,6 +197,7 @@ def corrupt_structure(
         "t": torch.full_like(model_atom_mask, sigma_scalar, dtype=target.dtype),
         "model_atom_mask": model_atom_mask,
         "coordinate_mask": coordinate_mask,
+        "resolved_atom_mask": resolved_atom_mask,
         "residue_mask": residue_mask,
         "aatype": aatype,
         "aatype_input": torch.where(

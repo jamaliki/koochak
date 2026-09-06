@@ -39,6 +39,17 @@ class ModelConfig:
     # scale.  ``depth`` uses the same depth-dependent scale as the residue
     # and coarse FFNs, across atom, residue, and coarse attention blocks.
     attention_residual_scale: str = "full"
+    # Atom FFNs historically enter their residual stream at full scale.  The
+    # depth option uses the same depth-dependent scale as the residue and
+    # coarse FFNs without changing the default path.
+    atom_ffn_residual_scale: str = "full"
+    # Controls for the atom -> residue transport path.  All defaults preserve
+    # the original direct Atom14 computation.
+    atom_to_residue_mean_rmsnorm: bool = False
+    atom_to_residue_residual_scale: str = "full"
+    atom_to_residue_transport: str = "all_atom"
+    atom_to_residue_sidechain_sigma_full: float = 2.0
+    atom_to_residue_sidechain_sigma_zero: float = 5.0
     # When enabled, normalize the residual stream after each attention and
     # FFN addition.  The norm is non-affine and is applied after the add; it
     # never rescales a raw zero-initialized branch update.
@@ -106,6 +117,24 @@ class ModelConfig:
             raise ValueError("patchify_mode must be 'masked_pool' or 'flat_linear'")
         if self.attention_residual_scale not in {"full", "depth"}:
             raise ValueError("attention_residual_scale must be 'full' or 'depth'")
+        if self.atom_ffn_residual_scale not in {"full", "depth"}:
+            raise ValueError("atom_ffn_residual_scale must be 'full' or 'depth'")
+        if self.atom_to_residue_residual_scale not in {"full", "depth"}:
+            raise ValueError(
+                "atom_to_residue_residual_scale must be 'full' or 'depth'"
+            )
+        if self.atom_to_residue_transport not in {"all_atom", "backbone_first"}:
+            raise ValueError(
+                "atom_to_residue_transport must be 'all_atom' or 'backbone_first'"
+            )
+        if not (
+            0.0 <= self.atom_to_residue_sidechain_sigma_full
+            < self.atom_to_residue_sidechain_sigma_zero
+        ):
+            raise ValueError(
+                "atom-to-residue sidechain sigma bounds must satisfy "
+                "0 <= full < zero"
+            )
         if self.coarse_pair_position not in {"after_node", "before_attention"}:
             raise ValueError(
                 "coarse_pair_position must be 'after_node' or 'before_attention'"
@@ -277,6 +306,12 @@ class LossConfig:
     smooth_lddt_cutoff: float = 15.0
     smooth_lddt_chunk_size: int = 128
     smooth_lddt_checkpoint: bool = False
+    # Optional causal screens for the direct Atom14 geometry objective.  The
+    # defaults reproduce the historical all-sigma, all-coordinate-mask,
+    # uncorrected lDDT objective.
+    smooth_lddt_sigma_max: float | None = None
+    smooth_lddt_resolved_atom_only: bool = False
+    smooth_lddt_c_out_compensation: bool = False
     distogram_drop_diagonal: bool = False
 
     def __post_init__(self) -> None:
@@ -300,6 +335,8 @@ class LossConfig:
             raise ValueError("loss polar weight and lDDT cutoff must be positive")
         if self.smooth_lddt_chunk_size <= 0:
             raise ValueError("loss.smooth_lddt_chunk_size must be positive")
+        if self.smooth_lddt_sigma_max is not None and self.smooth_lddt_sigma_max <= 0:
+            raise ValueError("loss.smooth_lddt_sigma_max must be positive")
         if self.intermediate_distogram_weight < 0:
             raise ValueError("loss intermediate distogram weight must be non-negative")
         if self.secondary_structure_weight < 0:

@@ -7,17 +7,25 @@ import torch
 
 import hierarchical_kaveh.data.shards as shard_module
 import hierarchical_kaveh.data.pipeline as pipeline_module
-from hierarchical_kaveh.config import DataConfig, DataMixtureConfig, DiffusionConfig
+from hierarchical_kaveh.config import (
+    DataConfig,
+    DataMixtureConfig,
+    DiffusionConfig,
+    LossConfig,
+    ModelConfig,
+)
 from hierarchical_kaveh.data import (
     ShardCache,
     build_train_dataloader,
+    collate_samples,
     index_shards,
     load_sample,
     shard_references,
 )
-from hierarchical_kaveh.diffusion import corrupt_structure
+from hierarchical_kaveh.diffusion import compute_losses, corrupt_structure, smooth_lddt_loss
 from hierarchical_kaveh.residue_constants import ATOM14_NAMES, RESTYPES, physical_atom14_mask
 from scripts.materialize_ca_distance_exclusions import materialize_metadata
+from hierarchical_kaveh.types import DenoiserInput, Prediction
 
 
 def _ragged_fixture(tmp_path):
@@ -604,6 +612,63 @@ def test_corruption_preserves_secondary_structure_targets_and_inputs(tmp_path) -
     )
     assert torch.equal(sample["secondary_structure"], clean["secondary_structure"])
     assert torch.equal(sample["secondary_structure_input"], clean["secondary_structure_input"])
+
+
+def test_resolved_mask_survives_reader_corruption_collation_and_resolved_lddt(tmp_path) -> None:
+    clean = load_sample(index_shards(_ragged_fixture(tmp_path), min_length=4)[0])
+    sample = corrupt_structure(
+        clean,
+        sigma=0.25,
+        generator=torch.Generator().manual_seed(7),
+        translation_std=0.0,
+    )
+    batch = collate_samples([sample], pad_to=8, patch_capacity=2)
+    sample_length = len(clean["aatype"])
+
+    assert torch.equal(
+        batch["resolved_atom_mask"][0, :sample_length], clean["resolved_atom_mask"]
+    )
+    assert not batch["resolved_atom_mask"][0, sample_length:].any()
+
+    prediction_coordinates = batch["x0"].clone()
+    virtual_slots = batch["model_atom_mask"] & ~batch["resolved_atom_mask"]
+    prediction_coordinates[virtual_slots] += 10.0
+    prediction = Prediction(
+        coordinates=prediction_coordinates,
+        aatype_logits=torch.zeros(1, batch["x0"].shape[1], 20),
+    )
+    inputs = DenoiserInput(
+        coordinates=batch["x_t"],
+        sigma=batch["t"],
+        residue_index=batch["res_idx"],
+        chain_index=batch["chain_idx"],
+        chain_break=batch["chain_breaks_per_residue"],
+        atom_mask=batch["model_atom_mask"],
+        aatype_input=batch["aatype_input"],
+    )
+    losses = compute_losses(
+        prediction,
+        inputs,
+        batch,
+        LossConfig(
+            align_coordinate_loss=False,
+            aatype_weight=0.0,
+            smooth_lddt_weight=1.0,
+            smooth_lddt_resolved_atom_only=True,
+            distogram_weight=0.0,
+        ),
+        ModelConfig(),
+    )
+    expected_lddt = smooth_lddt_loss(
+        batch["x0"],
+        batch["x0"],
+        batch["resolved_atom_mask"],
+        chunk_size=7,
+    )
+
+    torch.testing.assert_close(losses["smooth_lddt_loss"], expected_lddt)
+    assert losses["coordinate_loss"] > 0
+    assert torch.isfinite(losses["smooth_lddt_loss"])
 
 
 def test_standard_edm_noise_has_configured_variance(tmp_path) -> None:

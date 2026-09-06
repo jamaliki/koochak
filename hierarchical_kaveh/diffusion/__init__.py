@@ -15,6 +15,7 @@ from .losses import (
     edm_coordinate_loss,
     secondary_structure_cross_entropy,
     smooth_lddt_loss,
+    smooth_lddt_sigma_weights,
 )
 from .schedules import sample_training_sigma, sigma_from_probability
 
@@ -33,4 +34,5 @@ __all__ = [
     "sample_training_sigma",
     "sigma_from_probability",
     "smooth_lddt_loss",
+    "smooth_lddt_sigma_weights",
 ]
