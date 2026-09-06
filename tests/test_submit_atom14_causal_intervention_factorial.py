@@ -149,3 +149,29 @@ def test_required_path_check_reports_only_missing_paths(tmp_path: Path) -> None:
     present.mkdir()
     missing = tmp_path / "missing"
     assert launcher._missing_paths((present, missing)) == [str(missing)]
+
+
+def test_preflight_recovery_preserves_task_and_artifact_but_isolates_run_dir(tmp_path: Path) -> None:
+    commit = "d" * 40
+    output_root = tmp_path / "output"
+    cell = launcher.CELLS[8]
+    task = launcher.build_preflight_recovery(
+        cell,
+        code_commit=commit,
+        attempt=2,
+        parent_cells=_parents(tmp_path),
+        output_root=output_root,
+    )
+    assert task.task_id == f"preflight-{cell.cell_id}"
+    assert task.run.run_dir == str(
+        output_root / "managed" / "recovery" / task.task_id / "attempt-2"
+    )
+    assert task.run.declared_outputs[0].artifact_id == f"preflight/{cell.cell_id}/report.json"
+    assert task.run.declared_outputs[0].path == str(
+        output_root / "preflight" / cell.cell_id / "report.json"
+    )
+    assert task.to_scruffy_spec(
+        request_id="recovery",
+        workflow_id=f"hk-atom14-causal-intervention-50k-L128-{commit[:7]}",
+        project_id=launcher.PROJECT_ID,
+    )["recovery"] == launcher.RECOVERY

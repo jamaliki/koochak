@@ -493,6 +493,69 @@ def _cell_tasks(cell: Cell, *, workflow: str, code_commit: str, output_root: Pat
     return tasks, diff, (cell.cell_id, analysis_file, analysis_id)
 
 
+def build_preflight_recovery(
+    cell: Cell,
+    *,
+    code_commit: str,
+    attempt: int,
+    parent_cells: Mapping[str, Mapping[str, Any]] | None = None,
+    output_root: Path | None = None,
+) -> PreparedTask:
+    """Rebuild one terminal preflight under its original workflow/task identity."""
+
+    if attempt < 2:
+        raise ValueError("preflight recovery attempt must be at least 2")
+    parent_cells = PARENT_CELLS if parent_cells is None else parent_cells
+    output_root = (
+        REMOTE_RUN_ROOT / "atom14-causal-intervention-50k-L128" / code_commit
+        if output_root is None
+        else output_root
+    )
+    workflow = f"hk-atom14-causal-intervention-50k-L128-{code_commit[:7]}"
+    task_id = f"preflight-{cell.cell_id}"
+    report_file = output_root / "preflight" / cell.cell_id / "report.json"
+    artifact = _output(
+        f"preflight/{cell.cell_id}/report.json",
+        report_file,
+        stage="preflight",
+        workflow=workflow,
+        task=task_id,
+        kind="file",
+        code_commit=code_commit,
+        expected_records=1,
+    )
+    run_dir = output_root / "managed" / "recovery" / task_id / f"attempt-{attempt}"
+    command = [
+        "{cwd}/scripts/atom14_objective_preflight.py",
+        "--config", "{config}",
+        "--cell-id", cell.cell_id,
+        "--output", str(report_file),
+        "--seed", str(SIGMA_PROBE_SEED),
+        "--sample-count", str(SIGMA_PROBE_SAMPLES),
+        "--run-training-gate",
+        "--expected-workers", "8",
+        "--warmup-steps", "16",
+        "--minimum-timed-rows", "16",
+    ]
+    if cell.objective:
+        command.append("--objective-repair")
+    profile = _load_profile(GPU_PROFILE)
+    run = _stage_run(
+        stage="preflight",
+        task=task_id,
+        workflow=workflow,
+        code_commit=code_commit,
+        artifact=artifact,
+        run_dir=run_dir,
+        profile=profile,
+        cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{code_commit[:7]}"),
+        command=command,
+        base_config=_parent_config(cell, parent_cells),
+        patches=_preflight_patches(cell, run_dir),
+    )
+    return PreparedTask(task_id, run, PREFLIGHT_RESOURCES, recovery=RECOVERY)
+
+
 def build_workflow(code_commit: str, *, parent_cells: Mapping[str, Mapping[str, Any]] | None = None, output_root: Path | None = None) -> tuple[PreparedWorkflow, list[dict[str, Any]]]:
     parent_cells = PARENT_CELLS if parent_cells is None else parent_cells
     short = code_commit[:7]
