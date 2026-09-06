@@ -585,6 +585,10 @@ REQUIRED_FEATURE_MARKERS = {
 }
 
 
+def _missing_paths(items: Sequence[Path]) -> list[str]:
+    return [str(item) for item in items if not item.exists()]
+
+
 def _validate_online(code_commit: str) -> dict[str, Any]:
     if _git("status", "--porcelain"):
         raise RuntimeError("submission requires a clean committed checkout")
@@ -593,7 +597,7 @@ def _validate_online(code_commit: str) -> dict[str, Any]:
     expected_checkout = REMOTE_CODE_ROOT / f"hierarchical_kaveh_{code_commit[:7]}"
     if REPO_ROOT.resolve() != expected_checkout:
         raise RuntimeError(f"run from the independent checkout {expected_checkout}")
-    missing = [str(item) for item in (SCRUFFY_ROOT, SCRUFFY_SITE, METADATA, PROGRES_DATA)]
+    missing = _missing_paths((SCRUFFY_ROOT, SCRUFFY_SITE, METADATA, PROGRES_DATA))
     missing.extend(str(details["config"]) for details in PARENT_CELLS.values() if not Path(details["config"]).is_file())
     missing.extend(str(PROGRES_DATA / name) for name in ("trained_model.pt", "cath40.pt") if not (PROGRES_DATA / name).is_file())
     for relative, markers in REQUIRED_FEATURE_MARKERS.items():

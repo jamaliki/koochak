@@ -142,3 +142,10 @@ def test_resolved_diff_fails_closed_on_unapproved_change(tmp_path: Path) -> None
     child["optimizer"]["lr"] = 0.002
     with pytest.raises(AssertionError, match="unexpected resolved-config differences"):
         launcher._resolved_diff(parent_file, child, launcher.CELLS[0])
+
+
+def test_required_path_check_reports_only_missing_paths(tmp_path: Path) -> None:
+    present = tmp_path / "present"
+    present.mkdir()
+    missing = tmp_path / "missing"
+    assert launcher._missing_paths((present, missing)) == [str(missing)]
