@@ -75,7 +75,7 @@ def _manifest(run) -> dict[str, object]:
     return json.loads(artifact.content)
 
 
-def test_builds_exact_16_cell_82_task_dag_without_recovery(tmp_path: Path) -> None:
+def test_builds_exact_16_cell_82_task_dag_with_robust_recovery(tmp_path: Path) -> None:
     workflow, diffs = launcher.build_workflow(
         "a" * 40, parent_cells=_parents(tmp_path), output_root=tmp_path / "output"
     )
@@ -85,8 +85,14 @@ def test_builds_exact_16_cell_82_task_dag_without_recovery(tmp_path: Path) -> No
     assert len(workflow.tasks) == 82
     assert counts == Counter({"preflight": 16, "train": 16, "sample": 16, "esmfold": 16, "analysis": 16, "attest": 1, "aggregate": 1})
     assert len(diffs) == 16
-    assert all(task.recovery is None for task in workflow.tasks)
-    assert all("recovery" not in task.to_scruffy_spec(request_id=workflow.request_id, workflow_id=workflow.workflow_id, project_id=workflow.project_id) for task in workflow.tasks)
+    assert all(
+        task.to_scruffy_spec(
+            request_id=workflow.request_id,
+            workflow_id=workflow.workflow_id,
+            project_id=workflow.project_id,
+        )["recovery"] == launcher.RECOVERY
+        for task in workflow.tasks
+    )
 
 
 def test_factor_off_cells_do_not_materialize_factor_keys_and_on_cells_patch_exactly(tmp_path: Path) -> None:
@@ -119,6 +125,9 @@ def test_preflight_command_is_objective_specific_and_exactly_one_checkpoint_is_e
     control_argv = _manifest(preflights[control_id])["argv"]
     assert "--objective-repair" in objective_argv
     assert "--objective-repair" not in control_argv
+    assert "--run-training-gate" in objective_argv
+    assert "--run-training-gate" in control_argv
+    assert launcher.PREFLIGHT_STEPS == 64
     assert launcher.CHECKPOINT_STEP == launcher.MAX_STEPS == 50_000
     assert launcher.TRAIN_CHECKPOINT_INTERVAL == 10_000
     sample_task = next(task for task in workflow.tasks if task.task_id.startswith("sample-"))

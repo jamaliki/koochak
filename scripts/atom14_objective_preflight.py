@@ -14,6 +14,8 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -25,6 +27,8 @@ SCHEMA = "hierarchical-kaveh.atom14-objective-preflight.v1"
 DEFAULT_SEED = 20260906
 DEFAULT_SAMPLE_COUNT = 4096
 OBJECTIVE_SIGMA_MAX = 3.0
+
+
 def _stats(values: torch.Tensor) -> dict[str, float]:
     values = values.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
     if not values.numel() or not bool(torch.isfinite(values).all()):
@@ -182,18 +186,54 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--sample-count", type=int, default=DEFAULT_SAMPLE_COUNT)
     parser.add_argument("--objective-repair", action="store_true")
+    parser.add_argument("--run-training-gate", action="store_true")
+    parser.add_argument("--expected-workers", type=int, default=8)
+    parser.add_argument("--warmup-steps", type=int, default=16)
+    parser.add_argument("--minimum-timed-rows", type=int, default=16)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    report = build_report(
+    objective_report = build_report(
         args.config,
         cell_id=args.cell_id,
         objective_repair=args.objective_repair,
         seed=args.seed,
         sample_count=args.sample_count,
     )
+    report = objective_report
+    if args.run_training_gate:
+        training_report_file = args.output.with_name("training_gate.json")
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("stability_preflight.py")),
+                "--config",
+                str(args.config),
+                "--output",
+                str(training_report_file),
+                "--cell-id",
+                args.cell_id,
+                "--expected-workers",
+                str(args.expected_workers),
+                "--warmup-steps",
+                str(args.warmup_steps),
+                "--minimum-timed-rows",
+                str(args.minimum_timed_rows),
+            ],
+            check=True,
+        )
+        training_report = json.loads(training_report_file.read_text(encoding="utf-8"))
+        if training_report.get("passed") is not True:
+            raise RuntimeError("production-shaped training gate did not pass")
+        report = {
+            "schema": "hierarchical-kaveh.atom14-combined-preflight.v1",
+            "cell_id": args.cell_id,
+            "passed": True,
+            "training_gate": training_report,
+            "objective_weight_probe": objective_report,
+        }
     _write_json(args.output, report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

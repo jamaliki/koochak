@@ -10,6 +10,7 @@ import torch
 from scripts.atom14_objective_preflight import (
     build_report,
     inverse_c_out_weight,
+    main,
 )
 
 
@@ -69,3 +70,29 @@ def test_objective_preflight_fails_when_repair_config_is_not_exact(tmp_path: Pat
     OmegaConf.save(document, file)
     with pytest.raises(ValueError, match="objective repair config mismatch"):
         build_report(file, cell_id="cell-o1r0t0", objective_repair=True, sample_count=32)
+
+
+def test_combined_preflight_requires_and_embeds_passing_training_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "combined.json"
+
+    def fake_run(arguments: list[str], *, check: bool) -> None:
+        assert check is True
+        training_output = Path(arguments[arguments.index("--output") + 1])
+        training_output.write_text('{"passed": true, "finite_loss": true}\n')
+
+    monkeypatch.setattr("scripts.atom14_objective_preflight.subprocess.run", fake_run)
+    assert main([
+        "--config", str(_config(tmp_path)),
+        "--cell-id", "cell-o1r0t0",
+        "--output", str(output),
+        "--sample-count", "32",
+        "--objective-repair",
+        "--run-training-gate",
+    ]) == 0
+    report = __import__("json").loads(output.read_text())
+    assert report["schema"] == "hierarchical-kaveh.atom14-combined-preflight.v1"
+    assert report["passed"] is True
+    assert report["training_gate"]["finite_loss"] is True
+    assert report["objective_weight_probe"]["lddt"]["weight_formula"] == "1 / c_out"

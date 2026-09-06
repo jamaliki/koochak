@@ -94,6 +94,7 @@ SAMPLE_BATCH_SIZE = 8
 SAMPLE_SEED = 20260901
 SIGMA_PROBE_SEED = 20260906
 SIGMA_PROBE_SAMPLES = 4096
+PREFLIGHT_STEPS = 64
 
 OBJECTIVE_VALUES = {
     "loss.smooth_lddt_sigma_max": 3.0,
@@ -121,12 +122,17 @@ TRAIN_RESOURCES = {
 }
 PREFLIGHT_RESOURCES = {
     "nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14,
-    "memory_gb_per_node": 240, "time_limit_seconds": 3_600,
+    "memory_gb_per_node": 240, "time_limit_seconds": 21_600,
 }
 RESOURCES = {
     "sample": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 14, "memory_gb_per_node": 128, "time_limit_seconds": 21_600},
     "esmfold": {"nodes": 1, "gpus_per_node": 1, "cpus_per_node": 8, "memory_gb_per_node": 128, "time_limit_seconds": 43_200},
     "cpu": {"nodes": 1, "gpus_per_node": 0, "cpus_per_node": 8, "memory_gb_per_node": 32, "time_limit_seconds": 14_400},
+}
+RECOVERY = {
+    "max_attempts": 3,
+    "retry_on": ["allocation_replaced", "allocation_incarnation_changed", "evacuated"],
+    "evacuation": {"signal": "USR1", "grace_seconds": 600},
 }
 
 
@@ -208,6 +214,16 @@ def _trainer_patches(cell: Cell, run_dir: Path) -> list[ConfigPatch]:
 
 def _evaluation_patches(cell: Cell, run_dir: Path) -> list[ConfigPatch]:
     return [*_factor_patches(cell), *_logging_patches(run_dir)]
+
+
+def _preflight_patches(cell: Cell, run_dir: Path) -> list[ConfigPatch]:
+    return [
+        *_evaluation_patches(cell, run_dir),
+        ConfigPatch("train.max_steps", PREFLIGHT_STEPS),
+        ConfigPatch("train.log_every", 1),
+        ConfigPatch("train.ckpt_every", TRAIN_CHECKPOINT_INTERVAL),
+        ConfigPatch("train.save_final", False),
+    ]
 
 
 def _config_container(prepared: PreparedRun) -> dict[str, Any]:
@@ -379,23 +395,25 @@ def _cell_tasks(cell: Cell, *, workflow: str, code_commit: str, output_root: Pat
     tasks: list[PreparedTask] = []
 
     preflight_id = f"preflight-{cell.cell_id}"
-    preflight_file = output_root / "preflight" / cell.cell_id / "sigma.json"
-    preflight_output = _output(f"preflight/{cell.cell_id}/sigma.json", preflight_file, stage="analysis", workflow=workflow, task=preflight_id, kind="file", code_commit=code_commit, expected_records=1)
+    preflight_file = output_root / "preflight" / cell.cell_id / "report.json"
+    preflight_output = _output(f"preflight/{cell.cell_id}/report.json", preflight_file, stage="preflight", workflow=workflow, task=preflight_id, kind="file", code_commit=code_commit, expected_records=1)
     preflight_run_dir = managed / "preflight" / cell.cell_id
     preflight_command = [
         "{cwd}/scripts/atom14_objective_preflight.py", "--config", "{config}",
         "--cell-id", cell.cell_id, "--output", str(preflight_file),
         "--seed", str(SIGMA_PROBE_SEED), "--sample-count", str(SIGMA_PROBE_SAMPLES),
+        "--run-training-gate", "--expected-workers", "8",
+        "--warmup-steps", "16", "--minimum-timed-rows", "16",
     ]
     if cell.objective:
         preflight_command.append("--objective-repair")
     preflight_run = _stage_run(
-        stage="analysis", task=preflight_id, workflow=workflow, code_commit=code_commit,
+        stage="preflight", task=preflight_id, workflow=workflow, code_commit=code_commit,
         artifact=preflight_output, run_dir=preflight_run_dir, profile=profiles["gpu"], cwd=cwd,
         command=preflight_command, base_config=parent_config,
-        patches=_evaluation_patches(cell, preflight_run_dir),
+        patches=_preflight_patches(cell, preflight_run_dir),
     )
-    tasks.append(PreparedTask(preflight_id, preflight_run, PREFLIGHT_RESOURCES))
+    tasks.append(PreparedTask(preflight_id, preflight_run, PREFLIGHT_RESOURCES, recovery=RECOVERY))
 
     train_id = f"train-{cell.cell_id}"
     train_dir = output_root / "train" / "L128" / cell.cell_id
@@ -411,7 +429,7 @@ def _cell_tasks(cell: Cell, *, workflow: str, code_commit: str, output_root: Pat
         child_sha256=hashlib.sha256(_config_artifact(train_run).content).hexdigest(),
         expected_parent_sha256=parent_cells[cell.architecture].get("sha256"),
     )
-    tasks.append(PreparedTask(train_id, train_run, TRAIN_RESOURCES, wait_for=({"kind": "artifact", "task_id": preflight_id, "artifact_id": preflight_output.artifact_id},)))
+    tasks.append(PreparedTask(train_id, train_run, TRAIN_RESOURCES, wait_for=({"kind": "artifact", "task_id": preflight_id, "artifact_id": preflight_output.artifact_id},), recovery=RECOVERY))
 
     tag = f"step{CHECKPOINT_STEP:09d}"
     checkpoint = train_dir / f"{tag}.pt"
@@ -431,7 +449,7 @@ def _cell_tasks(cell: Cell, *, workflow: str, code_commit: str, output_root: Pat
             "--precision", "bf16", "--compile",
         ],
     )
-    tasks.append(PreparedTask(sample_id, sample_run, RESOURCES["sample"], wait_for=({"kind": "artifact", "task_id": train_id, "artifact_id": f"checkpoint/{tag}.pt"},)))
+    tasks.append(PreparedTask(sample_id, sample_run, RESOURCES["sample"], wait_for=({"kind": "artifact", "task_id": train_id, "artifact_id": f"checkpoint/{tag}.pt"},), recovery=RECOVERY))
 
     esmfold_id = f"esmfold-{cell.cell_id}-{tag}"
     esmfold_dir = output_root / "esmfold" / tag / cell.cell_id / "L0128"
@@ -448,7 +466,7 @@ def _cell_tasks(cell: Cell, *, workflow: str, code_commit: str, output_root: Pat
             "--chunk-size", "8", "--bf16",
         ],
     )
-    tasks.append(PreparedTask(esmfold_id, esmfold_run, RESOURCES["esmfold"], wait_for=({"kind": "artifact", "task_id": sample_id, "artifact_id": sample_output.artifact_id},)))
+    tasks.append(PreparedTask(esmfold_id, esmfold_run, RESOURCES["esmfold"], wait_for=({"kind": "artifact", "task_id": sample_id, "artifact_id": sample_output.artifact_id},), recovery=RECOVERY))
 
     analysis_id = f"analysis-{cell.cell_id}-{tag}"
     analysis_file = output_root / "analysis" / tag / cell.cell_id / "progres.json"
@@ -470,6 +488,7 @@ def _cell_tasks(cell: Cell, *, workflow: str, code_commit: str, output_root: Pat
             {"kind": "artifact", "task_id": esmfold_id, "artifact_id": esmfold_output.artifact_id},
             {"kind": "artifact", "task_id": "attest-progres-data", "artifact_id": "progres/attestation.json"},
         ),
+        recovery=RECOVERY,
     ))
     return tasks, diff, (cell.cell_id, analysis_file, analysis_id)
 
@@ -496,7 +515,7 @@ def build_workflow(code_commit: str, *, parent_cells: Mapping[str, Mapping[str, 
         profile=profiles["progres"], cwd=cwd,
         command=["{cwd}/scripts/attest_progres_data.py", "--data-dir", str(PROGRES_DATA), "--output", str(attest_file)],
     )
-    tasks.append(PreparedTask(attest_id, attest_run, RESOURCES["cpu"]))
+    tasks.append(PreparedTask(attest_id, attest_run, RESOURCES["cpu"], recovery=RECOVERY))
 
     for cell in CELLS:
         cell_tasks, diff, analysis = _cell_tasks(
@@ -526,6 +545,7 @@ def build_workflow(code_commit: str, *, parent_cells: Mapping[str, Mapping[str, 
             {"kind": "artifact", "task_id": task_id, "artifact_id": f"analysis/step{CHECKPOINT_STEP:09d}/{cell_id}/progres.json"}
             for cell_id, _file, task_id in analyses
         ),
+        recovery=RECOVERY,
     ))
     workflow_object = PreparedWorkflow(
         request_id=f"{PROJECT_ID}/{workflow}/v1", workflow_id=workflow,
