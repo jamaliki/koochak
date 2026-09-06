@@ -26,6 +26,7 @@ requirements:
     - "{cwd}/scripts/diversity_common.py"
     - "{cwd}/scripts/run_esmfold_designability_shard.py"
     - "{cwd}/scripts/robust_factorial_stage.py"
+    - "{cwd}/scripts/aggregate_atom14_causal_intervention.py"
     - "{cwd}/external/koochak/koochak/jobs/runner.py"
   packages:
     koochak: "*"
