@@ -27,7 +27,10 @@ CAMPAIGN_ROOT = (
     / "e6c0689d8f93784d198a43f1dcaecd1df3adb256"
 )
 SOURCE_RUN = CAMPAIGN_ROOT / "train/L128/coordseq-atom14"
-CHECKPOINTS = tuple(SOURCE_RUN / f"step{step:09d}.pt" for step in (10_000, 20_000, 30_000))
+CHECKPOINTS = tuple(
+    SOURCE_RUN / f"step{step:09d}.pt"
+    for step in (10_000, 20_000, 30_000, 40_000)
+)
 RESOURCES = {
     "nodes": 1,
     "gpus_per_node": 1,
