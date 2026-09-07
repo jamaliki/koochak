@@ -14,6 +14,8 @@ def init_linear(layer: nn.Linear, kind: str = "normal") -> nn.Linear:
 
     if kind == "normal":
         nn.init.kaiming_normal_(layer.weight, nonlinearity="linear")
+    elif kind == "dit":
+        nn.init.xavier_uniform_(layer.weight)
     elif kind in {"zero", "final"}:
         nn.init.zeros_(layer.weight)
     elif kind == "gate":
@@ -113,10 +115,58 @@ class AdaptiveRMSNorm(nn.Module):
         return (normalized * scale.float()).to(x.dtype)
 
 
+class DiTAdaLNZero(nn.Module):
+    """Canonical DiT adaLN-Zero modulation for attention and MLP branches.
+
+    This follows the official DiT block exactly: two affine-free LayerNorms and
+    one ``SiLU -> Linear(6 * width)`` projection yielding shift, scale, and
+    residual gate for attention followed by the same three values for the MLP.
+    The projection is zero-initialized so both residual branches start closed.
+    """
+
+    def __init__(self, width: int, condition_dim: int):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(width, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(width, elementwise_affine=False, eps=1e-6)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            init_linear(nn.Linear(condition_dim, 6 * width, bias=True), "zero"),
+        )
+
+    @staticmethod
+    def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
+        return x * (1.0 + scale.to(x.dtype)) + shift.to(x.dtype)
+
+    def modulation_parameters(
+        self, condition: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        return self.adaLN_modulation(condition).chunk(6, dim=-1)
+
+    def attention_input(
+        self,
+        x: Tensor,
+        shift: Tensor,
+        scale: Tensor,
+    ) -> Tensor:
+        return self.modulate(self.norm1(x), shift, scale)
+
+    def mlp_input(
+        self,
+        x: Tensor,
+        shift: Tensor,
+        scale: Tensor,
+    ) -> Tensor:
+        return self.modulate(self.norm2(x), shift, scale)
+
+
 class GEGLU(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int):
+    def __init__(
+        self, input_dim: int, hidden_dim: int, initialization: str | None = None
+    ):
         super().__init__()
         self.projection = nn.Linear(input_dim, 2 * hidden_dim, bias=False)
+        if initialization is not None:
+            init_linear(self.projection, initialization)
 
     def forward(self, x: Tensor) -> Tensor:
         value, gate = self.projection(x).chunk(2, dim=-1)
@@ -133,12 +183,19 @@ class FeedForward(nn.Module):
         expansion: int,
         dropout: float,
         residual_scale: float = 1.0,
+        output_initialization: str = "zero",
     ):
         super().__init__()
         self.norm = RMSNorm(width) if condition_dim is None else AdaptiveRMSNorm(width, condition_dim)
-        self.up = GEGLU(width, width * expansion)
+        self.up = GEGLU(
+            width,
+            width * expansion,
+            "dit" if output_initialization == "dit" else None,
+        )
         self.dropout = nn.Dropout(dropout, inplace=True)
-        self.down = init_linear(nn.Linear(width * expansion, width, bias=False), "zero")
+        self.down = init_linear(
+            nn.Linear(width * expansion, width, bias=False), output_initialization
+        )
         self.register_buffer("residual_scale", torch.tensor(residual_scale), persistent=False)
 
     def forward(self, x: Tensor, condition: Tensor | None = None) -> Tensor:
@@ -149,6 +206,11 @@ class FeedForward(nn.Module):
         """Return the unscaled branch update used by the residual stage."""
 
         normalized = self.norm(x) if condition is None else self.norm(x, condition)
+        return self.project(normalized)
+
+    def project(self, normalized: Tensor) -> Tensor:
+        """Project an already-normalized input, as required by adaLN-Zero."""
+
         return self.down(self.dropout(self.up(normalized)))
 
 

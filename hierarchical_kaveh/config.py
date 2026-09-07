@@ -55,6 +55,9 @@ class ModelConfig:
     atom_to_residue_transport: str = "all_atom"
     atom_to_residue_sidechain_sigma_full: float = 2.0
     atom_to_residue_sidechain_sigma_zero: float = 5.0
+    # Canonical DiT uses affine-free LayerNorm plus one zero-initialized
+    # shift/scale/residual-gate projection for the two branches in each block.
+    block_conditioning_style: str = "adaptive_rmsnorm"
     # When enabled, normalize the residual stream after each attention and
     # FFN addition.  The norm is non-affine and is applied after the add; it
     # never rescales a raw zero-initialized branch update.
@@ -133,6 +136,14 @@ class ModelConfig:
         if self.atom_to_residue_transport not in {"all_atom", "backbone_first"}:
             raise ValueError(
                 "atom_to_residue_transport must be 'all_atom' or 'backbone_first'"
+            )
+        if self.block_conditioning_style not in {
+            "adaptive_rmsnorm",
+            "dit_adaln_zero",
+        }:
+            raise ValueError(
+                "block_conditioning_style must be 'adaptive_rmsnorm' "
+                "or 'dit_adaln_zero'"
             )
         if not (
             0.0 <= self.atom_to_residue_sidechain_sigma_full

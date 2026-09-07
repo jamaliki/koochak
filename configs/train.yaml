@@ -14,6 +14,7 @@ model:
   residue_decoder_depth: 4
   atom_decoder_depth: 1
   atom_window_radius: 1
+  block_conditioning_style: adaptive_rmsnorm
   pair_ffn_expansion: 4
   attention_residual_scale: full
   sandwich_rmsnorm: false

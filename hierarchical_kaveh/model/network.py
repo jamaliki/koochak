@@ -230,6 +230,7 @@ class HierarchicalKaveh(nn.Module):
             c.atom_dim, c.condition_dim, c.atom_heads, c.atom_head_dim,
             c.atom_window_radius, c.atom_ffn_expansion, c.dropout,
             attention_scale, c.sandwich_rmsnorm, atom_ffn_scale,
+            c.block_conditioning_style,
         )
         self.atom_encoder = nn.ModuleList(AtomBlock(*atom_args) for _ in range(c.atom_encoder_depth))
         self.atom_to_residue = AtomToResidue(
@@ -246,7 +247,7 @@ class HierarchicalKaveh(nn.Module):
         global_args = (
             c.node_dim, c.condition_dim, c.attention_heads, c.attention_head_dim,
             c.residue_ffn_expansion, c.dropout, residual_scale, attention_scale,
-            c.sandwich_rmsnorm,
+            c.sandwich_rmsnorm, c.block_conditioning_style,
         )
         self.residue_encoder = nn.ModuleList(
             GlobalBlock(*global_args) for _ in range(c.residue_encoder_depth)
@@ -268,7 +269,7 @@ class HierarchicalKaveh(nn.Module):
                 c.attention_heads, c.attention_head_dim,
                 c.residue_ffn_expansion, c.dropout, residual_scale, REGISTER_COUNT,
                 c.coarse_pair_position, c.coarse_pair_transition, c.pair_ffn_expansion,
-                attention_scale, c.sandwich_rmsnorm,
+                attention_scale, c.sandwich_rmsnorm, c.block_conditioning_style,
             )
             for _ in range(c.coarse_depth)
         )

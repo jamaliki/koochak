@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from .backend import fused_failure
 from .layers import (
     BoundedFiLM,
+    DiTAdaLNZero,
     FeedForward,
     NonAffineRMSNorm,
     RMSNorm,
@@ -148,15 +149,33 @@ class AtomInput(nn.Module):
 
 
 class AtomAttention(nn.Module):
-    def __init__(self, atom_dim: int, condition_dim: int, heads: int, head_dim: int, radius: int):
+    def __init__(
+        self,
+        atom_dim: int,
+        condition_dim: int,
+        heads: int,
+        head_dim: int,
+        radius: int,
+        *,
+        dit_adaln_zero: bool = False,
+    ):
         super().__init__()
         self.heads, self.head_dim, self.radius = heads, head_dim, radius
         inner = heads * head_dim
-        self.norm = RMSNorm(atom_dim, eps=1e-5)
-        self.qkv = init_linear(nn.Linear(atom_dim, 3 * inner, bias=False))
+        self.norm = nn.Identity() if dit_adaln_zero else RMSNorm(atom_dim, eps=1e-5)
+        self.qkv = init_linear(
+            nn.Linear(atom_dim, 3 * inner, bias=False),
+            "dit" if dit_adaln_zero else "normal",
+        )
         self.q_norm, self.k_norm = nn.LayerNorm(inner), nn.LayerNorm(inner)
-        self.gate = init_linear(nn.Linear(atom_dim + condition_dim, inner), "gate")
-        self.output = init_linear(nn.Linear(inner, atom_dim, bias=False), "zero")
+        self.gate = (
+            None
+            if dit_adaln_zero
+            else init_linear(nn.Linear(atom_dim + condition_dim, inner), "gate")
+        )
+        self.output = init_linear(
+            nn.Linear(inner, atom_dim, bias=False), "dit" if dit_adaln_zero else "zero"
+        )
 
     def forward(self, x: Tensor, condition: Tensor, atom_mask: Tensor, segment_index: Tensor) -> Tensor:
         normalized = self.norm(x)
@@ -165,9 +184,13 @@ class AtomAttention(nn.Module):
         attended = atom_attention(
             query.reshape(shape), key.reshape(shape), value.reshape(shape), atom_mask, segment_index, self.radius
         )
-        atom_condition = condition[:, :, None].expand(-1, -1, ATOM_SLOTS, -1)
-        gate = torch.sigmoid(self.gate(torch.cat((normalized, atom_condition), -1)))
-        return self.output(attended.flatten(-2) * gate) * atom_mask[..., None].to(x.dtype)
+        attended = attended.flatten(-2)
+        if self.gate is not None:
+            atom_condition = condition[:, :, None].expand(-1, -1, ATOM_SLOTS, -1)
+            attended = attended * torch.sigmoid(
+                self.gate(torch.cat((normalized, atom_condition), -1))
+            )
+        return self.output(attended) * atom_mask[..., None].to(x.dtype)
 
 
 class AtomBlock(nn.Module):
@@ -183,15 +206,28 @@ class AtomBlock(nn.Module):
         attention_residual_scale: float = 1.0,
         sandwich_rmsnorm: bool = False,
         ffn_residual_scale: float = 1.0,
+        conditioning_style: str = "adaptive_rmsnorm",
     ):
         super().__init__()
-        self.attention = AtomAttention(atom_dim, condition_dim, heads, head_dim, radius)
-        self.ffn = FeedForward(
+        dit_adaln_zero = conditioning_style == "dit_adaln_zero"
+        self.adaln_zero = (
+            DiTAdaLNZero(atom_dim, condition_dim) if dit_adaln_zero else None
+        )
+        self.attention = AtomAttention(
             atom_dim,
             condition_dim,
+            heads,
+            head_dim,
+            radius,
+            dit_adaln_zero=dit_adaln_zero,
+        )
+        self.ffn = FeedForward(
+            atom_dim,
+            None if dit_adaln_zero else condition_dim,
             expansion,
             dropout,
             ffn_residual_scale,
+            "dit" if dit_adaln_zero else "zero",
         )
         self.register_buffer(
             "attention_residual_scale",
@@ -204,17 +240,42 @@ class AtomBlock(nn.Module):
     def forward(
         self, x: Tensor, condition: Tensor, atom_mask: Tensor, segment_index: Tensor
     ) -> tuple[Tensor, Tensor]:
+        atom_condition = condition[:, :, None].expand(-1, -1, ATOM_SLOTS, -1)
+        if self.adaln_zero is None:
+            attention_input = x
+            attention_gate = None
+        else:
+            (
+                shift_attention,
+                scale_attention,
+                attention_gate,
+                shift_mlp,
+                scale_mlp,
+                mlp_gate,
+            ) = self.adaln_zero.modulation_parameters(atom_condition)
+            attention_input = self.adaln_zero.attention_input(
+                x, shift_attention, scale_attention
+            )
+        attention_update = self.attention(
+            attention_input, condition, atom_mask, segment_index
+        )
+        if attention_gate is not None:
+            attention_update = attention_gate.to(attention_update.dtype) * attention_update
         x, attention_stats = apply_residual_stage(
             x,
-            self.attention(x, condition, atom_mask, segment_index),
+            attention_update,
             scale=self.attention_residual_scale,
             post_norm=self.attention_post_norm,
             mask=atom_mask,
         )
-        atom_condition = condition[:, :, None].expand(-1, -1, ATOM_SLOTS, -1)
+        if self.adaln_zero is None:
+            ffn_update = self.ffn.update(x, atom_condition)
+        else:
+            mlp_input = self.adaln_zero.mlp_input(x, shift_mlp, scale_mlp)
+            ffn_update = mlp_gate.to(x.dtype) * self.ffn.project(mlp_input)
         x, ffn_stats = apply_residual_stage(
             x,
-            self.ffn.update(x, atom_condition),
+            ffn_update,
             scale=self.ffn.residual_scale,
             post_norm=self.ffn_post_norm,
             mask=atom_mask,
@@ -355,16 +416,33 @@ class AtomOutput(nn.Module):
 class GlobalAttention(nn.Module):
     """Global residue/register attention with FA3 varlen on CUDA."""
 
-    def __init__(self, node_dim: int, condition_dim: int, heads: int, head_dim: int):
+    def __init__(
+        self,
+        node_dim: int,
+        condition_dim: int,
+        heads: int,
+        head_dim: int,
+        *,
+        dit_adaln_zero: bool = False,
+    ):
         super().__init__()
         self.heads, self.head_dim = heads, head_dim
         inner = heads * head_dim
-        self.norm = RMSNorm(node_dim, eps=1e-5)
-        self.qkv = init_linear(nn.Linear(node_dim, 3 * inner, bias=False))
+        self.norm = nn.Identity() if dit_adaln_zero else RMSNorm(node_dim, eps=1e-5)
+        self.qkv = init_linear(
+            nn.Linear(node_dim, 3 * inner, bias=False),
+            "dit" if dit_adaln_zero else "normal",
+        )
         self.q_norm, self.k_norm = nn.LayerNorm(inner), nn.LayerNorm(inner)
         self.rope = RotaryEmbedding(head_dim)
-        self.gate = init_linear(nn.Linear(node_dim + condition_dim, inner), "gate")
-        self.output = init_linear(nn.Linear(inner, node_dim, bias=False), "zero")
+        self.gate = (
+            None
+            if dit_adaln_zero
+            else init_linear(nn.Linear(node_dim + condition_dim, inner), "gate")
+        )
+        self.output = init_linear(
+            nn.Linear(inner, node_dim, bias=False), "dit" if dit_adaln_zero else "zero"
+        )
 
     def _project(self, x: Tensor, positions: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         normalized = self.norm(x)
@@ -379,8 +457,12 @@ class GlobalAttention(nn.Module):
             query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
             attn_mask=mask[:, None, None], dropout_p=0.0,
         ).transpose(1, 2)
-        gate = torch.sigmoid(self.gate(torch.cat((normalized, condition), -1)))
-        return self.output(attended.flatten(-2) * gate) * mask[..., None].to(x.dtype)
+        attended = attended.flatten(-2)
+        if self.gate is not None:
+            attended = attended * torch.sigmoid(
+                self.gate(torch.cat((normalized, condition), -1))
+            )
+        return self.output(attended) * mask[..., None].to(x.dtype)
 
 class GlobalBlock(nn.Module):
     def __init__(
@@ -394,10 +476,28 @@ class GlobalBlock(nn.Module):
         residual_scale: float,
         attention_residual_scale: float = 1.0,
         sandwich_rmsnorm: bool = False,
+        conditioning_style: str = "adaptive_rmsnorm",
     ):
         super().__init__()
-        self.attention = GlobalAttention(node_dim, condition_dim, heads, head_dim)
-        self.ffn = FeedForward(node_dim, condition_dim, expansion, dropout, residual_scale)
+        dit_adaln_zero = conditioning_style == "dit_adaln_zero"
+        self.adaln_zero = (
+            DiTAdaLNZero(node_dim, condition_dim) if dit_adaln_zero else None
+        )
+        self.attention = GlobalAttention(
+            node_dim,
+            condition_dim,
+            heads,
+            head_dim,
+            dit_adaln_zero=dit_adaln_zero,
+        )
+        self.ffn = FeedForward(
+            node_dim,
+            None if dit_adaln_zero else condition_dim,
+            expansion,
+            dropout,
+            residual_scale,
+            "dit" if dit_adaln_zero else "zero",
+        )
         self.register_buffer(
             "attention_residual_scale",
             torch.tensor(float(attention_residual_scale)),
@@ -411,16 +511,41 @@ class GlobalBlock(nn.Module):
         self, x: Tensor, condition: Tensor, mask: Tensor, positions: Tensor
     ) -> tuple[Tensor, Tensor]:
         x = x * mask[..., None].to(x.dtype)
+        if self.adaln_zero is None:
+            attention_input = x
+            attention_gate = None
+        else:
+            (
+                shift_attention,
+                scale_attention,
+                attention_gate,
+                shift_mlp,
+                scale_mlp,
+                mlp_gate,
+            ) = self.adaln_zero.modulation_parameters(condition)
+            attention_input = self.adaln_zero.attention_input(
+                x, shift_attention, scale_attention
+            )
+        attention_update = self.attention(
+            attention_input, condition, mask, positions
+        )
+        if attention_gate is not None:
+            attention_update = attention_gate.to(attention_update.dtype) * attention_update
         x, attention_stats = apply_residual_stage(
             x,
-            self.attention(x, condition, mask, positions),
+            attention_update,
             scale=self.attention_residual_scale,
             post_norm=self.attention_post_norm,
             mask=mask,
         )
+        if self.adaln_zero is None:
+            ffn_update = self.ffn.update(x, condition)
+        else:
+            mlp_input = self.adaln_zero.mlp_input(x, shift_mlp, scale_mlp)
+            ffn_update = mlp_gate.to(x.dtype) * self.ffn.project(mlp_input)
         x, ffn_stats = apply_residual_stage(
             x,
-            self.ffn.update(x, condition),
+            ffn_update,
             scale=self.ffn.residual_scale,
             post_norm=self.ffn_post_norm,
             mask=mask,

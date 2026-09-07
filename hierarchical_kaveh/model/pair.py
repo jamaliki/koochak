@@ -13,6 +13,7 @@ from .attention import _normalize_qkv
 from .backend import fused_failure
 from .layers import (
     AdaptiveRMSNorm,
+    DiTAdaLNZero,
     FeedForward,
     GEGLU,
     NonAffineRMSNorm,
@@ -282,18 +283,29 @@ class PairBiasAttention(nn.Module):
         heads: int,
         head_dim: int,
         registers: int,
+        *,
+        dit_adaln_zero: bool = False,
     ):
         super().__init__()
         self.heads, self.head_dim, self.registers = heads, head_dim, registers
         inner = heads * head_dim
-        self.node_norm = RMSNorm(node_dim, eps=1e-5)
-        self.qkv = init_linear(nn.Linear(node_dim, 3 * inner, bias=False))
+        self.node_norm = nn.Identity() if dit_adaln_zero else RMSNorm(node_dim, eps=1e-5)
+        self.qkv = init_linear(
+            nn.Linear(node_dim, 3 * inner, bias=False),
+            "dit" if dit_adaln_zero else "normal",
+        )
         self.q_norm, self.k_norm = nn.LayerNorm(inner), nn.LayerNorm(inner)
         self.rope = RotaryEmbedding(head_dim)
         self.pair_norm = nn.LayerNorm(pair_dim, eps=1e-5)
         self.bias = init_linear(nn.Linear(pair_dim, heads, bias=False), "zero")
-        self.gate = init_linear(nn.Linear(node_dim + condition_dim, inner), "gate")
-        self.output = init_linear(nn.Linear(inner, node_dim, bias=False), "zero")
+        self.gate = (
+            None
+            if dit_adaln_zero
+            else init_linear(nn.Linear(node_dim + condition_dim, inner), "gate")
+        )
+        self.output = init_linear(
+            nn.Linear(inner, node_dim, bias=False), "dit" if dit_adaln_zero else "zero"
+        )
 
     def forward(
         self, x: Tensor, condition: Tensor, pair: Tensor, mask: Tensor, positions: Tensor
@@ -357,8 +369,12 @@ class PairBiasAttention(nn.Module):
             scores = torch.where(pair_mask.any(-1, keepdim=True), scores, 0.0)
             weights = scores.softmax(-1).to(value.dtype)
             attended = torch.einsum("bhij,bjhd->bihd", weights, value)
-        gate = torch.sigmoid(self.gate(torch.cat((normalized, condition), -1)))
-        return self.output(attended.flatten(-2) * gate) * mask[..., None].to(x.dtype)
+        attended = attended.flatten(-2)
+        if self.gate is not None:
+            attended = attended * torch.sigmoid(
+                self.gate(torch.cat((normalized, condition), -1))
+            )
+        return self.output(attended) * mask[..., None].to(x.dtype)
 
 
 class TriangleMultiplication(nn.Module):
@@ -482,15 +498,33 @@ class CoarseBlock(nn.Module):
         pair_ffn_expansion: int = 4,
         attention_residual_scale: float | None = None,
         sandwich_rmsnorm: bool = False,
+        conditioning_style: str = "adaptive_rmsnorm",
     ):
         super().__init__()
         if pair_position not in {"after_node", "before_attention"}:
             raise ValueError("pair position must be 'after_node' or 'before_attention'")
         self.pair_position = pair_position
-        self.attention = PairBiasAttention(
-            node_dim, condition_dim, pair_dim, heads, head_dim, registers
+        dit_adaln_zero = conditioning_style == "dit_adaln_zero"
+        self.adaln_zero = (
+            DiTAdaLNZero(node_dim, condition_dim) if dit_adaln_zero else None
         )
-        self.ffn = FeedForward(node_dim, condition_dim, expansion, dropout, residual_scale)
+        self.attention = PairBiasAttention(
+            node_dim,
+            condition_dim,
+            pair_dim,
+            heads,
+            head_dim,
+            registers,
+            dit_adaln_zero=dit_adaln_zero,
+        )
+        self.ffn = FeedForward(
+            node_dim,
+            None if dit_adaln_zero else condition_dim,
+            expansion,
+            dropout,
+            residual_scale,
+            "dit" if dit_adaln_zero else "zero",
+        )
         self.register_buffer(
             "attention_residual_scale",
             torch.tensor(
@@ -521,16 +555,41 @@ class CoarseBlock(nn.Module):
         if self.pair_position == "before_attention":
             pair = self._update_pair(pair, pair_mask)
             pair, pair_stats = self._apply_pair_ffn(pair, pair_mask)
+        if self.adaln_zero is None:
+            attention_input = x
+            attention_gate = None
+        else:
+            (
+                shift_attention,
+                scale_attention,
+                attention_gate,
+                shift_mlp,
+                scale_mlp,
+                mlp_gate,
+            ) = self.adaln_zero.modulation_parameters(condition)
+            attention_input = self.adaln_zero.attention_input(
+                x, shift_attention, scale_attention
+            )
+        attention_update = self.attention(
+            attention_input, condition, pair, mask, positions
+        )
+        if attention_gate is not None:
+            attention_update = attention_gate.to(attention_update.dtype) * attention_update
         x, attention_stats = apply_residual_stage(
             x,
-            self.attention(x, condition, pair, mask, positions),
+            attention_update,
             scale=self.attention_residual_scale,
             post_norm=self.attention_post_norm,
             mask=mask,
         )
+        if self.adaln_zero is None:
+            ffn_update = self.ffn.update(x, condition)
+        else:
+            mlp_input = self.adaln_zero.mlp_input(x, shift_mlp, scale_mlp)
+            ffn_update = mlp_gate.to(x.dtype) * self.ffn.project(mlp_input)
         x, ffn_stats = apply_residual_stage(
             x,
-            self.ffn.update(x, condition),
+            ffn_update,
             scale=self.ffn.residual_scale,
             post_norm=self.ffn_post_norm,
             mask=mask,
