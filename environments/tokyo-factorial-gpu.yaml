@@ -46,6 +46,7 @@ requirements:
     - "{cwd}/scripts/robust_factorial_stage.py"
     - "{cwd}/scripts/stability_preflight.py"
     - "{cwd}/scripts/atom14_objective_preflight.py"
+    - "{cwd}/scripts/audit_activation_spikes.py"
     - "{cwd}/scripts/continue_training.py"
     - "{cwd}/scripts/sample_short128_milestone.py"
     - "{cwd}/scripts/sample_progres_conditioned_milestone.py"
