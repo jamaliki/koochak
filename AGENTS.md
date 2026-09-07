@@ -39,8 +39,10 @@ This doc tracks incremental design decisions and changes from the initial design
     deterministic artifact evidence after their ready manifest exists; full
     config objects and checkpoint contents never enter coordination events.
     Scruffy checkpoint acknowledgement is opt-in and synchronous only for
-    strict artifact events; configured rejection/timeout fails closed, while
-    the default telemetry path remains asynchronous and non-fatal.
+    strict artifact events; configured rejection/conflict fails closed, while
+    an unresolved timeout is reconciled without republishing and becomes a
+    checkpoint-safe retryable result after the numbered checkpoint is durable.
+    The default telemetry path remains asynchronous and non-fatal.
   - Stdout and W&B record resolved config at `on_train_start`; CSV/JSONL remain metric logs.
 
 - Jobs
