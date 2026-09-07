@@ -535,8 +535,16 @@ def step_fn(model, batch, ctx):
     `artifact_ack_timeout_s=<seconds>` (or set
     `KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS`). Only strict numbered
     `workload.artifact` checkpoint publications use `wait=True`; lifecycle and
-    evacuation milestone events remain asynchronous. A rejected or timed-out
-    strict checkpoint acknowledgement fails closed.
+    evacuation milestone events remain asynchronous. A rejected or conflicting
+    strict checkpoint acknowledgement fails closed. An acknowledgement timeout
+    is reconciled against the durable receipt and journal-derived job artifact
+    evidence without publishing a second event. If the bounded reconciliation
+    deadline still expires, Koochak raises the checkpoint-safe retryable reason
+    `checkpoint_ack_timeout`, preserves the just-written numbered checkpoint for
+    `resume: auto`, and the managed runner returns exit code `76`. The Scruffy
+    deployment must map that code to its retryable checkpoint reason and enforce
+    the task's capped `max_attempts`; older Scruffy versions record it as
+    `application_exit`.
     Failed publication never releases a dependent task; Scruffy leaves it
     blocked rather than inferring readiness from the filesystem.
   - `koochak.logging.wandb_logger.make_wandb_hooks(cfg)` – W&B logging/artifacts; rank-0 only.

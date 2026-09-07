@@ -37,17 +37,39 @@ def main() -> int:
 
     for import_path in reversed(import_paths):
         sys.path.insert(0, import_path)
-    if mode == "-m":
-        sys.argv = [target, *arguments]
-        runpy.run_module(target, run_name="__main__", alter_sys=True)
-    elif mode == "-c":
-        sys.argv = ["-c", *arguments]
-        namespace = {"__name__": "__main__", "__file__": "<string>"}
-        exec(compile(target, "<string>", "exec"), namespace, namespace)  # noqa: S102
-    else:
-        script = str(Path(target))
-        sys.argv = [script, *arguments]
-        runpy.run_path(script, run_name="__main__")
+    try:
+        if mode == "-m":
+            sys.argv = [target, *arguments]
+            runpy.run_module(target, run_name="__main__", alter_sys=True)
+        elif mode == "-c":
+            sys.argv = ["-c", *arguments]
+            namespace = {"__name__": "__main__", "__file__": "<string>"}
+            exec(compile(target, "<string>", "exec"), namespace, namespace)  # noqa: S102
+        else:
+            script = str(Path(target))
+            sys.argv = [script, *arguments]
+            runpy.run_path(script, run_name="__main__")
+    except Exception as exc:
+        # A strict checkpoint was already written before its acknowledgement
+        # became uncertain. Preserve that safe cursor and let a compatible
+        # scheduler classify the exit as retryable rather than application_exit.
+        reason = getattr(exc, "reason", None)
+        exit_code = getattr(exc, "exit_code", None)
+        if reason == "checkpoint_ack_timeout" and type(exit_code) is int:
+            print(
+                json.dumps(
+                    {
+                        "kind": "checkpoint_safe_retry",
+                        "reason": reason,
+                        "checkpoint_path": getattr(exc, "checkpoint_path", None),
+                        "event_id": getattr(exc, "event_id", None),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return exit_code
+        raise
     return 0
 
 
