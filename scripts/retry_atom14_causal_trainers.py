@@ -26,7 +26,7 @@ from submit_atom14_causal_intervention_factorial import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "external" / "koochak"))
 
-from koochak.jobs import PreparedWorkflow, submit_scruffy_workflow  # noqa: E402
+from koochak.jobs import submit_scruffy  # noqa: E402
 
 
 def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
@@ -122,22 +122,16 @@ def main(argv: list[str] | None = None) -> int:
             "resume_step": steps[-1],
         })
 
-    request_id = f"{PROJECT_ID}/{workflow_id}/recovery/trainers/attempt-{args.attempt}"
-    workflow = PreparedWorkflow(
-        request_id=request_id,
-        workflow_id=workflow_id,
-        project_id=PROJECT_ID,
-        tasks=tuple(tasks),
-    )
+    request_root = f"{PROJECT_ID}/{workflow_id}/recovery/trainers/attempt-{args.attempt}"
     description = {
         "workflow_id": workflow_id,
-        "request_id": request_id,
+        "request_root": request_root,
         "source_code_commit": args.code_commit,
         "recovery_launcher_commit": _git("rev-parse", "HEAD"),
         "allocation_id": allocation.get("id"),
         "sources": sources,
         "tasks": [task.to_scruffy_spec(
-            request_id=request_id,
+            request_id=request_root,
             workflow_id=workflow_id,
             project_id=PROJECT_ID,
         ) for task in tasks],
@@ -145,8 +139,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(json.dumps(description, indent=2, sort_keys=True, default=str))
         return 0
-    submission = submit_scruffy_workflow(workflow, root=SCRUFFY_ROOT)
-    print(json.dumps({**description, "submission": submission}, indent=2, sort_keys=True, default=str))
+    from scruffy import ResourceRequest  # noqa: PLC0415
+
+    submissions = []
+    for task in tasks:
+        result = submit_scruffy(
+            task.run,
+            root=SCRUFFY_ROOT,
+            resources=ResourceRequest(**dict(task.resources)),
+            request_id=f"{request_root}/{task.task_id}",
+            project_id=PROJECT_ID,
+            workflow_id=workflow_id,
+            task_id=task.task_id,
+            wait_for=[dict(condition) for condition in task.wait_for],
+        )
+        submissions.append({"task_id": task.task_id, **result})
+    print(json.dumps({**description, "submissions": submissions}, indent=2, sort_keys=True, default=str))
     return 0
 
 
