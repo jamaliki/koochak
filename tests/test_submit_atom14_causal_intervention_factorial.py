@@ -175,3 +175,25 @@ def test_preflight_recovery_preserves_task_and_artifact_but_isolates_run_dir(tmp
         workflow_id=f"hk-atom14-causal-intervention-50k-L128-{commit[:7]}",
         project_id=launcher.PROJECT_ID,
     )["recovery"] == launcher.RECOVERY
+
+
+def test_trainer_recovery_preserves_original_run_and_dependency(tmp_path: Path) -> None:
+    commit = "e" * 40
+    output_root = tmp_path / "output"
+    cell = launcher.CELLS[3]
+    task = launcher.build_trainer_recovery(
+        cell,
+        code_commit=commit,
+        parent_cells=_parents(tmp_path),
+        output_root=output_root,
+    )
+    expected_dir = output_root / "train" / "L128" / cell.cell_id
+    assert task.task_id == f"train-{cell.cell_id}"
+    assert task.run.run_dir == str(expected_dir)
+    assert task.wait_for == ({
+        "kind": "artifact",
+        "task_id": f"preflight-{cell.cell_id}",
+        "artifact_id": f"preflight/{cell.cell_id}/report.json",
+    },)
+    manifest = _manifest(task)
+    assert manifest["argv"][-2:] == ["--resume", "auto"]

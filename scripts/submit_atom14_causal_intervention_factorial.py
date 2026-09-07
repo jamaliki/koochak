@@ -556,6 +556,52 @@ def build_preflight_recovery(
     return PreparedTask(task_id, run, PREFLIGHT_RESOURCES, recovery=RECOVERY)
 
 
+def build_trainer_recovery(
+    cell: Cell,
+    *,
+    code_commit: str,
+    parent_cells: Mapping[str, Mapping[str, Any]] | None = None,
+    output_root: Path | None = None,
+) -> PreparedTask:
+    """Rebuild one trainer for checkpoint-local resume under its original task."""
+
+    parent_cells = PARENT_CELLS if parent_cells is None else parent_cells
+    output_root = (
+        REMOTE_RUN_ROOT / "atom14-causal-intervention-50k-L128" / code_commit
+        if output_root is None
+        else output_root
+    )
+    workflow = f"hk-atom14-causal-intervention-50k-L128-{code_commit[:7]}"
+    preflight_id = f"preflight-{cell.cell_id}"
+    task_id = f"train-{cell.cell_id}"
+    train_dir = output_root / "train" / "L128" / cell.cell_id
+    patches = _trainer_patches(cell, train_dir)
+    run = prepare_run(
+        name=f"hk-atom14-train-{cell.cell_id}-{code_commit[:7]}",
+        profile=_load_profile(GPU_PROFILE),
+        python_args=[
+            "-m", "hierarchical_kaveh.train", "--config", "{config}",
+            "--resume", "auto",
+        ],
+        cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{code_commit[:7]}"),
+        run_dir=str(train_dir),
+        base_config=_parent_config(cell, parent_cells),
+        patches=patches,
+    )
+    _assert_rendered_config(run, _parent_config(cell, parent_cells), patches)
+    return PreparedTask(
+        task_id,
+        run,
+        TRAIN_RESOURCES,
+        wait_for=({
+            "kind": "artifact",
+            "task_id": preflight_id,
+            "artifact_id": f"preflight/{cell.cell_id}/report.json",
+        },),
+        recovery=RECOVERY,
+    )
+
+
 def build_workflow(code_commit: str, *, parent_cells: Mapping[str, Mapping[str, Any]] | None = None, output_root: Path | None = None) -> tuple[PreparedWorkflow, list[dict[str, Any]]]:
     parent_cells = PARENT_CELLS if parent_cells is None else parent_cells
     short = code_commit[:7]
