@@ -13,9 +13,8 @@ from typing import Any, Iterator
 import torch
 from torch import Tensor, nn
 
-from koochak.storage.checkpoint import match_state_dict_to_model
-
 from hierarchical_kaveh.config import load_config
+from hierarchical_kaveh.io import _strip_state_wrapper_prefixes
 from hierarchical_kaveh.model import HierarchicalKaveh
 from hierarchical_kaveh.model.attention import AtomBlock, GlobalBlock
 from hierarchical_kaveh.model.layers import AdaptiveRMSNorm
@@ -161,7 +160,9 @@ def audit_checkpoint(
     )
     config = load_config(config_file)
     model = HierarchicalKaveh(config.model)
-    model.load_state_dict(match_state_dict_to_model(model, checkpoint["model"]), strict=True)
+    model.load_state_dict(
+        _strip_state_wrapper_prefixes(checkpoint["model"]), strict=True
+    )
     model = model.to(device=device).eval()
     parameter_summary = _parameter_summary(model)
     sweep = []
