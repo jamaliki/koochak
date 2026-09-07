@@ -31,6 +31,11 @@ class ModelConfig:
     residue_decoder_depth: int = 4
     atom_decoder_depth: int = 1
     atom_window_radius: int = 1
+    # ``ca`` retains the stable Atom14 tensor ABI while exposing only the
+    # physical C-alpha slot to atom computation, coordinate corruption, and
+    # sampling. This keeps fused kernels unchanged and makes the ablation
+    # directly comparable to the Atom14 model.
+    atom_representation: str = "atom14"
     residue_ffn_expansion: int = 4
     pair_ffn_expansion: int = 4
     atom_ffn_expansion: int = 2
@@ -109,6 +114,8 @@ class ModelConfig:
             raise ValueError("model depths and atom_window_radius must be non-negative")
         if self.atom_encoder_depth + self.atom_decoder_depth == 0:
             raise ValueError("at least one atom block is required")
+        if self.atom_representation not in {"atom14", "ca"}:
+            raise ValueError("model.atom_representation must be 'atom14' or 'ca'")
         if self.attention_heads * self.attention_head_dim != self.node_dim:
             raise ValueError("attention_heads * attention_head_dim must equal node_dim")
         if self.atom_heads * self.atom_head_dim != self.atom_dim:

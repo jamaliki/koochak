@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> None:
                 (length,),
                 start_index=completed,
                 secondary_structure=result.secondary_structure,
+                atom_mask=result.topology.atom_mask,
             )
             completed += current_batch
 
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> None:
         "recurrent_self_conditioning": True,
         "intermediate_feedback": use_intermediate_feedback,
         "secondary_structure_condition": args.secondary_structure,
+        "atom_representation": config.model.atom_representation,
         "sampling": asdict(config.sampling),
     }
     (output_root / "manifest.json").write_text(

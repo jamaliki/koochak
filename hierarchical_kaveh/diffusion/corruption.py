@@ -143,6 +143,7 @@ def corrupt_structure(
     sigma: Tensor | float,
     generator: torch.Generator,
     translation_std: float = 1.0,
+    atom_representation: str = "atom14",
 ) -> dict[str, Tensor]:
     """Create one standard EDM pair ``x_t = x0 + sigma * epsilon``."""
 
@@ -168,6 +169,15 @@ def corrupt_structure(
         raise ValueError("coordinate_mask must be a subset of model_atom_mask")
     if bool((resolved_atom_mask & ~coordinate_mask).any()):
         raise ValueError("resolved_atom_mask must be a subset of coordinate_mask")
+    if atom_representation not in {"atom14", "ca"}:
+        raise ValueError("atom_representation must be 'atom14' or 'ca'")
+    if atom_representation == "ca":
+        ca_mask = torch.zeros_like(model_atom_mask)
+        ca_mask[..., 1] = model_atom_mask[..., 1]
+        model_atom_mask = model_atom_mask & ca_mask
+        coordinate_mask = coordinate_mask & ca_mask
+        resolved_atom_mask = resolved_atom_mask & ca_mask
+        coordinates = coordinates * ca_mask[..., None]
     sigma_scalar = torch.as_tensor(
         sigma,
         device=coordinates.device,

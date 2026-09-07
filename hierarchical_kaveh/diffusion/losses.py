@@ -443,25 +443,28 @@ def compute_losses(
             batch["residue_mask"],
             sample_weights=aatype_weights,
         )
-    lddt_atom_mask = batch["coordinate_mask"]
-    if loss_config.smooth_lddt_resolved_atom_only:
-        if "resolved_atom_mask" not in batch:
-            raise ValueError(
-                "resolved_atom_mask is required for resolved-atom-only lDDT"
-            )
-        lddt_atom_mask = batch["resolved_atom_mask"]
-    smooth_lddt = smooth_lddt_loss(
-        prediction.coordinates,
-        batch["x0"],
-        lddt_atom_mask,
-        cutoff=loss_config.smooth_lddt_cutoff,
-        chunk_size=loss_config.smooth_lddt_chunk_size,
-        checkpoint_chunks=loss_config.smooth_lddt_checkpoint,
-        sigma=batch["sigma"],
-        sigma_data=model_config.sigma_data,
-        sigma_max=loss_config.smooth_lddt_sigma_max,
-        c_out_compensation=loss_config.smooth_lddt_c_out_compensation,
-    )
+    if loss_config.smooth_lddt_weight == 0.0:
+        smooth_lddt = coordinate.new_zeros(())
+    else:
+        lddt_atom_mask = batch["coordinate_mask"]
+        if loss_config.smooth_lddt_resolved_atom_only:
+            if "resolved_atom_mask" not in batch:
+                raise ValueError(
+                    "resolved_atom_mask is required for resolved-atom-only lDDT"
+                )
+            lddt_atom_mask = batch["resolved_atom_mask"]
+        smooth_lddt = smooth_lddt_loss(
+            prediction.coordinates,
+            batch["x0"],
+            lddt_atom_mask,
+            cutoff=loss_config.smooth_lddt_cutoff,
+            chunk_size=loss_config.smooth_lddt_chunk_size,
+            checkpoint_chunks=loss_config.smooth_lddt_checkpoint,
+            sigma=batch["sigma"],
+            sigma_data=model_config.sigma_data,
+            sigma_max=loss_config.smooth_lddt_sigma_max,
+            c_out_compensation=loss_config.smooth_lddt_c_out_compensation,
+        )
     if prediction.distogram is None and loss_config.distogram_weight != 0.0:
         raise ValueError("Prediction.distogram is required when distogram_weight is nonzero")
     expected_intermediate = max(model_config.coarse_depth - 1, 0)

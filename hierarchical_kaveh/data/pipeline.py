@@ -367,12 +367,16 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
         diffusion: DiffusionConfig,
         *,
         sigma_data: float,
+        atom_representation: str = "atom14",
         global_step: int = 0,
     ) -> None:
         super().__init__()
         self.data = data
         self.diffusion = diffusion
         self.sigma_data = float(sigma_data)
+        if atom_representation not in {"atom14", "ca"}:
+            raise ValueError("atom_representation must be 'atom14' or 'ca'")
+        self.atom_representation = atom_representation
         self.global_step = int(global_step)
         self.references = tuple(
             index_shards(
@@ -540,6 +544,7 @@ class TrainingBatchDataset(IterableDataset[dict[str, Any]]):
                 sigma=sigma,
                 generator=generator,
                 translation_std=self.diffusion.translation_std,
+                atom_representation=self.atom_representation,
             )
             if progres_embedding is not None:
                 if len(clean["aatype"]) != reference.length:
@@ -604,6 +609,7 @@ def build_train_dataloader(
     diffusion: DiffusionConfig,
     *,
     sigma_data: float,
+    atom_representation: str = "atom14",
     global_step: int = 0,
 ) -> DataLoader:
     """Build the only training loader used by Hierarchical Kaveh."""
@@ -612,6 +618,7 @@ def build_train_dataloader(
         data,
         diffusion,
         sigma_data=sigma_data,
+        atom_representation=atom_representation,
         global_step=global_step,
     )
     kwargs: dict[str, Any] = {

@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> None:
             result.aatype,
             chain_lengths,
             start_index=completed,
+            atom_mask=result.topology.atom_mask,
         )
         completed += current_batch
 

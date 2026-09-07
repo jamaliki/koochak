@@ -298,6 +298,7 @@ def _run_training(config: RunConfig, *, resume: str | Path | None) -> dict[str, 
         config.data,
         config.diffusion,
         sigma_data=config.model.sigma_data,
+        atom_representation=config.model.atom_representation,
         global_step=global_step,
     )
     step = PallatomTrainingStep(

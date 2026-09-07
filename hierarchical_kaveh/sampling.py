@@ -56,6 +56,7 @@ def build_topology(
     *,
     chain_gap: int = 64,
     secondary_structure: Tensor | None = None,
+    atom_representation: str = "atom14",
 ) -> SampleTopology:
     """Build training-compatible chain IDs, residue indices, and break flags."""
 
@@ -73,11 +74,16 @@ def build_topology(
     residue_index = torch.cat(residue_parts).to(device).unsqueeze(0).expand(batch_size, -1)
     chain_index = torch.cat(chain_parts).to(device).unsqueeze(0).expand(batch_size, -1)
     chain_break = torch.cat(break_parts).to(device).unsqueeze(0).expand(batch_size, -1)
+    if atom_representation not in {"atom14", "ca"}:
+        raise ValueError("atom_representation must be 'atom14' or 'ca'")
     atom_mask = torch.ones(
         (batch_size, residue_index.shape[1], 14),
         dtype=torch.bool,
         device=device,
     )
+    if atom_representation == "ca":
+        atom_mask = torch.zeros_like(atom_mask)
+        atom_mask[..., 1] = True
     total_residues = residue_index.shape[1]
     if secondary_structure is None:
         secondary_structure_input = torch.full(
@@ -260,13 +266,17 @@ def sample(
         raise ValueError("coordinate self-conditioning mode must be aligned, raw, or disabled")
 
     device = torch.device(device)
+    model_config = _model_config(model) or ModelConfig()
     if use_intermediate_feedback is None:
-        model_config = _model_config(model)
         use_intermediate_feedback = bool(
             getattr(model_config, "intermediate_distogram_feedback", False)
         )
     topology = build_topology(
-        chain_lengths, batch_size, device, secondary_structure=secondary_structure_input
+        chain_lengths,
+        batch_size,
+        device,
+        secondary_structure=secondary_structure_input,
+        atom_representation=getattr(model_config, "atom_representation", "atom14"),
     )
     if progres_embedding is not None:
         if progres_embedding.shape != (batch_size, 128):
@@ -276,7 +286,7 @@ def sample(
         if progres_conditioning_mask.shape != (batch_size,):
             raise ValueError("progres_conditioning_mask must have [batch_size] shape")
         progres_conditioning_mask = progres_conditioning_mask.to(device=device, dtype=torch.bool)
-    sigma_data = float(getattr(_model_config(model), "sigma_data", ModelConfig().sigma_data))
+    sigma_data = float(getattr(model_config, "sigma_data", ModelConfig().sigma_data))
     time_grid = _sample_time_grid(
         config.num_steps,
         device=device,
@@ -293,7 +303,7 @@ def sample(
         dtype=torch.float32,
         device=device,
         generator=generator,
-    )
+    ) * topology.atom_mask[..., None]
     unknown_aatype = torch.full(
         topology.residue_index.shape,
         20,
@@ -354,7 +364,7 @@ def sample(
                 dtype=coordinates.dtype,
                 device=device,
                 generator=generator,
-            )
+            ) * topology.atom_mask[..., None]
             sigma_atoms = torch.full(
                 topology.atom_mask.shape,
                 sigma_hat,

@@ -300,6 +300,10 @@ class HierarchicalKaveh(nn.Module):
             raise ValueError("coordinates must have [B,N,14,3] shape")
         if atom_mask.shape != coordinates.shape[:3]:
             raise ValueError("atom_mask must have [B,N,14] shape")
+        if self.config.atom_representation == "ca":
+            ca_mask = torch.zeros_like(atom_mask)
+            ca_mask[..., 1] = atom_mask[..., 1]
+            atom_mask = atom_mask & ca_mask
         residue_shape = coordinates.shape[:2]
         for name in ("residue_index", "chain_index", "chain_break"):
             if getattr(inputs, name).shape != residue_shape:

@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import torch
 from torch import Tensor, nn
 
 from koochak.storage import checkpoint as checkpoint_lib
@@ -92,6 +93,7 @@ def write_pdb(
     coordinates: Tensor,
     aatype: Tensor,
     chain_lengths: Sequence[int],
+    atom_mask: Tensor | None = None,
 ) -> None:
     """Write one predicted Atom14 structure, omitting nonexistent sidechain slots."""
 
@@ -103,6 +105,12 @@ def write_pdb(
         raise ValueError(f"PDB output supports at most {len(CHAIN_IDS)} chains")
     xyz = coordinates.detach().float().cpu()
     sequence = aatype.detach().long().cpu()
+    if atom_mask is None:
+        output_mask = torch.ones(coordinates.shape[:2], dtype=torch.bool)
+    else:
+        if atom_mask.shape != coordinates.shape[:2]:
+            raise ValueError("atom_mask must have shape [N,14]")
+        output_mask = atom_mask.detach().bool().cpu()
     lines: list[str] = []
     serial = 1
     residue_offset = 0
@@ -114,6 +122,8 @@ def write_pdb(
             residue_type = residue_type if 0 <= residue_type < 20 else 7
             residue_name = RESTYPE_3[residue_type]
             for atom_slot, atom_name in enumerate(ATOM14_NAMES[residue_type]):
+                if not bool(output_mask[index, atom_slot]):
+                    continue
                 x, y, z = (float(value) for value in xyz[index, atom_slot])
                 element = atom_name[0]
                 lines.append(
@@ -136,6 +146,7 @@ def write_sample_batch(
     *,
     start_index: int = 0,
     secondary_structure: Tensor | None = None,
+    atom_mask: Tensor | None = None,
 ) -> None:
     """Write paired PDB and FASTA files for a sampled batch."""
 
@@ -143,10 +154,18 @@ def write_sample_batch(
     output_dir.mkdir(parents=True, exist_ok=True)
     if secondary_structure is not None and secondary_structure.shape != aatype.shape:
         raise ValueError("secondary_structure must have the same [batch,residues] shape as aatype")
+    if atom_mask is not None and atom_mask.shape != coordinates.shape[:3]:
+        raise ValueError("atom_mask must have the same [batch,residues,14] prefix as coordinates")
     ss_symbols = "HELX"
     for batch_index in range(coordinates.shape[0]):
         name = f"sample_{start_index + batch_index:05d}"
-        write_pdb(output_dir / f"{name}.pdb", coordinates[batch_index], aatype[batch_index], chain_lengths)
+        write_pdb(
+            output_dir / f"{name}.pdb",
+            coordinates[batch_index],
+            aatype[batch_index],
+            chain_lengths,
+            None if atom_mask is None else atom_mask[batch_index],
+        )
         write_fasta(output_dir / f"{name}.fasta", aatype[batch_index], chain_lengths, name)
         if secondary_structure is not None:
             write_text = "".join(
