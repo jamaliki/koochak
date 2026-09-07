@@ -9,7 +9,12 @@ import torch
 
 from koochak.cli.train import _maybe_add_scruffy_hooks
 from koochak.core import hooks as hooks_lib
-from koochak.logging.events import make_event_hooks, make_scruffy_hooks
+from koochak.logging.events import (
+    CheckpointAckTimeout,
+    CheckpointArtifactRejected,
+    make_event_hooks,
+    make_scruffy_hooks,
+)
 
 
 def _call(hooks, name, *args):
@@ -362,9 +367,9 @@ def test_scruffy_checkpoint_ack_rejection_fails_closed(monkeypatch, tmp_path) ->
     monkeypatch.setitem(sys.modules, "scruffy", module)
     hooks = make_scruffy_hooks(artifact_ack_timeout_s=1)
 
-    with pytest.raises(RuntimeError, match="did not acknowledge"):
+    with pytest.raises(CheckpointArtifactRejected) as first:
         _call(hooks, "on_checkpoint", str(checkpoint_path), checkpoint, {"step": 1})
-    with pytest.raises(RuntimeError, match="did not acknowledge"):
+    with pytest.raises(CheckpointArtifactRejected) as second:
         hooks_lib.emit(
             hooks,
             "on_checkpoint",
@@ -372,6 +377,37 @@ def test_scruffy_checkpoint_ack_rejection_fails_closed(monkeypatch, tmp_path) ->
             checkpoint,
             {"step": 1},
         )
+    assert first.value.code == CheckpointArtifactRejected.exit_code
+    assert second.value.artifact_id == "checkpoint/step000000001.pt"
+
+
+def test_scruffy_checkpoint_ack_timeout_uses_checkpoint_safe_exit(monkeypatch, tmp_path) -> None:
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    checkpoint_path = tmp_path / "step000000002.pt"
+    checkpoint = {"step": 2, "model": {}}
+    checkpoint_lib.save(checkpoint, str(checkpoint_path))
+    monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+
+    def delayed(_root, **_values):
+        return {
+            "state": "retryable_timeout",
+            "acknowledged": False,
+            "reason": "checkpoint_ack_timeout",
+        }
+
+    module = types.ModuleType("scruffy")
+    module.publish_event = delayed
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    hooks = make_scruffy_hooks(artifact_ack_timeout_s=1)
+
+    with pytest.raises(CheckpointAckTimeout) as raised:
+        _call(hooks, "on_checkpoint", str(checkpoint_path), checkpoint, {"step": 2})
+
+    assert raised.value.code == CheckpointAckTimeout.exit_code
+    assert raised.value.artifact_id == "checkpoint/step000000002.pt"
+    assert raised.value.checkpoint_path == str(checkpoint_path)
 
 
 def test_setup_failure_publishes_failed_phase(monkeypatch, tmp_path) -> None:

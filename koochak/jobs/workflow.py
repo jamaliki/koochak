@@ -12,7 +12,12 @@ from .manifest import PreparedRun
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _RETRY_REASONS = frozenset(
-    {"allocation_replaced", "allocation_incarnation_changed", "evacuated"}
+    {
+        "allocation_replaced",
+        "allocation_incarnation_changed",
+        "evacuated",
+        "checkpoint_ack_timeout",
+    }
 )
 
 

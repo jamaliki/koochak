@@ -10,6 +10,8 @@ import torch
 from .core import dist as dist_lib
 
 __all__ = [
+    "CHECKPOINT_ACK_TIMEOUT_EXIT_CODE",
+    "CHECKPOINT_ARTIFACT_REJECTED_EXIT_CODE",
     "EVACUATION_EXIT_CODE",
     "EvacuationController",
     "install_evacuation_handler",
@@ -17,6 +19,8 @@ __all__ = [
 
 
 EVACUATION_EXIT_CODE = 75
+CHECKPOINT_ACK_TIMEOUT_EXIT_CODE = 76
+CHECKPOINT_ARTIFACT_REJECTED_EXIT_CODE = 77
 
 
 def _signal_number(name: str | int) -> int:

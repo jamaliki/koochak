@@ -19,9 +19,18 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import torch
 
 from ..core.hooks import rank0_only
+from ..interruption import (
+    CHECKPOINT_ACK_TIMEOUT_EXIT_CODE,
+    CHECKPOINT_ARTIFACT_REJECTED_EXIT_CODE,
+)
 from ..storage import checkpoint as checkpoint_lib
 
-__all__ = ["make_event_hooks", "make_scruffy_hooks"]
+__all__ = [
+    "CheckpointAckTimeout",
+    "CheckpointArtifactRejected",
+    "make_event_hooks",
+    "make_scruffy_hooks",
+]
 
 
 Publish = Callable[[str, Dict[str, object]], object]
@@ -33,6 +42,29 @@ _MAX_PATH_CHARS = 1024
 _MAX_ERROR_CHARS = 512
 _MISSING = object()
 _ARTIFACT_ACK_TIMEOUT_ENV = "KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS"
+
+
+class CheckpointAckTimeout(SystemExit):
+    """A durable numbered checkpoint lacks a reconciled Scruffy receipt."""
+
+    exit_code = CHECKPOINT_ACK_TIMEOUT_EXIT_CODE
+
+    def __init__(self, artifact_id: str, checkpoint_path: str) -> None:
+        self.artifact_id = artifact_id
+        self.checkpoint_path = checkpoint_path
+        super().__init__(self.exit_code)
+
+
+class CheckpointArtifactRejected(SystemExit):
+    """Scruffy explicitly rejected a checkpoint artifact publication."""
+
+    exit_code = CHECKPOINT_ARTIFACT_REJECTED_EXIT_CODE
+
+    def __init__(self, artifact_id: str, checkpoint_path: str, state: object) -> None:
+        self.artifact_id = artifact_id
+        self.checkpoint_path = checkpoint_path
+        self.state = state
+        super().__init__(self.exit_code)
 
 
 def _scruffy_publisher() -> Publish:
@@ -327,8 +359,9 @@ def make_scruffy_hooks(
     ``SCRUFFY_ROOT`` and ``SCRUFFY_JOB_ID`` must be set. The Scruffy client is
     imported and validated here, before model or training-loop execution can
     begin. When ``artifact_ack_timeout_s`` is configured, strict checkpoint
-    artifact events wait for Scruffy acknowledgement and fail closed if the
-    acknowledgement is rejected or not received before the timeout.
+    artifact events wait for Scruffy acknowledgement and fail closed with a
+    checkpoint-safe exit if the acknowledgement cannot be reconciled by the
+    bounded deadline.
     """
 
     if artifact_ack_timeout_s is None:
@@ -374,28 +407,45 @@ def make_scruffy_hooks(
             and kind == "workload.artifact"
             and isinstance(publication, Mapping)
         )
-        result = publish_event(
-            root,
-            job_id=job_id,
-            kind=kind,
-            data=data,
-            source=source,
-            **({"event_id": event_id} if event_id is not None else {}),
-            **(
-                {"wait": True, "timeout": artifact_ack_timeout_s}
-                if wait_for_ack
-                else {}
-            ),
-        )
+        try:
+            result = publish_event(
+                root,
+                job_id=job_id,
+                kind=kind,
+                data=data,
+                source=source,
+                **({"event_id": event_id} if event_id is not None else {}),
+                **(
+                    {"wait": True, "timeout": artifact_ack_timeout_s}
+                    if wait_for_ack
+                    else {}
+                ),
+            )
+        except TimeoutError as exc:
+            if wait_for_ack and isinstance(publication, Mapping):
+                raise CheckpointAckTimeout(
+                    str(publication.get("artifact_id", "unknown")),
+                    str(publication.get("path", "unknown")),
+                ) from exc
+            raise
         if wait_for_ack and (
             not isinstance(result, Mapping)
             or result.get("state") != "accepted"
             or result.get("acknowledged") is not True
         ):
             state = result.get("state") if isinstance(result, Mapping) else None
-            raise RuntimeError(
-                "Scruffy did not acknowledge checkpoint artifact publication"
-                + (f" (state={state!r})" if state is not None else "")
+            if state == "retryable_timeout" or (
+                isinstance(result, Mapping)
+                and result.get("reason") == "checkpoint_ack_timeout"
+            ):
+                raise CheckpointAckTimeout(
+                    str(publication.get("artifact_id", "unknown")),
+                    str(publication.get("path", "unknown")),
+                )
+            raise CheckpointArtifactRejected(
+                str(publication.get("artifact_id", "unknown")),
+                str(publication.get("path", "unknown")),
+                state,
             )
         return result
 
