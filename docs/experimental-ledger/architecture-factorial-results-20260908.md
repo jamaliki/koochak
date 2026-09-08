@@ -32,6 +32,14 @@ clear DiT winner. The no-sandwich flat-depth arm has continued its late decline
 not merely a noisy early checkpoint. Full attention remains a negative control:
 its high sequence identity and zero designability are consistent with collapse.
 
+The separately launched pooled-depth+sandwich DiT arm has also completed its
+50k analysis: **12/32** designable samples and **4** Progres clusters with
+cluster sizes 6, 4, 1, and 1. Generated and ESMFold embeddings agree on the
+designable cluster count. At the latest training log check (step 68,395), loss
+was finite at 1.66 and attention, node-FFN, and pair stream RMS values were
+3.37, 1.54, and 2.95 respectively. The next checkpoint analyses have not yet
+landed.
+
 Durable source root:
 
 ```text
@@ -105,7 +113,8 @@ Durable source root:
 - The corrected gain-invariant factorial (`691f07a`) has passed its preflights
   and is training 12 cells, but has no scientific checkpoint result yet.
 - The separately requested pooled-depth+sandwich DiT job (`37598e7`) is still
-  training; no analysis artifact has landed.
+  training and has a valid 50k analysis; later checkpoint analyses have not
+  landed yet.
 - The earlier failed gain-invariant launch (`9955962`) is an infrastructure
   failure from the bounded-DiT MLP path and must not enter any scientific
   comparison.
