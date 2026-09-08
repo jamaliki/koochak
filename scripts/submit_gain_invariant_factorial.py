@@ -265,7 +265,7 @@ def _evaluation_tasks(
     profiles: Mapping[str, Any],
     train_id: str,
     train_dir: Path,
-    attestation_artifact: str,
+    attestation_artifact: str | None,
 ) -> list[PreparedTask]:
     tasks: list[PreparedTask] = []
     for step in cell.milestones:
@@ -336,11 +336,14 @@ def _evaluation_tasks(
                 "--output", str(analysis_file),
             ],
         )
+        analysis_wait_for = (
+            {"kind": "artifact", "task_id": "attest-progres-data", "artifact_id": attestation_artifact},
+        ) if attestation_artifact is not None else ()
         tasks.append(PreparedTask(
             analysis_id, analysis_run, ANALYSIS_RESOURCES,
             wait_for=(
                 {"kind": "artifact", "task_id": esmfold_id, "artifact_id": esmfold_output.artifact_id},
-                {"kind": "artifact", "task_id": "attest-progres-data", "artifact_id": attestation_artifact},
+                *analysis_wait_for,
             ),
             recovery=RECOVERY,
         ))

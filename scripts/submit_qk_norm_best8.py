@@ -157,8 +157,8 @@ def _resolved_diff(cell: Cell, prepared: shared.PreparedRun) -> dict[str, Any]:
 
 def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str, Any]]:
     short = code_commit[:7]
-    workflow = f"hk-qk-norm-best8-L128-{short}"
-    output_root = REMOTE_RUN_ROOT / "qk-norm-best8-L128" / code_commit
+    workflow = f"hk-qk-norm-best8-L128-{short}-v2"
+    output_root = REMOTE_RUN_ROOT / "qk-norm-best8-L128" / code_commit / "v2"
     cwd = str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}")
     profiles = {
         "gpu": shared._profile(GPU_PROFILE),
@@ -167,20 +167,6 @@ def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str
     }
     tasks: list[shared.PreparedTask] = []
     diffs: list[dict[str, Any]] = []
-
-    attest_id = "attest-progres-data"
-    attest_file = output_root / "progres/attestation.json"
-    attest_output = shared.robust._output(
-        "progres/attestation.json", attest_file, stage="attestation", workflow=workflow,
-        task=attest_id, kind="file", code_commit=code_commit, expected_records=1,
-    )
-    attest_run = shared.robust._stage_run(
-        stage="attestation", task=attest_id, workflow=workflow, code_commit=code_commit,
-        artifact=attest_output, run_dir=output_root / "managed/attest-progres-data",
-        profile=profiles["progres"], cwd=cwd,
-        command=["{cwd}/scripts/attest_progres_data.py", "--data-dir", str(PROGRES_DATA), "--output", str(attest_file)],
-    )
-    tasks.append(shared.PreparedTask(attest_id, attest_run, ANALYSIS_RESOURCES, recovery=RECOVERY))
 
     # The shared evaluator is deliberately reused, but its patch function is swapped
     # only within this process so every train/sample config gets the same QK-only diff.
@@ -226,7 +212,7 @@ def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str
             tasks.extend(shared._evaluation_tasks(
                 cell, workflow=workflow, code_commit=code_commit, output_root=output_root, cwd=cwd,
                 profiles=profiles, train_id=train_id, train_dir=train_dir,
-                attestation_artifact=attest_output.artifact_id,
+                attestation_artifact=None,
             ))
     finally:
         shared._patches = old_patches
@@ -235,7 +221,7 @@ def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str
         request_id=f"{PROJECT_ID}/{workflow}/v1", workflow_id=workflow,
         project_id=PROJECT_ID, tasks=tuple(tasks),
     )
-    expected_tasks = 1 + len(CELLS) * (2 + 3 * len(CELLS[0].milestones))
+    expected_tasks = len(CELLS) * (2 + 3 * len(CELLS[0].milestones))
     if len(prepared.tasks) != expected_tasks:
         raise AssertionError(f"expected {expected_tasks} tasks, built {len(prepared.tasks)}")
     description = {
@@ -253,6 +239,11 @@ def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str
             "fixed_logit_scale": "1/sqrt(head_dim)",
             "all_parent_architecture_and_gain_paths_preserved": True,
         },
+        "progres_data_contract": {
+            "data_dir": str(PROGRES_DATA),
+            "attestation_task": "omitted to remain within Scruffy's 256-task workflow limit",
+            "analysis_inputs_are_pinned_and_read_only": True,
+        },
         "selection_basis": "top eight 250k ledger arms, including the 17/32 objective tie and DiT winner",
         "cells": [
             {
@@ -268,7 +259,7 @@ def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str
         ],
         "task_count": len(prepared.tasks),
         "task_counts": {
-            "attestation": 1,
+            "attestation": 0,
             "preflights": len(CELLS),
             "trainers": len(CELLS),
             "sampling": len(CELLS) * len(CELLS[0].milestones),
