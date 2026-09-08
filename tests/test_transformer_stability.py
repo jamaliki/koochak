@@ -95,6 +95,19 @@ def test_bounded_dit_removes_residual_gates_and_bounds_branch_modulation() -> No
     assert all(torch.count_nonzero(value) == 0 for value in values)
 
 
+def test_bounded_dit_full_model_forward_has_no_residual_gate_dependency() -> None:
+    model = HierarchicalKaveh(
+        small_config(
+            block_conditioning_style="dit_bounded",
+            qk_norm_mode="per_head_rms",
+            pair_residual_mode="fixed_unit_rms",
+        )
+    ).eval()
+    output = model(sample_input(), compute_distogram=False)
+    assert torch.isfinite(output.coordinates).all()
+    assert torch.isfinite(output.aatype_logits).all()
+
+
 def test_fixed_gain_modes_remove_qk_affine_and_pair_scale_parameters() -> None:
     model = HierarchicalKaveh(
         small_config(

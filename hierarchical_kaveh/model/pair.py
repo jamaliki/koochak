@@ -632,7 +632,9 @@ class CoarseBlock(nn.Module):
             ffn_update = self.ffn.update(x, condition)
         else:
             mlp_input = self.adaln_zero.mlp_input(x, shift_mlp, scale_mlp)
-            ffn_update = mlp_gate.to(x.dtype) * self.ffn.project(mlp_input)
+            ffn_update = self.ffn.project(mlp_input)
+            if mlp_gate is not None:
+                ffn_update = mlp_gate.to(x.dtype) * ffn_update
         x, ffn_stats = apply_residual_stage(
             x,
             ffn_update,
