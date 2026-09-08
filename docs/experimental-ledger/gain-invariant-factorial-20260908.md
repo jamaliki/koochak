@@ -2,8 +2,14 @@
 
 ## Status
 
-Launch candidate. This factorial applies the gain-invariant package to every
-active L128 architecture cell rather than only the current best DiT arm.
+Active corrected launch. This factorial applies the gain-invariant package to
+every active L128 architecture cell rather than only the current best DiT arm.
+
+The first launch at `9955962` failed its preflights because the bounded DiT
+path still dereferenced a removed MLP gate; it produced no scientific result.
+The corrected launch at `691f07a` passed all 12/12 preflights and is currently
+training 12 cells. Its downstream sample/ESMFold/analysis jobs remain blocked
+on those training outputs, so no gain-invariant result is included yet.
 
 ## Scientific intervention
 

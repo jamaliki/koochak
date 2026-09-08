@@ -11,6 +11,7 @@ than silently treating them as zeroes.
 - [Filtered latent recycling-best2 at 100k](filtered-recycling-best2-step100k.md)
 - [Foldability snapshot: checkpoints landed in the 12-hour window](filtered-checkpoint-foldability-12h.md)
 - [b280 length-256 continuation: verified 450k foldability](latent-selected4-b280-450k.md)
+- [Architecture factorial results: DiT, objective, and stability endpoints](architecture-factorial-results-20260908.md)
 
 The older, broad ESMFold rescore remains the canonical machine-readable
 inventory for historical panels:
