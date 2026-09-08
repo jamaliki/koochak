@@ -7,9 +7,11 @@ import torch
 
 from hierarchical_kaveh.config import ModelConfig
 from hierarchical_kaveh.model import HierarchicalKaveh
+from hierarchical_kaveh.model.attention import _normalize_qkv
 from hierarchical_kaveh.model.layers import (
     DiTAdaLNZero,
     NonAffineRMSNorm,
+    UnitRMSNorm,
     apply_residual_stage,
 )
 from tests.test_model import sample_input, small_config
@@ -23,6 +25,13 @@ def test_attention_residual_scale_is_strictly_validated() -> None:
 def test_block_conditioning_style_is_strictly_validated() -> None:
     with pytest.raises(ValueError, match="block_conditioning_style"):
         ModelConfig(block_conditioning_style="almost_dit")
+
+
+def test_gain_invariant_modes_are_strictly_validated() -> None:
+    with pytest.raises(ValueError, match="qk_norm_mode"):
+        ModelConfig(qk_norm_mode="learned_temperature")
+    with pytest.raises(ValueError, match="pair_residual_mode"):
+        ModelConfig(pair_residual_mode="tanh_scalar")
 
 
 def test_dit_adaln_zero_uses_the_canonical_modulation_equation() -> None:
@@ -72,6 +81,61 @@ def test_dit_adaln_zero_starts_as_identity_and_opens_through_gates() -> None:
     assert torch.count_nonzero(block.attention.output.weight.grad) == 0
     assert block.ffn.down.weight.grad is not None
     assert torch.count_nonzero(block.ffn.down.weight.grad) == 0
+
+
+def test_bounded_dit_removes_residual_gates_and_bounds_branch_modulation() -> None:
+    module = DiTAdaLNZero(width=4, condition_dim=3, bounded=True)
+    assert len(tuple(module.parameters())) == 2
+    condition = torch.randn(2, 5, 3) * 100.0
+    values = module.modulation_parameters(condition)
+    assert len(values) == 4
+    assert all(float(value.detach().abs().max()) <= 0.5 + 1e-6 for value in values)
+    assert module.condition_norm.elementwise_affine is False
+    assert isinstance(module.norm1, torch.nn.LayerNorm)
+    assert all(torch.count_nonzero(value) == 0 for value in values)
+
+
+def test_fixed_gain_modes_remove_qk_affine_and_pair_scale_parameters() -> None:
+    model = HierarchicalKaveh(
+        small_config(
+            attention_residual_scale="depth",
+            sandwich_rmsnorm=True,
+            block_conditioning_style="dit_bounded",
+            qk_norm_mode="per_head_rms",
+            pair_residual_mode="fixed_unit_rms",
+        )
+    )
+    assert not any(
+        name.endswith(suffix)
+        for name, _ in model.named_parameters()
+        for suffix in ("q_norm.weight", "q_norm.bias", "k_norm.weight", "k_norm.bias")
+    )
+    assert all(
+        not block.pair_multiplication.outgoing_scale.requires_grad
+        and not block.pair_multiplication.incoming_scale.requires_grad
+        and isinstance(block.pair_multiplication.pair_post_norm, UnitRMSNorm)
+        for block in model.coarse
+    )
+
+
+def test_per_head_qk_rms_is_parameter_free_and_unit_scale() -> None:
+    qkv = torch.randn(2, 7, 3 * 4 * 8, dtype=torch.bfloat16)
+    query, key, value = _normalize_qkv(
+        qkv,
+        None,
+        None,
+        heads=4,
+        head_dim=8,
+        mode="per_head_rms",
+    )
+    assert query.dtype == qkv.dtype
+    assert key.dtype == qkv.dtype
+    assert torch.equal(value, qkv[..., 2 * 4 * 8 :])
+    for tensor in (query, key):
+        head = tensor.float().reshape(2, 7, 4, 8)
+        torch.testing.assert_close(
+            head.square().mean(-1), torch.ones(2, 7, 4), atol=2e-2, rtol=2e-2
+        )
 
 
 def test_dit_adaln_zero_is_wired_to_every_node_transformer_block() -> None:

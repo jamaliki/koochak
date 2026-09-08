@@ -40,7 +40,31 @@ def smooth_sigma_gate(
     return progress.square() * (3.0 - 2.0 * progress)
 
 
-def _normalize_qkv(qkv: Tensor, q_norm: nn.LayerNorm, k_norm: nn.LayerNorm) -> tuple[Tensor, Tensor, Tensor]:
+def _normalize_qkv(
+    qkv: Tensor,
+    q_norm: nn.LayerNorm | None,
+    k_norm: nn.LayerNorm | None,
+    *,
+    heads: int,
+    head_dim: int,
+    mode: str,
+) -> tuple[Tensor, Tensor, Tensor]:
+    if mode == "per_head_rms":
+        query, key, value = qkv.chunk(3, dim=-1)
+        shape = (*query.shape[:-1], heads, head_dim)
+
+        def normalize_head(value: Tensor) -> Tensor:
+            value = value.reshape(shape)
+            normalized = value.float() * torch.rsqrt(
+                value.float().square().mean(-1, keepdim=True) + 1.0e-6
+            )
+            return normalized.to(qkv.dtype).flatten(-2)
+
+        return normalize_head(query), normalize_head(key), value
+    if mode != "affine_layernorm":
+        raise ValueError(f"unknown Q/K normalization mode: {mode!r}")
+    if q_norm is None or k_norm is None:
+        raise ValueError("affine Q/K normalization requires query and key norms")
     if qkv.is_cuda and qkv.dtype == torch.bfloat16 and qkv.numel() // qkv.shape[-1] >= 4096:
         try:
             from .kernels.qk_norm import normalize
@@ -158,6 +182,7 @@ class AtomAttention(nn.Module):
         radius: int,
         *,
         dit_adaln_zero: bool = False,
+        qk_norm_mode: str = "affine_layernorm",
     ):
         super().__init__()
         self.heads, self.head_dim, self.radius = heads, head_dim, radius
@@ -167,7 +192,9 @@ class AtomAttention(nn.Module):
             nn.Linear(atom_dim, 3 * inner, bias=False),
             "dit" if dit_adaln_zero else "normal",
         )
-        self.q_norm, self.k_norm = nn.LayerNorm(inner), nn.LayerNorm(inner)
+        self.qk_norm_mode = qk_norm_mode
+        self.q_norm = nn.LayerNorm(inner) if qk_norm_mode == "affine_layernorm" else None
+        self.k_norm = nn.LayerNorm(inner) if qk_norm_mode == "affine_layernorm" else None
         self.gate = (
             None
             if dit_adaln_zero
@@ -179,7 +206,10 @@ class AtomAttention(nn.Module):
 
     def forward(self, x: Tensor, condition: Tensor, atom_mask: Tensor, segment_index: Tensor) -> Tensor:
         normalized = self.norm(x)
-        query, key, value = _normalize_qkv(self.qkv(normalized), self.q_norm, self.k_norm)
+        query, key, value = _normalize_qkv(
+            self.qkv(normalized), self.q_norm, self.k_norm,
+            heads=self.heads, head_dim=self.head_dim, mode=self.qk_norm_mode,
+        )
         shape = (*query.shape[:-1], self.heads, self.head_dim)
         attended = atom_attention(
             query.reshape(shape), key.reshape(shape), value.reshape(shape), atom_mask, segment_index, self.radius
@@ -207,11 +237,14 @@ class AtomBlock(nn.Module):
         sandwich_rmsnorm: bool = False,
         ffn_residual_scale: float = 1.0,
         conditioning_style: str = "adaptive_rmsnorm",
+        qk_norm_mode: str = "affine_layernorm",
     ):
         super().__init__()
-        dit_adaln_zero = conditioning_style == "dit_adaln_zero"
+        dit_adaln_zero = conditioning_style in {"dit_adaln_zero", "dit_bounded"}
+        self.dit_bounded = conditioning_style == "dit_bounded"
         self.adaln_zero = (
-            DiTAdaLNZero(atom_dim, condition_dim) if dit_adaln_zero else None
+            DiTAdaLNZero(atom_dim, condition_dim, bounded=self.dit_bounded)
+            if dit_adaln_zero else None
         )
         self.attention = AtomAttention(
             atom_dim,
@@ -220,6 +253,7 @@ class AtomBlock(nn.Module):
             head_dim,
             radius,
             dit_adaln_zero=dit_adaln_zero,
+            qk_norm_mode=qk_norm_mode,
         )
         self.ffn = FeedForward(
             atom_dim,
@@ -245,14 +279,19 @@ class AtomBlock(nn.Module):
             attention_input = x
             attention_gate = None
         else:
-            (
-                shift_attention,
-                scale_attention,
-                attention_gate,
-                shift_mlp,
-                scale_mlp,
-                mlp_gate,
-            ) = self.adaln_zero.modulation_parameters(atom_condition)
+            modulation = self.adaln_zero.modulation_parameters(atom_condition)
+            if self.dit_bounded:
+                shift_attention, scale_attention, shift_mlp, scale_mlp = modulation
+                attention_gate = mlp_gate = None
+            else:
+                (
+                    shift_attention,
+                    scale_attention,
+                    attention_gate,
+                    shift_mlp,
+                    scale_mlp,
+                    mlp_gate,
+                ) = modulation
             attention_input = self.adaln_zero.attention_input(
                 x, shift_attention, scale_attention
             )
@@ -424,6 +463,7 @@ class GlobalAttention(nn.Module):
         head_dim: int,
         *,
         dit_adaln_zero: bool = False,
+        qk_norm_mode: str = "affine_layernorm",
     ):
         super().__init__()
         self.heads, self.head_dim = heads, head_dim
@@ -433,7 +473,9 @@ class GlobalAttention(nn.Module):
             nn.Linear(node_dim, 3 * inner, bias=False),
             "dit" if dit_adaln_zero else "normal",
         )
-        self.q_norm, self.k_norm = nn.LayerNorm(inner), nn.LayerNorm(inner)
+        self.qk_norm_mode = qk_norm_mode
+        self.q_norm = nn.LayerNorm(inner) if qk_norm_mode == "affine_layernorm" else None
+        self.k_norm = nn.LayerNorm(inner) if qk_norm_mode == "affine_layernorm" else None
         self.rope = RotaryEmbedding(head_dim)
         self.gate = (
             None
@@ -446,7 +488,10 @@ class GlobalAttention(nn.Module):
 
     def _project(self, x: Tensor, positions: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         normalized = self.norm(x)
-        query, key, value = _normalize_qkv(self.qkv(normalized), self.q_norm, self.k_norm)
+        query, key, value = _normalize_qkv(
+            self.qkv(normalized), self.q_norm, self.k_norm,
+            heads=self.heads, head_dim=self.head_dim, mode=self.qk_norm_mode,
+        )
         shape = (*query.shape[:-1], self.heads, self.head_dim)
         query, key = self.rope(query.reshape(shape), key.reshape(shape), positions)
         return normalized, query, key, value.reshape(shape)
@@ -477,11 +522,14 @@ class GlobalBlock(nn.Module):
         attention_residual_scale: float = 1.0,
         sandwich_rmsnorm: bool = False,
         conditioning_style: str = "adaptive_rmsnorm",
+        qk_norm_mode: str = "affine_layernorm",
     ):
         super().__init__()
-        dit_adaln_zero = conditioning_style == "dit_adaln_zero"
+        dit_adaln_zero = conditioning_style in {"dit_adaln_zero", "dit_bounded"}
+        self.dit_bounded = conditioning_style == "dit_bounded"
         self.adaln_zero = (
-            DiTAdaLNZero(node_dim, condition_dim) if dit_adaln_zero else None
+            DiTAdaLNZero(node_dim, condition_dim, bounded=self.dit_bounded)
+            if dit_adaln_zero else None
         )
         self.attention = GlobalAttention(
             node_dim,
@@ -489,6 +537,7 @@ class GlobalBlock(nn.Module):
             heads,
             head_dim,
             dit_adaln_zero=dit_adaln_zero,
+            qk_norm_mode=qk_norm_mode,
         )
         self.ffn = FeedForward(
             node_dim,
@@ -515,14 +564,19 @@ class GlobalBlock(nn.Module):
             attention_input = x
             attention_gate = None
         else:
-            (
-                shift_attention,
-                scale_attention,
-                attention_gate,
-                shift_mlp,
-                scale_mlp,
-                mlp_gate,
-            ) = self.adaln_zero.modulation_parameters(condition)
+            modulation = self.adaln_zero.modulation_parameters(condition)
+            if self.dit_bounded:
+                shift_attention, scale_attention, shift_mlp, scale_mlp = modulation
+                attention_gate = mlp_gate = None
+            else:
+                (
+                    shift_attention,
+                    scale_attention,
+                    attention_gate,
+                    shift_mlp,
+                    scale_mlp,
+                    mlp_gate,
+                ) = modulation
             attention_input = self.adaln_zero.attention_input(
                 x, shift_attention, scale_attention
             )

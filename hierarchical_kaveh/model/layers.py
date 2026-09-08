@@ -56,6 +56,10 @@ class NonAffineRMSNorm(nn.Module):
         return normalized.to(x.dtype)
 
 
+class UnitRMSNorm(NonAffineRMSNorm):
+    """Parameter-free RMS normalization used at fixed-gain pair updates."""
+
+
 def _masked_rms(x: Tensor, mask: Tensor | None) -> Tensor:
     """Return one float32 RMS, excluding padded stream positions."""
 
@@ -124,13 +128,29 @@ class DiTAdaLNZero(nn.Module):
     The projection is zero-initialized so both residual branches start closed.
     """
 
-    def __init__(self, width: int, condition_dim: int):
+    def __init__(
+        self,
+        width: int,
+        condition_dim: int,
+        *,
+        bounded: bool = False,
+        modulation_limit: float = 0.5,
+    ):
         super().__init__()
+        if modulation_limit <= 0:
+            raise ValueError("modulation_limit must be positive")
+        self.bounded = bool(bounded)
+        self.modulation_limit = float(modulation_limit)
+        self.condition_norm = (
+            nn.LayerNorm(condition_dim, elementwise_affine=False)
+            if self.bounded else nn.Identity()
+        )
         self.norm1 = nn.LayerNorm(width, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(width, elementwise_affine=False, eps=1e-6)
+        modulation_width = 4 if self.bounded else 6
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            init_linear(nn.Linear(condition_dim, 6 * width, bias=True), "zero"),
+            init_linear(nn.Linear(condition_dim, modulation_width * width, bias=True), "zero"),
         )
 
     @staticmethod
@@ -140,7 +160,13 @@ class DiTAdaLNZero(nn.Module):
     def modulation_parameters(
         self, condition: Tensor
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        return self.adaLN_modulation(condition).chunk(6, dim=-1)
+        values = self.adaLN_modulation(self.condition_norm(condition)).chunk(
+            4 if self.bounded else 6, dim=-1
+        )
+        if not self.bounded:
+            return values
+        limit = self.modulation_limit
+        return tuple(limit * value.tanh() for value in values)
 
     def attention_input(
         self,

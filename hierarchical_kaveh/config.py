@@ -62,6 +62,9 @@ class ModelConfig:
     # FFN addition.  The norm is non-affine and is applied after the add; it
     # never rescales a raw zero-initialized branch update.
     sandwich_rmsnorm: bool = False
+    # Explicit controls for the gain paths identified by the stability audit.
+    qk_norm_mode: str = "affine_layernorm"
+    pair_residual_mode: str = "learned"
     patchify_mode: str = "masked_pool"
     coarse_pair_position: str = "after_node"
     coarse_pair_transition: bool = False
@@ -140,10 +143,19 @@ class ModelConfig:
         if self.block_conditioning_style not in {
             "adaptive_rmsnorm",
             "dit_adaln_zero",
+            "dit_bounded",
         }:
             raise ValueError(
                 "block_conditioning_style must be 'adaptive_rmsnorm' "
-                "or 'dit_adaln_zero'"
+                ", 'dit_adaln_zero', or 'dit_bounded'"
+            )
+        if self.qk_norm_mode not in {"affine_layernorm", "per_head_rms"}:
+            raise ValueError(
+                "qk_norm_mode must be 'affine_layernorm' or 'per_head_rms'"
+            )
+        if self.pair_residual_mode not in {"learned", "fixed_unit_rms"}:
+            raise ValueError(
+                "pair_residual_mode must be 'learned' or 'fixed_unit_rms'"
             )
         if not (
             0.0 <= self.atom_to_residue_sidechain_sigma_full

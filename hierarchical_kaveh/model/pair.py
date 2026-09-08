@@ -18,6 +18,7 @@ from .layers import (
     GEGLU,
     NonAffineRMSNorm,
     RMSNorm,
+    UnitRMSNorm,
     RotaryEmbedding,
     apply_residual_stage,
     init_linear,
@@ -285,6 +286,7 @@ class PairBiasAttention(nn.Module):
         registers: int,
         *,
         dit_adaln_zero: bool = False,
+        qk_norm_mode: str = "affine_layernorm",
     ):
         super().__init__()
         self.heads, self.head_dim, self.registers = heads, head_dim, registers
@@ -294,7 +296,9 @@ class PairBiasAttention(nn.Module):
             nn.Linear(node_dim, 3 * inner, bias=False),
             "dit" if dit_adaln_zero else "normal",
         )
-        self.q_norm, self.k_norm = nn.LayerNorm(inner), nn.LayerNorm(inner)
+        self.qk_norm_mode = qk_norm_mode
+        self.q_norm = nn.LayerNorm(inner) if qk_norm_mode == "affine_layernorm" else None
+        self.k_norm = nn.LayerNorm(inner) if qk_norm_mode == "affine_layernorm" else None
         self.rope = RotaryEmbedding(head_dim)
         self.pair_norm = nn.LayerNorm(pair_dim, eps=1e-5)
         self.bias = init_linear(nn.Linear(pair_dim, heads, bias=False), "zero")
@@ -311,7 +315,10 @@ class PairBiasAttention(nn.Module):
         self, x: Tensor, condition: Tensor, pair: Tensor, mask: Tensor, positions: Tensor
     ) -> Tensor:
         normalized = self.node_norm(x)
-        query, key, value = _normalize_qkv(self.qkv(normalized), self.q_norm, self.k_norm)
+        query, key, value = _normalize_qkv(
+            self.qkv(normalized), self.q_norm, self.k_norm,
+            heads=self.heads, head_dim=self.head_dim, mode=self.qk_norm_mode,
+        )
         shape = (*query.shape[:-1], self.heads, self.head_dim)
         query, key, value = query.reshape(shape), key.reshape(shape), value.reshape(shape)
         query_tail, key_tail = self.rope(
@@ -430,15 +437,34 @@ class TriangleMultiplication(nn.Module):
 
 
 class PairMultiplicationBlock(nn.Module):
-    """Outgoing then incoming multiplication; no triangle attention or transition."""
+    """Outgoing then incoming multiplication with explicit gain control."""
 
-    def __init__(self, pair_dim: int, dropout: float):
+    def __init__(
+        self,
+        pair_dim: int,
+        dropout: float,
+        residual_scale: float = 0.25,
+        residual_mode: str = "learned",
+    ):
         super().__init__()
+        if residual_mode not in {"learned", "fixed_unit_rms"}:
+            raise ValueError("pair residual mode must be 'learned' or 'fixed_unit_rms'")
         self.outgoing = TriangleMultiplication(pair_dim, "outgoing")
         self.incoming = TriangleMultiplication(pair_dim, "incoming")
         self.dropout = dropout
-        self.outgoing_scale = nn.Parameter(torch.tensor(0.25))
-        self.incoming_scale = nn.Parameter(torch.tensor(0.25))
+        self.residual_mode = residual_mode
+        if residual_mode == "learned":
+            self.outgoing_scale = nn.Parameter(torch.tensor(0.25))
+            self.incoming_scale = nn.Parameter(torch.tensor(0.25))
+            self.pair_post_norm = None
+        else:
+            self.register_buffer(
+                "outgoing_scale", torch.tensor(float(residual_scale)), persistent=False
+            )
+            self.register_buffer(
+                "incoming_scale", torch.tensor(float(residual_scale)), persistent=False
+            )
+            self.pair_post_norm = UnitRMSNorm()
 
     def _dropout_values(self, pair: Tensor) -> Tensor:
         if self.training and self.dropout:
@@ -456,7 +482,7 @@ class PairMultiplicationBlock(nn.Module):
         dropout_values: Tensor,
         scale: Tensor,
     ) -> Tensor:
-        if pair.is_cuda and pair.dtype in {torch.float16, torch.bfloat16}:
+        if self.pair_post_norm is None and pair.is_cuda and pair.dtype in {torch.float16, torch.bfloat16}:
             try:
                 from .kernels.triangle import gated_residual
 
@@ -465,7 +491,11 @@ class PairMultiplicationBlock(nn.Module):
                 fused_failure("gated pair residual", error)
         update = update * gate.sigmoid() * pair_mask[..., None].to(update.dtype)
         update = update * dropout_values[:, :, None, None]
-        return (pair + scale.to(pair.dtype) * update) * pair_mask[..., None].to(pair.dtype)
+        pair = (pair + scale.to(pair.dtype) * update) * pair_mask[..., None].to(pair.dtype)
+        if self.pair_post_norm is not None:
+            pair = self.pair_post_norm(pair)
+            pair = pair * pair_mask[..., None].to(pair.dtype)
+        return pair
 
     def forward(self, pair: Tensor, pair_mask: Tensor) -> Tensor:
         outgoing_dropout, incoming_dropout = self._dropout_values(pair), self._dropout_values(pair)
@@ -496,17 +526,22 @@ class CoarseBlock(nn.Module):
         pair_position: str = "after_node",
         pair_transition: bool = False,
         pair_ffn_expansion: int = 4,
+        pair_residual_scale: float = 0.25,
         attention_residual_scale: float | None = None,
         sandwich_rmsnorm: bool = False,
         conditioning_style: str = "adaptive_rmsnorm",
+        qk_norm_mode: str = "affine_layernorm",
+        pair_residual_mode: str = "learned",
     ):
         super().__init__()
         if pair_position not in {"after_node", "before_attention"}:
             raise ValueError("pair position must be 'after_node' or 'before_attention'")
         self.pair_position = pair_position
-        dit_adaln_zero = conditioning_style == "dit_adaln_zero"
+        dit_adaln_zero = conditioning_style in {"dit_adaln_zero", "dit_bounded"}
+        self.dit_bounded = conditioning_style == "dit_bounded"
         self.adaln_zero = (
-            DiTAdaLNZero(node_dim, condition_dim) if dit_adaln_zero else None
+            DiTAdaLNZero(node_dim, condition_dim, bounded=self.dit_bounded)
+            if dit_adaln_zero else None
         )
         self.attention = PairBiasAttention(
             node_dim,
@@ -516,6 +551,7 @@ class CoarseBlock(nn.Module):
             head_dim,
             registers,
             dit_adaln_zero=dit_adaln_zero,
+            qk_norm_mode=qk_norm_mode,
         )
         self.ffn = FeedForward(
             node_dim,
@@ -535,7 +571,12 @@ class CoarseBlock(nn.Module):
         self.attention_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
         self.ffn_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
         self.pair_ffn_post_norm = NonAffineRMSNorm() if sandwich_rmsnorm else None
-        self.pair_multiplication = PairMultiplicationBlock(pair_dim, dropout)
+        self.pair_multiplication = PairMultiplicationBlock(
+            pair_dim,
+            dropout,
+            residual_scale=pair_residual_scale,
+            residual_mode=pair_residual_mode,
+        )
         self.pair_ffn = (
             FeedForward(pair_dim, None, pair_ffn_expansion, dropout, residual_scale)
             if pair_transition
@@ -559,14 +600,19 @@ class CoarseBlock(nn.Module):
             attention_input = x
             attention_gate = None
         else:
-            (
-                shift_attention,
-                scale_attention,
-                attention_gate,
-                shift_mlp,
-                scale_mlp,
-                mlp_gate,
-            ) = self.adaln_zero.modulation_parameters(condition)
+            modulation = self.adaln_zero.modulation_parameters(condition)
+            if self.dit_bounded:
+                shift_attention, scale_attention, shift_mlp, scale_mlp = modulation
+                attention_gate = mlp_gate = None
+            else:
+                (
+                    shift_attention,
+                    scale_attention,
+                    attention_gate,
+                    shift_mlp,
+                    scale_mlp,
+                    mlp_gate,
+                ) = modulation
             attention_input = self.adaln_zero.attention_input(
                 x, shift_attention, scale_attention
             )
