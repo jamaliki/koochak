@@ -167,8 +167,8 @@ def _resolved_diff(cell: Cell, prepared: shared.PreparedRun) -> dict[str, Any]:
 
 def _build_workflow(code_commit: str) -> tuple[shared.PreparedWorkflow, dict[str, Any]]:
     short = code_commit[:7]
-    workflow = f"hk-adamw-peak-regressors-L128-{short}-v1"
-    output_root = REMOTE_RUN_ROOT / "adamw-peak-regressors-L128" / code_commit / "v1"
+    workflow = f"hk-adamw-peak-regressors-L128-{short}-v2"
+    output_root = REMOTE_RUN_ROOT / "adamw-peak-regressors-L128" / code_commit / "v2"
     cwd = str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}")
     profiles = {
         "gpu": shared._profile(GPU_PROFILE),
