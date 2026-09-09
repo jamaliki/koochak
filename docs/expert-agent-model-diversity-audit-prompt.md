@@ -281,6 +281,41 @@ For each hypothesis give supporting evidence, contrary evidence, confidence,
 and one falsifying measurement. Do not promote a hypothesis because it is
 architecturally fashionable.
 
+## Implementation and subagent policy
+
+You may perform read-only inspection, analysis, metric extraction, and
+scientific synthesis yourself. However, **use only Luna subagents for actual
+implementation work**. In this task, implementation includes:
+
+- editing project source, configuration, tests, or documentation;
+- writing or modifying audit/diagnostic scripts;
+- writing or modifying experiment launchers or environment profiles;
+- preparing or submitting short canaries or other experiments;
+- making remote run-directory changes, retries, recoveries, or cancellations;
+- changing instrumentation or adding telemetry to the training path.
+
+Delegate each such action to a narrowly scoped Luna subagent (the Luna model,
+not another model). Do not implement these changes directly, and do not use a
+different model for implementation. Give the Luna subagent the relevant file
+paths, hypothesis, acceptance criteria, validation command, and safety limits.
+Prefer one hypothesis and one small diff per delegation rather than asking for
+a broad rewrite.
+
+After every Luna implementation:
+
+1. inspect the returned diff and changed files yourself;
+2. verify that the change is limited to the requested hypothesis;
+3. run or ask Luna to run targeted validation, including config-diff and
+   production-shape preflight checks where relevant;
+4. check that no unrelated files, output roots, or active jobs were touched;
+5. only then use the result as evidence or launch the next gated canary.
+
+If a Luna subagent is unavailable, do not silently implement the work yourself
+or substitute another model. Continue with read-only analysis and report the
+implementation as blocked, including the smallest Luna task that would unblock
+it. This restriction does not prevent you from reading existing implementation
+code or running bounded, read-only diagnostics needed to interpret artifacts.
+
 ## Operational rules for live work
 
 If you need remote artifacts or new diagnostics:
