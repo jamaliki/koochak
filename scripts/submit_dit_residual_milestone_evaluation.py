@@ -52,6 +52,7 @@ PREVIOUSLY_EVALUATED = {
 class Cell:
     cell_id: str
     family: str
+    source_commit: str
     parent_config: Path
     config_sha256: str
     milestones: tuple[int, ...]
@@ -63,73 +64,73 @@ def _config(campaign: str, source_commit: str, arm: str) -> Path:
 
 CELLS = (
     Cell(
-        "astraF1ac2b1-adam", "clean-residual",
+        "astraF1ac2b1-adam", "clean-residual", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8",
         _config("dit-clean-residual-optimizer-500k", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8", "L128/adam"),
         "a39ce3d42624d7aa2ba190ad480296ef5746a8a2d29209bdf463fae64c6f0c32",
         (200_000, 250_000, 300_000, 350_000),
     ),
     Cell(
-        "astraF1ac2b1-adamw", "clean-residual",
+        "astraF1ac2b1-adamw", "clean-residual", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8",
         _config("dit-clean-residual-optimizer-500k", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8", "L128/adamw"),
         "2fd97965e64b4b927c4c4f016ac4b5dfd7dfa84328f3e77015f309d13bc35e0a",
         (200_000, 250_000, 300_000, 350_000),
     ),
     Cell(
-        "clean4458e63-adam", "clean-residual",
+        "clean4458e63-adam", "clean-residual", "4458e63bf39361d12e2392957d81ef064c0fc009",
         _config("dit-clean-residual-optimizer-500k", "4458e63bf39361d12e2392957d81ef064c0fc009", "L128/adam"),
         "5260fb388e8ca5a3678080748341d9342a7e31078d03ba1ef93d7e73116fe17a",
         (200_000, 250_000, 300_000, 350_000),
     ),
     Cell(
-        "clean4458e63-adamw", "clean-residual",
+        "clean4458e63-adamw", "clean-residual", "4458e63bf39361d12e2392957d81ef064c0fc009",
         _config("dit-clean-residual-optimizer-500k", "4458e63bf39361d12e2392957d81ef064c0fc009", "L128/adamw"),
         "d23215218ecb9259fa7c5e2fb247f9d521bb353ecb1bffe3d0c595ce6526d2dd",
         (200_000, 250_000, 300_000, 350_000),
     ),
     Cell(
-        "muon-cbeta-slot4", "muon-cbeta-clock",
+        "muon-cbeta-slot4", "muon-cbeta-clock", "882c5a1b569c1f3eb8bc90595ab0af124df3919d",
         _config("l128-batch256-muon-cbeta-clock-4x400k", "882c5a1b569c1f3eb8bc90595ab0af124df3919d", "muon_slot4"),
         "805eb4d2620a56ae3c47c4c22e9696d7e59e6c429e4349d9e22a5bcceb2ebee2",
         tuple(range(50_000, 400_001, 50_000)),
     ),
     Cell(
-        "muon-cbeta-slot5", "muon-cbeta-clock",
+        "muon-cbeta-slot5", "muon-cbeta-clock", "882c5a1b569c1f3eb8bc90595ab0af124df3919d",
         _config("l128-batch256-muon-cbeta-clock-4x400k", "882c5a1b569c1f3eb8bc90595ab0af124df3919d", "muon_slot5"),
         "4ccfa580bba6d07a8c7fa6072c0ae70959894159224eee041e1ff464c9ed4d63",
         tuple(range(50_000, 400_001, 50_000)),
     ),
     Cell(
-        "muon-cbeta-slot5-ss3di", "muon-cbeta-clock",
+        "muon-cbeta-slot5-ss3di", "muon-cbeta-clock", "882c5a1b569c1f3eb8bc90595ab0af124df3919d",
         _config("l128-batch256-muon-cbeta-clock-4x400k", "882c5a1b569c1f3eb8bc90595ab0af124df3919d", "muon_slot5_ss3di"),
         "3822f46a8935576de8c1086f4a14a5a136379a3d392f6eb9fb29a831a351c2a7",
         tuple(range(50_000, 400_001, 50_000)),
     ),
     Cell(
-        "muon-slot4-ss3di-repair", "muon-slot4-ss3di-repair",
+        "muon-slot4-ss3di-repair", "muon-slot4-ss3di-repair", "192357b3aeea2d29846edf11852115802e833187",
         _config("l128-batch256-muon-slot4-ss3di-repair-400k", "192357b3aeea2d29846edf11852115802e833187", "muon_slot4_ss3di"),
         "0dc4faf7bf497b6cc8b924652142a790f3a42e20b7e36b6409962f6d26a919f8",
         tuple(range(50_000, 400_001, 50_000)),
     ),
     Cell(
-        "signal-canonical-per-head", "signal-residual-shell",
+        "signal-canonical-per-head", "signal-residual-shell", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac",
         _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "canonical_per_head"),
         "7bcc1ccd54d8bd83b86c982c90f2834525f439b797392b4afcdac8456e862f3b",
         (50_000, 100_000, 150_000, 200_000),
     ),
     Cell(
-        "signal-canonical-standard-qk", "signal-residual-shell",
+        "signal-canonical-standard-qk", "signal-residual-shell", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac",
         _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "canonical_standard_qk"),
         "62d1bc757b696fb5980b939592df190582dcf302c7fceb62f8af8b705382ce2f",
         (50_000, 100_000, 150_000, 200_000),
     ),
     Cell(
-        "signal-stabilized-per-head", "signal-residual-shell",
+        "signal-stabilized-per-head", "signal-residual-shell", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac",
         _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "stabilized_per_head"),
         "bc97bf2a571ffb050f4e17ad2ceccbc7db9d0b34fc1b39c9a1ae6ba49f8261be",
         (50_000, 100_000, 150_000, 200_000),
     ),
     Cell(
-        "signal-stabilized-standard-qk", "signal-residual-shell",
+        "signal-stabilized-standard-qk", "signal-residual-shell", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac",
         _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "stabilized_standard_qk"),
         "55f913f898ad449f2fd35894fc517d6aaca04f42439d1c2b2189b78a5fa72f48",
         (50_000, 100_000, 150_000, 200_000),
@@ -191,7 +192,6 @@ def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[Pre
     workflow = f"hk-architecture-milestone-evaluation-50k-{short}-{suffix}"
     output_name = RETRY_OUTPUT_ROOT_NAME if retry_failed else OUTPUT_ROOT_NAME
     output_root = REMOTE_RUN_ROOT / output_name / code_commit / "v1"
-    cwd = str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}")
     profiles = {
         "gpu": shared._profile(shared.GPU_PROFILE),
         "esmfold": shared._profile(shared.ESMFOLD_PROFILE),
@@ -208,7 +208,7 @@ def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[Pre
                 workflow=workflow,
                 code_commit=code_commit,
                 output_root=output_root,
-                cwd=cwd,
+                cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{cell.source_commit[:7]}"),
                 profiles=profiles,
                 train_id=None,
                 train_dir=cell.parent_config.parent,
@@ -239,6 +239,7 @@ def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[Pre
             {
                 "cell_id": cell.cell_id,
                 "family": cell.family,
+                "source_commit": cell.source_commit,
                 "config": str(cell.parent_config),
                 "config_sha256": cell.config_sha256,
                 "milestones": list(cell.milestones),
