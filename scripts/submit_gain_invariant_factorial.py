@@ -263,7 +263,7 @@ def _evaluation_tasks(
     output_root: Path,
     cwd: str,
     profiles: Mapping[str, Any],
-    train_id: str,
+    train_id: str | None,
     train_dir: Path,
     attestation_artifact: str | None,
 ) -> list[PreparedTask]:
@@ -289,9 +289,12 @@ def _evaluation_tasks(
                 "--seed", str(SAMPLE_SEED), "--precision", "bf16", "--compile",
             ],
         )
+        sample_wait_for = (
+            {"kind": "artifact", "task_id": train_id, "artifact_id": f"checkpoint/{tag}.pt"},
+        ) if train_id is not None else ()
         tasks.append(PreparedTask(
             sample_id, sample_run, SAMPLE_RESOURCES,
-            wait_for=({"kind": "artifact", "task_id": train_id, "artifact_id": f"checkpoint/{tag}.pt"},),
+            wait_for=sample_wait_for,
             recovery=RECOVERY,
         ))
 

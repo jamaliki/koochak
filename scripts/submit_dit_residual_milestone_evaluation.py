@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluate the missing 200k-350k milestones for the clean-residual DiT panel."""
+"""Evaluate missing 50k-spaced checkpoints across the current architecture wave.
+
+This launcher intentionally covers more than the clean-residual optimizer panel:
+the new Muon campaigns and the signal/residual-shell factorial are included too.
+Existing evaluation trees are not reused; every task writes to a fresh, immutable
+workflow root and validates its durable checkpoint inputs before submission.
+"""
 
 from __future__ import annotations
 
@@ -31,46 +37,105 @@ REMOTE_CODE_ROOT = shared.REMOTE_CODE_ROOT
 REMOTE_RUN_ROOT = shared.REMOTE_RUN_ROOT
 PROGRES_DATA = shared.PROGRES_DATA
 RECOVERY = shared.RECOVERY
-RESOURCES = {
-    "sample": shared.SAMPLE_RESOURCES,
-    "esmfold": shared.ESMFOLD_RESOURCES,
-    "cpu": shared.ANALYSIS_RESOURCES,
-}
 SAMPLE_SEED = 20260910
-MILESTONES = (200_000, 250_000, 300_000, 350_000)
-OUTPUT_ROOT_NAME = "dit-residual-milestone-evaluation-50k"
+OUTPUT_ROOT_NAME = "architecture-milestone-evaluation-50k-20260911"
+PREVIOUSLY_EVALUATED = {
+    "clean-residual": (50_000, 100_000, 150_000),
+}
 
 
 @dataclass(frozen=True, slots=True)
 class Cell:
     cell_id: str
-    source_commit: str
-    arm: str
+    family: str
+    parent_config: Path
     config_sha256: str
+    milestones: tuple[int, ...]
 
-    @property
-    def parent_config(self) -> Path:
-        return (
-            REMOTE_RUN_ROOT / "dit-clean-residual-optimizer-500k" / self.source_commit
-            / "v1/train/L128" / self.arm / "config.yaml"
-        )
 
-    @property
-    def milestones(self) -> tuple[int, ...]:
-        return MILESTONES
+def _config(campaign: str, source_commit: str, arm: str) -> Path:
+    return REMOTE_RUN_ROOT / campaign / source_commit / "v1/train" / arm / "config.yaml"
 
 
 CELLS = (
-    Cell("astraF1ac2b1-adam", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8", "adam", "a39ce3d42624d7aa2ba190ad480296ef5746a8a2d29209bdf463fae64c6f0c32"),
-    Cell("astraF1ac2b1-adamw", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8", "adamw", "2fd97965e64b4b927c4c4f016ac4b5dfd7dfa84328f3e77015f309d13bc35e0a"),
-    Cell("clean4458e63-adam", "4458e63bf39361d12e2392957d81ef064c0fc009", "adam", "5260fb388e8ca5a3678080748341d9342a7e31078d03ba1ef93d7e73116fe17a"),
-    Cell("clean4458e63-adamw", "4458e63bf39361d12e2392957d81ef064c0fc009", "adamw", "d23215218ecb9259fa7c5e2fb247f9d521bb353ecb1bffe3d0c595ce6526d2dd"),
+    Cell(
+        "astraF1ac2b1-adam", "clean-residual",
+        _config("dit-clean-residual-optimizer-500k", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8", "L128/adam"),
+        "a39ce3d42624d7aa2ba190ad480296ef5746a8a2d29209bdf463fae64c6f0c32",
+        (200_000, 250_000, 300_000, 350_000),
+    ),
+    Cell(
+        "astraF1ac2b1-adamw", "clean-residual",
+        _config("dit-clean-residual-optimizer-500k", "f1ac2b132147af1e448928d65d35bc0e7fc5fdc8", "L128/adamw"),
+        "2fd97965e64b4b927c4c4f016ac4b5dfd7dfa84328f3e77015f309d13bc35e0a",
+        (200_000, 250_000, 300_000, 350_000),
+    ),
+    Cell(
+        "clean4458e63-adam", "clean-residual",
+        _config("dit-clean-residual-optimizer-500k", "4458e63bf39361d12e2392957d81ef064c0fc009", "L128/adam"),
+        "5260fb388e8ca5a3678080748341d9342a7e31078d03ba1ef93d7e73116fe17a",
+        (200_000, 250_000, 300_000, 350_000),
+    ),
+    Cell(
+        "clean4458e63-adamw", "clean-residual",
+        _config("dit-clean-residual-optimizer-500k", "4458e63bf39361d12e2392957d81ef064c0fc009", "L128/adamw"),
+        "d23215218ecb9259fa7c5e2fb247f9d521bb353ecb1bffe3d0c595ce6526d2dd",
+        (200_000, 250_000, 300_000, 350_000),
+    ),
+    Cell(
+        "muon-cbeta-slot4", "muon-cbeta-clock",
+        _config("l128-batch256-muon-cbeta-clock-4x400k", "882c5a1b569c1f3eb8bc90595ab0af124df3919d", "muon_slot4"),
+        "805eb4d2620a56ae3c47c4c22e9696d7e59e6c429e4349d9e22a5bcceb2ebee2",
+        tuple(range(50_000, 400_001, 50_000)),
+    ),
+    Cell(
+        "muon-cbeta-slot5", "muon-cbeta-clock",
+        _config("l128-batch256-muon-cbeta-clock-4x400k", "882c5a1b569c1f3eb8bc90595ab0af124df3919d", "muon_slot5"),
+        "4ccfa580bba6d07a8c7fa6072c0ae70959894159224eee041e1ff464c9ed4d63",
+        tuple(range(50_000, 400_001, 50_000)),
+    ),
+    Cell(
+        "muon-cbeta-slot5-ss3di", "muon-cbeta-clock",
+        _config("l128-batch256-muon-cbeta-clock-4x400k", "882c5a1b569c1f3eb8bc90595ab0af124df3919d", "muon_slot5_ss3di"),
+        "3822f46a8935576de8c1086f4a14a5a136379a3d392f6eb9fb29a831a351c2a7",
+        tuple(range(50_000, 400_001, 50_000)),
+    ),
+    Cell(
+        "muon-slot4-ss3di-repair", "muon-slot4-ss3di-repair",
+        _config("l128-batch256-muon-slot4-ss3di-repair-400k", "192357b3aeea2d29846edf11852115802e833187", "muon_slot4_ss3di"),
+        "0dc4faf7bf497b6cc8b924652142a790f3a42e20b7e36b6409962f6d26a919f8",
+        tuple(range(50_000, 400_001, 50_000)),
+    ),
+    Cell(
+        "signal-canonical-per-head", "signal-residual-shell",
+        _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "canonical_per_head"),
+        "7bcc1ccd54d8bd83b86c982c90f2834525f439b797392b4afcdac8456e862f3b",
+        (50_000, 100_000, 150_000, 200_000),
+    ),
+    Cell(
+        "signal-canonical-standard-qk", "signal-residual-shell",
+        _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "canonical_standard_qk"),
+        "62d1bc757b696fb5980b939592df190582dcf302c7fceb62f8af8b705382ce2f",
+        (50_000, 100_000, 150_000, 200_000),
+    ),
+    Cell(
+        "signal-stabilized-per-head", "signal-residual-shell",
+        _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "stabilized_per_head"),
+        "bc97bf2a571ffb050f4e17ad2ceccbc7db9d0b34fc1b39c9a1ae6ba49f8261be",
+        (50_000, 100_000, 150_000, 200_000),
+    ),
+    Cell(
+        "signal-stabilized-standard-qk", "signal-residual-shell",
+        _config("signal-dit-residual-shell-b256-4x200k", "a4692d9daaa74e3d5a03fb1f9c56f2dbe26ea6ac", "stabilized_standard_qk"),
+        "55f913f898ad449f2fd35894fc517d6aaca04f42439d1c2b2189b78a5fa72f48",
+        (50_000, 100_000, 150_000, 200_000),
+    ),
 )
 
 
-def _git(*arguments: str) -> str:
+def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *arguments], check=True, capture_output=True, text=True
+        ["git", "-C", str(cwd), *arguments], check=True, capture_output=True, text=True
     ).stdout.strip()
 
 
@@ -97,7 +162,7 @@ def _validate_inputs() -> None:
         observed = hashlib.sha256(cell.parent_config.read_bytes()).hexdigest()
         if observed != cell.config_sha256:
             raise RuntimeError(f"config hash mismatch for {cell.cell_id}: {observed}")
-        for step in MILESTONES:
+        for step in cell.milestones:
             checkpoint = cell.parent_config.parent / f"{_tag(step)}.pt"
             ready = checkpoint.with_name(checkpoint.name + ".ready.json")
             if not checkpoint.is_file():
@@ -113,8 +178,8 @@ def _validate_inputs() -> None:
 
 def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
     short = code_commit[:7]
-    workflow = f"hk-dit-residual-milestone-evaluation-50k-{short}-v2"
-    output_root = REMOTE_RUN_ROOT / OUTPUT_ROOT_NAME / code_commit / "v2"
+    workflow = f"hk-architecture-milestone-evaluation-50k-{short}-v1"
+    output_root = REMOTE_RUN_ROOT / OUTPUT_ROOT_NAME / code_commit / "v1"
     cwd = str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}")
     profiles = {
         "gpu": shared._profile(shared.GPU_PROFILE),
@@ -127,23 +192,22 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
     try:
         tasks: list[PreparedTask] = []
         for cell in CELLS:
-            tasks.extend(
-                shared._evaluation_tasks(
-                    cell,
-                    workflow=workflow,
-                    code_commit=code_commit,
-                    output_root=output_root,
-                    cwd=cwd,
-                    profiles=profiles,
-                    train_id=f"existing-train-{cell.cell_id}",
-                    train_dir=cell.parent_config.parent,
-                    attestation_artifact=None,
-                )
-            )
+            tasks.extend(shared._evaluation_tasks(
+                cell,
+                workflow=workflow,
+                code_commit=code_commit,
+                output_root=output_root,
+                cwd=cwd,
+                profiles=profiles,
+                train_id=None,
+                train_dir=cell.parent_config.parent,
+                attestation_artifact=None,
+            ))
     finally:
         shared._patches, shared.SAMPLE_SEED = old_patches, old_seed
-    if len(tasks) != 48:
-        raise AssertionError(f"expected 48 tasks, built {len(tasks)}")
+    expected_tasks = sum(len(cell.milestones) for cell in CELLS) * 3
+    if len(tasks) != expected_tasks:
+        raise AssertionError(f"expected {expected_tasks} tasks, built {len(tasks)}")
     prepared = PreparedWorkflow(
         request_id=f"{PROJECT_ID}/{workflow}/v1",
         workflow_id=workflow,
@@ -151,22 +215,22 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
         tasks=tuple(tasks),
     )
     description = {
-        "schema": "hierarchical-kaveh.dit-residual-milestone-evaluation.v2",
+        "schema": "hierarchical-kaveh.architecture-milestone-evaluation.v1",
         "workflow_id": workflow,
         "request_id": prepared.request_id,
         "project_id": PROJECT_ID,
         "code_commit": code_commit,
         "koochak_commit": KOOCHAK_COMMIT,
         "scruffy_commit": SCRUFFY_COMMIT,
-        "milestones_submitted": list(MILESTONES),
-        "previously_evaluated_milestones": [50_000, 100_000, 150_000],
+        "milestones_submitted": sorted({step for cell in CELLS for step in cell.milestones}),
+        "previously_evaluated_milestones": PREVIOUSLY_EVALUATED,
         "cells": [
             {
                 "cell_id": cell.cell_id,
-                "source_commit": cell.source_commit,
-                "arm": cell.arm,
+                "family": cell.family,
                 "config": str(cell.parent_config),
                 "config_sha256": cell.config_sha256,
+                "milestones": list(cell.milestones),
             }
             for cell in CELLS
         ],
@@ -179,7 +243,11 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
             "precision": "bf16",
             "compile": True,
         },
-        "task_counts": {"sampling": 16, "esmfold": 16, "progres_analysis": 16},
+        "task_counts": {
+            "sampling": sum(len(cell.milestones) for cell in CELLS),
+            "esmfold": sum(len(cell.milestones) for cell in CELLS),
+            "progres_analysis": sum(len(cell.milestones) for cell in CELLS),
+        },
         "checkpoint_inputs_are_durable_at_submission": True,
     }
     return prepared, {"description": description, "output_root": output_root}
