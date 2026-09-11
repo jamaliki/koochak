@@ -531,16 +531,18 @@ def _strict_construct(cls: type[ConfigT], values: Mapping[str, Any]) -> ConfigT:
     return cls(**dict(values))
 
 
-def load_config(file: str | Path) -> RunConfig:
+def load_config(file: str | Path, *, ignore_sections: tuple[str, ...] = ()) -> RunConfig:
     """Load a strict YAML configuration over the compact defaults."""
 
     raw = OmegaConf.to_container(OmegaConf.load(file), resolve=True)
     if not isinstance(raw, Mapping):
         raise ValueError("configuration root must be a mapping")
     allowed = {item.name for item in fields(RunConfig)}
-    unknown = set(raw) - allowed
+    unknown = set(raw) - allowed - set(ignore_sections)
     if unknown:
         raise ValueError(f"unknown RunConfig sections: {sorted(unknown)}")
+    for name in ignore_sections:
+        raw.pop(name, None)
 
     def section(name: str, cls: type[ConfigT]) -> ConfigT:
         values = raw.get(name, {})

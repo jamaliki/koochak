@@ -42,6 +42,7 @@ PROGRES_DATA = shared.PROGRES_DATA
 RECOVERY = shared.RECOVERY
 SAMPLE_SEED = 20260910
 OUTPUT_ROOT_NAME = "architecture-milestone-evaluation-50k-20260911"
+RETRY_OUTPUT_ROOT_NAME = "architecture-milestone-evaluation-50k-retry-20260911"
 PREVIOUSLY_EVALUATED = {
     "clean-residual": (50_000, 100_000, 150_000),
 }
@@ -135,6 +136,10 @@ CELLS = (
     ),
 )
 
+# The initial submission completed the two clean-control cells. The remaining
+# cells failed uniformly in sampler config parsing and are the only ones retried.
+RETRY_CELLS = tuple(cell for cell in CELLS if cell.cell_id not in {"clean4458e63-adam", "clean4458e63-adamw"})
+
 
 def _git(*arguments: str, cwd: Path = REPO_ROOT) -> str:
     return subprocess.run(
@@ -179,10 +184,13 @@ def _validate_inputs() -> None:
         raise RuntimeError("missing evaluation inputs: " + ", ".join(missing))
 
 
-def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
+def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[PreparedWorkflow, dict[str, Any]]:
     short = code_commit[:7]
-    workflow = f"hk-architecture-milestone-evaluation-50k-{short}-v1"
-    output_root = REMOTE_RUN_ROOT / OUTPUT_ROOT_NAME / code_commit / "v1"
+    cells = RETRY_CELLS if retry_failed else CELLS
+    suffix = "retry" if retry_failed else "v1"
+    workflow = f"hk-architecture-milestone-evaluation-50k-{short}-{suffix}"
+    output_name = RETRY_OUTPUT_ROOT_NAME if retry_failed else OUTPUT_ROOT_NAME
+    output_root = REMOTE_RUN_ROOT / output_name / code_commit / "v1"
     cwd = str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}")
     profiles = {
         "gpu": shared._profile(shared.GPU_PROFILE),
@@ -194,7 +202,7 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
     shared.SAMPLE_SEED = SAMPLE_SEED
     try:
         tasks: list[PreparedTask] = []
-        for cell in CELLS:
+        for cell in cells:
             tasks.extend(shared._evaluation_tasks(
                 cell,
                 workflow=workflow,
@@ -225,7 +233,7 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
         "code_commit": code_commit,
         "koochak_commit": KOOCHAK_COMMIT,
         "scruffy_commit": SCRUFFY_COMMIT,
-        "milestones_submitted": sorted({step for cell in CELLS for step in cell.milestones}),
+        "milestones_submitted": sorted({step for cell in cells for step in cell.milestones}),
         "previously_evaluated_milestones": PREVIOUSLY_EVALUATED,
         "cells": [
             {
@@ -235,7 +243,7 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
                 "config_sha256": cell.config_sha256,
                 "milestones": list(cell.milestones),
             }
-            for cell in CELLS
+            for cell in cells
         ],
         "sampling": {
             "length": 128,
@@ -247,9 +255,9 @@ def build_workflow(code_commit: str) -> tuple[PreparedWorkflow, dict[str, Any]]:
             "compile": True,
         },
         "task_counts": {
-            "sampling": sum(len(cell.milestones) for cell in CELLS),
-            "esmfold": sum(len(cell.milestones) for cell in CELLS),
-            "progres_analysis": sum(len(cell.milestones) for cell in CELLS),
+            "sampling": sum(len(cell.milestones) for cell in cells),
+            "esmfold": sum(len(cell.milestones) for cell in cells),
+            "progres_analysis": sum(len(cell.milestones) for cell in cells),
         },
         "checkpoint_inputs_are_durable_at_submission": True,
     }
@@ -282,9 +290,10 @@ def _validate_online(code_commit: str) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args(argv)
     code_commit = _git("rev-parse", "HEAD")
-    workflow, bundle = build_workflow(code_commit)
+    workflow, bundle = build_workflow(code_commit, retry_failed=args.retry_failed)
     description, output_root = bundle["description"], bundle["output_root"]
     if args.dry_run:
         print(json.dumps(description, indent=2, sort_keys=True, default=str))

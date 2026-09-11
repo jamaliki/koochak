@@ -70,7 +70,10 @@ def main(argv: list[str] | None = None) -> None:
     lengths = _parse_lengths(args.lengths)
     device = torch.device(args.device)
     dtype = torch.bfloat16 if args.precision == "bf16" else torch.float32
-    config = load_config(args.config)
+    config = load_config(
+        args.config,
+        ignore_sections=("scheduler", "sidechain_diffusion"),
+    )
     model = HierarchicalKaveh(config.model).to(device)
     use_intermediate_feedback = bool(config.model.intermediate_distogram_feedback)
     checkpoint = load_checkpoint(
