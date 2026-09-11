@@ -216,7 +216,7 @@ def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[Pre
             ))
     finally:
         shared._patches, shared.SAMPLE_SEED = old_patches, old_seed
-    expected_tasks = sum(len(cell.milestones) for cell in CELLS) * 3
+    expected_tasks = sum(len(cell.milestones) for cell in cells) * 3
     if len(tasks) != expected_tasks:
         raise AssertionError(f"expected {expected_tasks} tasks, built {len(tasks)}")
     prepared = PreparedWorkflow(
