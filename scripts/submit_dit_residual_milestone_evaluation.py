@@ -30,9 +30,12 @@ from scripts import submit_gain_invariant_factorial as shared  # noqa: E402
 robust = shared.robust
 PROJECT_ID = shared.PROJECT_ID
 KOOCHAK_COMMIT = shared.KOOCHAK_COMMIT
-SCRUFFY_COMMIT = shared.SCRUFFY_COMMIT
+SCRUFFY_COMMIT = "00c2f09468372fe138fd7d7878e6dfa67fb8c29b"
 SCRUFFY_ROOT = shared.SCRUFFY_ROOT
-SCRUFFY_SITE = robust.SCRUFFY_SITE
+SCRUFFY_SITE = Path(
+    "/mnt/gbi-shared/home/kiarash-jamali/.scruffy/versions/"
+    f"scruffy-{SCRUFFY_COMMIT}-py310-cpython310/site"
+)
 REMOTE_CODE_ROOT = shared.REMOTE_CODE_ROOT
 REMOTE_RUN_ROOT = shared.REMOTE_RUN_ROOT
 PROGRES_DATA = shared.PROGRES_DATA
