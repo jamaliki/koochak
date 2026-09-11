@@ -202,17 +202,19 @@ def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[Pre
     shared.SAMPLE_SEED = SAMPLE_SEED
     try:
         tasks: list[PreparedTask] = []
+        evaluator_cwd = str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}")
         for cell in cells:
             tasks.extend(shared._evaluation_tasks(
                 cell,
                 workflow=workflow,
                 code_commit=code_commit,
                 output_root=output_root,
-                cwd=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{cell.source_commit[:7]}"),
+                cwd=evaluator_cwd,
                 profiles=profiles,
                 train_id=None,
                 train_dir=cell.parent_config.parent,
                 attestation_artifact=None,
+                sample_source_root=str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{cell.source_commit[:7]}"),
             ))
     finally:
         shared._patches, shared.SAMPLE_SEED = old_patches, old_seed
@@ -261,6 +263,11 @@ def build_workflow(code_commit: str, *, retry_failed: bool = False) -> tuple[Pre
             "progres_analysis": sum(len(cell.milestones) for cell in cells),
         },
         "checkpoint_inputs_are_durable_at_submission": True,
+        "evaluation_runtime": {
+            "evaluator_checkout": str(REMOTE_CODE_ROOT / f"hierarchical_kaveh_{short}"),
+            "historical_sampler": "sample_historical_compat.py",
+            "historical_model_code_is_preserved": True,
+        },
     }
     return prepared, {"description": description, "output_root": output_root}
 

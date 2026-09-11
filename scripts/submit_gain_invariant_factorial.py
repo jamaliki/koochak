@@ -266,6 +266,7 @@ def _evaluation_tasks(
     train_id: str | None,
     train_dir: Path,
     attestation_artifact: str | None,
+    sample_source_root: str | None = None,
 ) -> list[PreparedTask]:
     tasks: list[PreparedTask] = []
     for step in cell.milestones:
@@ -278,12 +279,20 @@ def _evaluation_tasks(
             task=sample_id, kind="directory", code_commit=code_commit, expected_records=SAMPLES,
         )
         sample_run_dir = output_root / "managed/sample" / tag / cell.cell_id
+        sample_command = [
+            f"{cwd}/scripts/sample_short128_milestone.py",
+        ]
+        if sample_source_root is not None:
+            sample_command = [
+                f"{cwd}/scripts/sample_historical_compat.py",
+                "--source-root", sample_source_root,
+            ]
         sample_run = _stage_run(
             stage="sample", task=sample_id, workflow=workflow, code_commit=code_commit,
             artifact=sample_output, run_dir=sample_run_dir, profile=profiles["gpu"], cwd=cwd,
             base_config=cell.parent_config, patches=_patches(sample_run_dir),
             command=[
-                "{cwd}/scripts/sample_short128_milestone.py", "--config", "{config}",
+                *sample_command, "--config", "{config}",
                 "--checkpoint", str(checkpoint), "--output-dir", str(sample_dir), "--lengths", "128",
                 "--samples-per-length", str(SAMPLES), "--batch-size", str(SAMPLE_BATCH_SIZE),
                 "--seed", str(SAMPLE_SEED), "--precision", "bf16", "--compile",
