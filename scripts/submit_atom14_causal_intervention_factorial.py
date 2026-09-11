@@ -34,7 +34,7 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-patch-coarse-factorial"
-KOOCHAK_COMMIT = "eec841f0261c77c31d55100b1dd8af1e753903f5"
+KOOCHAK_COMMIT = "2d69bae139c59be113ca361b3e663cb98f739b5f"
 SCRUFFY_COMMIT = "0747640131470acd8ff30fe1b3be042139345224"
 SCRUFFY_ROOT = Path("/mnt/gbi-shared/home/kiarash-jamali/.scruffy/queues/263105")
 SCRUFFY_SITE = Path(

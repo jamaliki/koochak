@@ -30,7 +30,7 @@ from koochak.jobs import (  # noqa: E402
 
 
 PROJECT_ID = "hierarchical-kaveh-patch-coarse-factorial"
-KOOCHAK_COMMIT = "eec841f0261c77c31d55100b1dd8af1e753903f5"
+KOOCHAK_COMMIT = "2d69bae139c59be113ca361b3e663cb98f739b5f"
 SCRUFFY_COMMIT = "f8f9cad0a548341c3ad2f21dfbb4f2c2bcfdbbfc"
 REMOTE_CODE_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code")
 REMOTE_RUN_ROOT = Path("/mnt/lustre/users/kiarash-eitgbi/code/hierarchical-kaveh-runs")
