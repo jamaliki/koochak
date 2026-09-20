@@ -221,7 +221,8 @@ def test_checkpoint_publication_uses_a_stable_scruffy_event_id(
     checkpoint_lib.save(ckpt, str(checkpoint_path))
     monkeypatch.setenv("SCRUFFY_ROOT", "/shared/scruffy")
     monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
-    publish_event = mock.Mock(return_value={"event_id": "evt-1"})
+    monkeypatch.delenv("KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS", raising=False)
+    publish_event = mock.Mock(return_value={"event_id": "evt-1", "state": "accepted", "acknowledged": True})
     module = types.ModuleType("scruffy")
     module.publish_event = publish_event
     monkeypatch.setitem(sys.modules, "scruffy", module)
@@ -235,14 +236,14 @@ def test_checkpoint_publication_uses_a_stable_scruffy_event_id(
 
     assert first["event_id"] == second["event_id"]
     assert first["event_id"].startswith("koochak-checkpoint-")
-    assert "wait" not in first
-    assert "timeout" not in first
+    assert first["wait"] is True
+    assert first["timeout"] == 300.0
     assert first["data"]["publication"] == checkpoint_lib.publication(
         str(checkpoint_path)
     )
 
 
-def test_scruffy_checkpoint_ack_wait_is_opt_in_and_checkpoint_only(
+def test_scruffy_checkpoint_ack_wait_override_is_checkpoint_only(
     monkeypatch, tmp_path
 ) -> None:
     from koochak.storage import checkpoint as checkpoint_lib

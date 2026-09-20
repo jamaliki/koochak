@@ -529,11 +529,10 @@ def step_fn(model, batch, ctx):
     explicit `PYTHONPATH`; the isolated runner checks that import during
     preflight. Install `koochak[scruffy]` only when the compatible client is
     available from the target environment.
-    By default all publications remain asynchronous and publisher failures warn
-    once without stopping training. For workflows that require a checkpoint to
-    be acknowledged before evacuation can proceed, pass
-    `artifact_ack_timeout_s=<seconds>` (or set
-    `KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS`). Only strict numbered
+    Checkpoint acknowledgement waits up to 300 seconds by default. Override with
+    `KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS` or pass
+    `artifact_ack_timeout_s=<seconds>` (the explicit argument takes precedence).
+    Only strict numbered
     `workload.artifact` checkpoint publications use `wait=True`; lifecycle and
     evacuation milestone events remain asynchronous. A rejected or timed-out
     strict checkpoint acknowledgement fails closed.
