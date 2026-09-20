@@ -2,6 +2,23 @@
 
 A tiny, hackable, function‑first training loop for PyTorch. Built to be easy to read, fork, and extend. It favors explicit functions and small modules over opaque classes or global state.
 
+## GPU Thermal Watchdog
+
+Thermal throttling and high GPU/memory temperature require **two hours** of
+consecutive qualifying observations before a checkpointed health shutdown.
+The timer uses monotonic elapsed time, not training steps. Healthy, idle or
+missing readings, and gaps longer than five minutes between thermal readings,
+reset it; a new trainer starts a fresh timer. Samples still occur every ten
+steps after step 20, with the existing utilization and temperature thresholds.
+Per-rank health JSONL records include the elapsed thermal duration and grace.
+
+Low clocks and the aggregate hardware-slowdown flag accompanying a thermal
+condition share this grace period. Independent power-brake events, unexplained
+hardware slowdown and nonthermal low clocks retain the two-sample policy.
+This change does not disable CUDA/driver protections or alter numerical checks,
+emergency checkpointing, exit codes or scheduler recovery. Already running
+trainers and immutable jobs pinned to an older Koochak revision are unchanged.
+
 ## Related Projects
 
 Koochak prepares reproducible workloads; it deliberately does not own cluster

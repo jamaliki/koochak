@@ -76,6 +76,11 @@ This doc tracks incremental design decisions and changes from the initial design
 
 This list guides ongoing work. All contributors (agents and humans) should update it as tasks are added/completed.
 
+- Require two hours of sustained sampled thermal trouble before GPU-health shutdown [DONE]
+  - Monotonic timer resets on healthy/idle/missing readings or gaps over five minutes.
+  - Thermal clock reduction cannot bypass the grace period; independent nonthermal
+    faults retain two-sample handling. Timing and reset tests use a simulated clock.
+
 - Split storage helpers into `storage.atomic`, `storage.pruning`, and `storage.fs` [DONE]
 - Add `utils/timeit.py` scoped timers [DONE]
 - Rank-0 gating helper and apply to built-in hooks [DONE]
