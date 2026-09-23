@@ -13,12 +13,12 @@ from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional, S
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler
-from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
 from .core import dist as dist_lib
 from .core import hooks as hooks_lib
+from .optim.grad_clip import clip_grad_norm_
 from .core.precision import Scaler as make_scaler, autocast_context, prepare_compile_backend
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
@@ -1038,27 +1038,16 @@ class _TrainLoop:
         if every <= 0 or (step % every) != 0:
             return
         nonfinite: list[str] = []
-        finite: list[str] = []
         for name, param in self.model.named_parameters():
             if param.grad is None or not torch.is_floating_point(param.grad):
                 continue
             if not torch.isfinite(param.grad).all():
-                torch.nan_to_num_(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
                 nonfinite.append(name)
-            else:
-                finite.append(name)
-        if not nonfinite or not self.is_rank0:
-            return
-        msg = (
-            f"Zeroed gradients containing non-finite values in {len(nonfinite)} parameters\n"
-            f"However, {len(finite)} params are fine"
-        )
-        if len(nonfinite) > 5:
-            msg += f" (e.g. nans: {', '.join(nonfinite)}, ...)\n"
-            msg += f" (non-nans: {', '.join(finite)}, ...)"
-        else:
-            msg += f": {', '.join(nonfinite)}"
-        warnings.warn(msg, RuntimeWarning)
+        if nonfinite:
+            raise FloatingPointError(
+                "Gradient entries contain NaN or infinity; optimizer step stopped: "
+                + ", ".join(nonfinite)
+            )
 
     def _update_ema(self, step: int) -> None:
         settings = self.ema_settings
@@ -1373,7 +1362,14 @@ class _TrainLoop:
 
         grad_clip_start = self._profile_start()
         if self.settings.grad_clip_norm is not None:
-            clip_grad_norm_(self.model.parameters(), float(self.settings.grad_clip_norm), foreach=True)
+            clipping = clip_grad_norm_(self.model.parameters(), float(self.settings.grad_clip_norm))
+            if stats.out is None:
+                stats.out = {}
+            stats.out.update(
+                grad_norm=clipping.norm,
+                grad_clip_coefficient=clipping.coefficient,
+                grad_clip_scaled_norm=int(clipping.used_scaled_norm),
+            )
         self._profile_add(stats.profile_timing_totals, "profile_loop_grad_clip_time_s", grad_clip_start)
 
         ema_wait_start = self._profile_start()
