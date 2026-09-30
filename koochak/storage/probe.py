@@ -34,6 +34,7 @@ import os
 import platform
 import shutil
 import struct
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +52,12 @@ _BLOCK = 16 * 1024 * 1024
 # Spawned readers import Koochak before the first barrier; storage passes can be slow.
 _BARRIER_TIMEOUT = 900.0
 _READ_TIMEOUT = 4 * 3600.0
+
+
+def _progress(message: str) -> None:
+    """One timestamped line on stderr so long runs show which phase they are in."""
+
+    print(f"[koochak.storage.probe {time.strftime('%H:%M:%S')}] {message}", file=sys.stderr, flush=True)
 
 
 def _describe_error(exc: OSError) -> str:
@@ -366,7 +373,8 @@ def _probe_checkpoint(
 
     results: Dict[str, Any] = {}
     for parts in parts_options:
-        sizes = [total_bytes // parts + (1 if i < total_bytes % parts else 0) for i in range(parts)]
+        _progress(f"checkpoint: {total_bytes} bytes as {parts} concurrent parts")
+        sizes =[total_bytes // parts + (1 if i < total_bytes % parts else 0) for i in range(parts)]
         keys = [f"{prefix}/{parts}-parts/part-{i:03d}" for i in range(parts)]
         with ThreadPoolExecutor(max_workers=parts) as pool:
             start = time.perf_counter()
@@ -511,6 +519,7 @@ def _probe_dataset(
 
     encoded = len(shards_lib.encode_tar_sample({"__key__": "r000000000", "bin": block[:record_bytes]}))
     per_shard = max(1, shard_bytes // encoded)
+    _progress(f"dataset: building {shards} shards of {per_shard} records")
     start = time.perf_counter()
     with shards_lib.ShardWriter(store, prefix, target_bytes=per_shard * encoded) as writer:
         for number in range(shards * per_shard):
@@ -526,6 +535,7 @@ def _probe_dataset(
         "build_seconds": round(build_seconds, 3),
     }
     for readers in readers_options:
+        _progress(f"dataset: reading with {readers} worker processes")
         results[f"read_{readers}_workers"] = _read_dataset(spec, index, readers, passes=2)
     return results
 
@@ -613,6 +623,7 @@ def probe(
     try:
         store: Optional[Store] = target
         if local_root is not None:
+            _progress(f"posix semantics under {local_root}/{run_id}")
             report["posix"] = _probe_posix(
                 os.path.join(local_root, run_id, "posix"), small, large, settle_timeout
             )
@@ -629,6 +640,7 @@ def probe(
             report["store"] = {"skipped": "no create-only publish mode works on this filesystem"}
         else:
             report["store_config"] = repr(store)
+            _progress(f"store API with {store!r}")
             report["store"] = _probe_store(
                 store,
                 f"{run_id}/store",
