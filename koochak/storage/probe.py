@@ -377,10 +377,18 @@ def _recommend_profile(store_results: Dict[str, Any], streams: Sequence[int]) ->
 
     count = max(streams)
     single = store_results["large_single_stream"]["cold_get_mb_s"]
+    single_warm = store_results["large_single_stream"]["warm_get_mb_s"]
     ranged = store_results["large_ranged"]
     concurrent = store_results["large_concurrent"][f"cold_get_{count}_streams_mb_s"]
     listing = store_results["small_list"]
-    ranges_scale = count > 1 and ranged["cold_get_mb_s"] >= 2 * single
+    # Ranges must speed up cold reads without slowing cached ones: on some
+    # object-storage mounts each range pays an open/seek cost that caps them
+    # far below a sequential read of cached data.
+    ranges_scale = (
+        count > 1
+        and ranged["cold_get_mb_s"] >= 2 * single
+        and ranged["warm_get_mb_s"] >= 0.8 * single_warm
+    )
     return {
         "request_seconds": max(round(store_results["small_get"]["p50_ms"] / 1e3, 4), 0.0001),
         "stream_mb_s": max(single, 0.1),
