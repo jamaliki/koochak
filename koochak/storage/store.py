@@ -32,11 +32,16 @@ from ..utils.paths import canonical_dir
 from .atomic import _fsync_directory
 
 __all__ = [
+    "DEFAULT_PROFILE",
     "ENTRY_POINT_GROUP",
+    "LOCAL_PROFILE",
     "LocalStore",
     "ObjectInfo",
     "Store",
+    "StoreProfile",
+    "min_object_bytes",
     "open_store",
+    "profile_of",
     "register_store",
     "validate_key",
 ]
@@ -72,6 +77,81 @@ class ObjectInfo:
     key: str
     size: int
     sha256: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoreProfile:
+    """Measured performance of a store; layers above derive their defaults from it.
+
+    - ``request_seconds``: fixed cost of one small request.
+    - ``stream_mb_s``: uncached bandwidth of one stream, in MB/s.
+    - ``streams``: concurrent transfers worth running against the store.
+    - ``range_streams``: parallel byte ranges worth reading from one large
+      object (1 when ranges of one object do not scale).
+    - ``part_bytes``: size of those ranges and of checkpoint parts.
+    - ``list_is_cheap``: whether listing is acceptable at all; when False,
+      callers must use manifests.
+
+    ``python -m koochak.storage.probe`` reports a recommended profile.
+    """
+
+    request_seconds: float = 0.001
+    stream_mb_s: float = 500.0
+    streams: int = 4
+    range_streams: int = 1
+    part_bytes: int = 64 * 1024 * 1024
+    list_is_cheap: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("request_seconds", "stream_mb_s"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a number")
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        for name in ("streams", "range_streams", "part_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.list_is_cheap, bool):
+            raise ValueError("list_is_cheap must be a boolean")
+
+
+# Local disks: cheap requests and listings, little to gain from ranges.
+LOCAL_PROFILE = StoreProfile()
+# Backends that declare nothing are treated like remote object storage.
+DEFAULT_PROFILE = StoreProfile(
+    request_seconds=0.1,
+    stream_mb_s=50.0,
+    streams=16,
+    range_streams=1,
+    part_bytes=32 * 1024 * 1024,
+    list_is_cheap=False,
+)
+
+
+def profile_of(store: "Store") -> StoreProfile:
+    """Return the store's declared profile, or the conservative remote default."""
+
+    profile = getattr(store, "profile", None)
+    if profile is None:
+        return DEFAULT_PROFILE
+    if not isinstance(profile, StoreProfile):
+        raise TypeError(f"{type(store).__name__}.profile must be a StoreProfile")
+    return profile
+
+
+def min_object_bytes(profile: StoreProfile, *, max_overhead: float = 0.25) -> int:
+    """Smallest file worth storing as its own object rather than packing it.
+
+    Per-request cost wastes ``t / (t + size / bandwidth)`` of a read; this is
+    the size at which that fraction falls to ``max_overhead``.
+    """
+
+    if not 0 < max_overhead < 1:
+        raise ValueError("max_overhead must be between 0 and 1")
+    bytes_per_second = profile.stream_mb_s * 1e6
+    return int(profile.request_seconds * bytes_per_second * (1 - max_overhead) / max_overhead)
 
 
 @runtime_checkable
@@ -175,7 +255,9 @@ class LocalStore:
     ignore it.  ``verify_readback=True`` re-reads every new object until its
     size and SHA256 match what was written, retrying for up to
     ``settle_seconds`` on mounts whose close completes asynchronously.
-    ``python -m koochak.storage.probe`` reports which settings a mount needs.
+    ``profile`` records the mount's measured performance (default:
+    ``LOCAL_PROFILE``). ``python -m koochak.storage.probe`` reports which
+    settings and profile a mount needs.
     """
 
     def __init__(
@@ -187,6 +269,7 @@ class LocalStore:
         verify_readback: bool = False,
         settle_seconds: float = 0.0,
         file_mode: int = 0o444,
+        profile: Optional[StoreProfile] = None,
     ) -> None:
         if publish not in _PUBLISH_MODES:
             raise ValueError(f"publish must be one of {_PUBLISH_MODES}, got {publish!r}")
@@ -199,6 +282,9 @@ class LocalStore:
             raise ValueError("settle_seconds requires verify_readback=True")
         if type(file_mode) is not int or not 0 <= file_mode <= 0o777:
             raise ValueError("file_mode must be a permission mode between 0 and 0o777")
+        if profile is not None and not isinstance(profile, StoreProfile):
+            raise TypeError("profile must be a StoreProfile")
+        self.profile = LOCAL_PROFILE if profile is None else profile
         self.root = canonical_dir(os.fspath(root))
         self.publish = publish
         self.fsync = fsync

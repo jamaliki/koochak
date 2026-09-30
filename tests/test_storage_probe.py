@@ -7,6 +7,7 @@ import os
 import pytest
 
 from koochak.storage.probe import main, probe
+from koochak.storage.store import StoreProfile
 
 TINY = dict(small_count=4, small_bytes=64, large_bytes=64 * 1024, streams=(1, 2), settle_timeout=1.0)
 
@@ -33,12 +34,17 @@ def test_probe_reports_posix_semantics_and_cleans_up(tmp_path):
     store = report["store"]
     assert store["semantics"]["ok"], store["semantics"]
     assert store["small_list"]["complete"]
+    assert set(store["large_single_stream"]) == {"bytes", "put_mb_s", "cold_get_mb_s", "warm_get_mb_s"}
+    assert store["large_ranged"]["ranges"] == 2
     assert set(store["large_concurrent"]) == {
         "put_streams",
         "put_mb_s",
-        "get_1_streams_mb_s",
-        "get_2_streams_mb_s",
+        "cold_get_2_streams_mb_s",
+        "warm_get_1_streams_mb_s",
+        "warm_get_2_streams_mb_s",
     }
+    profile = StoreProfile(**report["recommended_profile"])
+    assert profile.list_is_cheap
     assert list(tmp_path.iterdir()) == []
     json.dumps(report)
 
