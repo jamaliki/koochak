@@ -53,7 +53,7 @@ ENV_VAR = "KOOCHAK_STORES"
 VERSION = 1
 
 _ENTRY_KEYS = frozenset(
-    {"type", "root", "publish", "fsync", "verify_readback", "settle_seconds", "profile"}
+    {"type", "root", "publish", "fsync", "verify_readback", "settle_seconds", "read_settle_seconds", "profile"}
 )
 _PROFILE_KEYS = frozenset(field.name for field in dataclasses.fields(StoreProfile))
 _CACHE: Dict[str, tuple[int, int, Dict[str, "StoreSpec"]]] = {}
@@ -70,6 +70,7 @@ class StoreSpec:
     verify_readback: bool = False
     settle_seconds: float = 0.0
     profile: Optional[StoreProfile] = None
+    read_settle_seconds: float = 0.0
 
     def open(self, subpath: str = "") -> LocalStore:
         """A store rooted at ``root/subpath`` (``subpath`` is a validated key or empty)."""
@@ -82,6 +83,7 @@ class StoreSpec:
             verify_readback=self.verify_readback,
             settle_seconds=self.settle_seconds,
             profile=self.profile,
+            read_settle_seconds=self.read_settle_seconds,
         )
 
 
@@ -127,8 +129,10 @@ def _entry(scheme: str, value: object, source: str) -> StoreSpec:
     if not isinstance(root, str) or not root or not os.path.isabs(os.path.expanduser(root)):
         raise ValueError(f"{label}.root must be an absolute path")
     settle = value.get("settle_seconds", 0.0)
-    if isinstance(settle, bool) or not isinstance(settle, (int, float)) or not math.isfinite(settle):
-        raise ValueError(f"{label}.settle_seconds must be a number")
+    read_settle = value.get("read_settle_seconds", 0.0)
+    for name, number in (("settle_seconds", settle), ("read_settle_seconds", read_settle)):
+        if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
+            raise ValueError(f"{label}.{name} must be a number")
     return StoreSpec(
         scheme=scheme,
         root=os.path.abspath(os.path.expanduser(root)),
@@ -137,6 +141,7 @@ def _entry(scheme: str, value: object, source: str) -> StoreSpec:
         verify_readback=_require_bool(value.get("verify_readback", False), f"{label}.verify_readback"),
         settle_seconds=float(settle),
         profile=_profile(value["profile"], f"{label}.profile") if "profile" in value else None,
+        read_settle_seconds=float(read_settle),
     )
 
 

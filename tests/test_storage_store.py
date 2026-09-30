@@ -212,3 +212,34 @@ def test_factory_must_return_a_store(clean_registry):
     register_store("junk", lambda location: object())
     with pytest.raises(TypeError):
         open_store("junk://x")
+
+
+def test_reads_wait_out_files_still_settling_on_other_nodes(tmp_path, monkeypatch):
+    settling = LocalStore(tmp_path, read_settle_seconds=5.0)
+    settling.put("k", b"payload")
+    real_open = open
+    calls = []
+
+    def flaky_open(path, mode="r", *args, **kwargs):
+        calls.append(path)
+        if len(calls) < 3:
+            raise OSError(errno.ETIME, "Timer expired")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib, "open", flaky_open, raising=False)
+    monkeypatch.setattr(store_lib.time, "sleep", lambda _seconds: None)
+    assert settling.get("k") == b"payload"
+    assert len(calls) == 3
+
+    impatient = LocalStore(tmp_path)
+    calls.clear()
+    with pytest.raises(OSError):
+        impatient.get("k")
+    assert len(calls) == 1
+
+    def missing(path, mode="r", *args, **kwargs):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(store_lib, "open", missing, raising=False)
+    with pytest.raises(FileNotFoundError):
+        settling.get("k")

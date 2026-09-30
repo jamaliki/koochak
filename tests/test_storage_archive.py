@@ -334,3 +334,32 @@ def test_command_line_move_records_its_source(tree, tmp_path, capsys):
     metadata = load_collection(LocalStore(collection)).metadata
     assert metadata["source"] == source.root
     assert metadata["source_root"] == source.root
+
+
+def test_checkpoint_selection_skips_links_and_recent_files(tmp_path):
+    root = tmp_path / "lustre"
+    old_ns = BASE_NS
+    for relative in ("code/a/runs/x/step000000100.pt", "code/a/runs/x/step000000100.pt.ready.json",
+                     "runs/y/model.ckpt", "runs/y/notes.txt", "data/big.npz"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * 100)
+        os.utime(path, ns=(old_ns, old_ns))
+    (root / "code/a/runs/x/latest.pt").symlink_to("step000000100.pt")
+    (root / "runs/y/step000000200.pt").write_bytes(b"fresh")  # written just now by a live run
+    (root / "runs/loop").symlink_to(root / "runs")
+
+    patterns = ["*.pt", "*.ckpt", "*.pt.ready.json"]
+    with pytest.raises(ValueError, match="symlink"):
+        scan_source(root, include=patterns)
+    report = archive(
+        LocalStore(root),
+        LocalStore(tmp_path / "checkpoints"),
+        include=patterns,
+        exclude=["data"],
+        skip_symlinks=True,
+        min_age_seconds=48 * 3600,
+    )
+    assert report.skipped == {"symlinks": 2, "recent": 1}
+    paths = [entry.path for entry in load_collection(LocalStore(tmp_path / "checkpoints")).files]
+    assert paths == ["code/a/runs/x/step000000100.pt", "code/a/runs/x/step000000100.pt.ready.json", "runs/y/model.ckpt"]

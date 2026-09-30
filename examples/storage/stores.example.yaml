@@ -22,6 +22,8 @@ stores:
     root: /path/to/object-storage-mount/${oc.env:USER}
     # FUSE mounts over object storage usually lack hard links.
     publish: exclusive
+    # Files closed on another node can fail with ETIME for minutes; wait for them.
+    read_settle_seconds: 1200
     profile:
       request_seconds: 0.15
       stream_mb_s: 16

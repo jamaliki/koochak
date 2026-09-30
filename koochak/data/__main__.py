@@ -72,6 +72,20 @@ def _parser() -> argparse.ArgumentParser:
         help="archive exactly these paths (one per line, relative to SRC) instead of walking SRC",
     )
     packer.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="keep only files matching any of these globs (excludes still prune directories)",
+    )
+    packer.add_argument("--skip-symlinks", action="store_true", help="skip symlinks instead of failing")
+    packer.add_argument(
+        "--min-age-hours",
+        type=float,
+        default=0.0,
+        help="skip files modified more recently than this (e.g. checkpoints a live run may use)",
+    )
+    packer.add_argument(
         "--delete-source",
         action="store_true",
         help="move: after the committed collection passes a deep verify, delete unchanged sources",
@@ -115,6 +129,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pending_packs=args.pending_packs,
             metadata={"source": args.source, "source_root": getattr(source, "root", None)},
             files=load_file_list(args.files_from) if args.files_from else None,
+            include=args.include,
+            skip_symlinks=args.skip_symlinks,
+            min_age_seconds=args.min_age_hours * 3600,
             delete_source=args.delete_source,
             dry_run=args.dry_run,
             progress=_progress(),

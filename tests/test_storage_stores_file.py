@@ -149,3 +149,14 @@ def test_shipped_example_parses(monkeypatch):
     assert set(specs) == {"scratch", "archive"}
     assert specs["archive"].publish == "exclusive"
     assert specs["scratch"].profile.part_bytes == 16 * 1024**2
+
+
+def test_read_settle_seconds_reaches_the_store(tmp_path):
+    path = write(
+        tmp_path,
+        f"version: 1\nstores:\n  archive:\n    type: local\n    root: {tmp_path}/a\n    read_settle_seconds: 1200\n",
+    )
+    assert open_store("archive://x", stores_file=path).read_settle_seconds == 1200.0
+    bad = write(tmp_path, f"version: 1\nstores:\n  archive:\n    type: local\n    root: {tmp_path}/a\n    read_settle_seconds: soon\n")
+    with pytest.raises(ValueError, match="read_settle_seconds"):
+        stores_file.load_stores_file(bad)
