@@ -20,8 +20,9 @@ Koochak's storage layer assumes a local POSIX filesystem:
 - `ShardedIterable` splits samples across ranks after reading them, so every
   rank reads the full stream and discards most of it.
 
-Probing a FUSE mount over object storage with `koochak.storage.probe` showed
-behaviour that breaks several of these assumptions:
+Probing a parallel filesystem and a FUSE mount over object storage (with a
+caching tier) with `koochak.storage.probe`, from one 16-CPU compute node each,
+showed behaviour that breaks several of these assumptions:
 
 | Behaviour | Parallel filesystem | FUSE over object storage |
 | --- | --- | --- |
@@ -31,12 +32,37 @@ behaviour that breaks several of these assumptions:
 | Symlinks | yes | no |
 | Append / in-place writes | yes | no (write-once files) |
 | Reading a file still open for writing | sees bytes written | blocks ~20 s, then fails |
-| Small-object put / get / stat (p50) | ~8 ms / <1 ms / <1 ms | ~200 ms / ~100 ms / ~40 ms |
-| Listing 16 keys | ~1 ms | ~700 ms |
+| First read after close matches the written bytes | yes | yes (no read-back delay seen) |
+| Small-object put p50 / max | 8 ms / **137 s** | 0.9 s / 1.2 s |
+| Small-object get / stat p50 | 0.5 ms / 0.2 ms | 225 ms / 96 ms |
+| Listing 256 keys | 1.3 ms | **36 s** |
+| 4 GiB write as 1 / 8 concurrent parts | 850 / 1030 MB/s | 355 / 455 MB/s |
+| First read of just-written data, per stream | client-cached (GB/s) | **11–15 MB/s** |
+| First read of a 4 GiB payload as 1 / 8 parts | client-cached | 14 / 103 MB/s |
+| Cached dataset read, 1 / 16 worker processes | client-cached | 260 / 570 MB/s |
+| Building an 8.5 GB shard dataset | 45 MB/s (write stalls) | 221 MB/s |
 
-So per-request cost, not bandwidth, dominates small objects; listing is
-expensive; and anything that appends (loggers) or links (artifact manifests,
-`latest.pt`) cannot live on such a mount.
+Parallel-filesystem reads were served largely from the writing node's page
+cache, so they overstate cold reads there.
+
+What this means for the design:
+
+- **Per-request cost, not bandwidth, dominates small objects**, and listing is
+  prohibitively slow on object storage. Training must read large shards named
+  by an index and never list or open many small files.
+- **Cold reads are limited per stream and scale with concurrency** (about
+  8× for 8 streams). Readers need several shard downloads in flight, and
+  checkpoints should be split into parts that resume reads in parallel.
+- **Cached reads are about 20× faster than cold ones**, so the first epoch is
+  the bottleneck. Warming the cache tier ahead of training, or staging each
+  worker's shards to local memory or disk, pays off.
+- **Read-back verification is unnecessary on this mount and expensive**
+  (minutes for a multi-GB checkpoint read cold). Rely on manifest SHA256 checks
+  at read time instead.
+- **The parallel filesystem is fast when healthy but has multi-minute write
+  stalls**, so checkpoint writes should not block training (async save).
+- Anything that appends (loggers) or links (artifact manifests, `latest.pt`)
+  cannot live on the object-storage mount.
 
 ## Goals
 - One interface for durable bytes, with semantics every backend can honour.
@@ -159,8 +185,13 @@ scheduler that consumes them.
   mocked-mount tests for exclusive publish and delayed read-back.
 
 ## Risks and Open Questions
-- Read-back verification doubles checkpoint I/O on mounts that need it; confirm
-  the delay for large objects on compute nodes before enabling it by default.
+- Read-back verification doubles checkpoint I/O on mounts that need it. None
+  was needed on the probed mount, where first reads always matched.
+- Measurements so far come from CPU nodes; accelerator nodes may have a
+  different network path. Cold multi-stream reads of data uploaded by other
+  tools (rather than written through the mount) are not yet measured.
+- The probe's concurrent-read phase mixes cached and uncached objects; phase 2
+  should measure them separately and evict page caches before cold reads.
 - Exact resume across a changed world size is not possible with rank-based
   plans; the default is to fail loudly.
 - Whether node-local disks exist on the target compute nodes decides whether
