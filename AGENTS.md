@@ -206,7 +206,7 @@ Done recently
 Open TODOs (authoritative)
 - Storage abstraction (`specs/storage-abstraction.md`)
   - Phase 1: write-once `Store`, `LocalStore`, pluggable schemes, shard index/writer/plan, storage probe [DONE]
-  - Phase 2: `StoreProfile`, `copy_objects` transfer engine, probe cold/cached/range-parallel measurements [DONE; cluster range-read run pending]
+  - Phase 2: `StoreProfile`, `copy_objects` transfer engine, probe cold/cached/range-parallel measurements [DONE]
   - Phase 3: manifested collections (`shards`, `packed` with file tables) and `python -m koochak.data` (`archive`, `pull`, `verify`, `ls`, `warm`, `stage`) [TODO]
   - Phase 4: readers — `PackedTree` (path-addressed range reads + node-local cache), `ShardedStream` IterableDataset (bounded prefetch, verify, windowed shuffle, infinite per-worker streams, resume from `next_step`), staging [TODO]
   - Phase 5: checkpoints as parts + manifest via `Store` (async save, parallel parts, manifest-only selection, replication between tiers, drop `latest.pt`) [TODO]

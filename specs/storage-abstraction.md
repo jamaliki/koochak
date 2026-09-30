@@ -41,21 +41,34 @@ showed behaviour that breaks several of these assumptions:
 | First read of a 4 GiB payload as 1 / 8 parts | client-cached | 14 / 103 MB/s |
 | Cached dataset read, 1 / 16 worker processes | client-cached | 260 / 570 MB/s |
 | Building an 8.5 GB shard dataset | 45 MB/s (write stalls) | 221 MB/s |
+| 512 MB read, 1 stream, cold / cached | 1029 / 2267 MB/s | **16 / 1017 MB/s** |
+| 32 byte ranges of one 512 MB object, cold / cached | 3222 / 15371 MB/s | 127 / **155 MB/s** |
+| 32 separate 512 MB objects read concurrently, cold | 904 MB/s | **356 MB/s** |
+| 33 concurrent 512 MB writes | 274 MB/s | 840 MB/s |
 
-Parallel-filesystem reads were served largely from the writing node's page
-cache, so they overstate cold reads there.
+The first parallel-filesystem read numbers were served largely from the
+writing node's page cache; the 512 MB rows drop page caches first
+(`posix_fadvise(DONTNEED)`) and are cold.
 
 What this means for the design:
 
 - **Per-request cost, not bandwidth, dominates small objects**, and listing is
   prohibitively slow on object storage. Training must read large shards named
   by an index and never list or open many small files.
-- **Cold reads are limited per stream and scale with concurrency** (about
-  8× for 8 streams). Readers need several shard downloads in flight, and
-  checkpoints should be split into parts that resume reads in parallel.
-- **Cached reads are about 20× faster than cold ones**, so the first epoch is
-  the bottleneck. Warming the cache tier ahead of training, or staging each
-  worker's shards to local memory or disk, pays off.
+- **Cold reads are limited per stream and scale with concurrency across
+  objects** (22× for 32 objects). Readers need many shard downloads in flight.
+- **On object storage, parallelism across objects beats byte ranges of one
+  object**, and ranges cap cached reads at a fraction of a sequential read
+  because each range pays an open and seek. Large payloads that must read back
+  fast (checkpoints) are split into parts; range splitting is enabled only
+  where the probe shows it helps both cold and cached reads (the parallel
+  filesystem).
+- **Cached reads are 20–60× faster than cold ones** (about 1 GB/s against
+  16 MB/s per stream), so the first epoch is the bottleneck. Warming the cache
+  tier ahead of training, or staging each worker's shards to local memory or
+  disk, pays off.
+- **Concurrent writers hurt the parallel filesystem** (33 writers reach a third
+  of one writer's bandwidth), while object storage absorbs them.
 - **Read-back verification is unnecessary on this mount and expensive**
   (minutes for a multi-GB checkpoint read cold). Rely on manifest SHA256 checks
   at read time instead.
@@ -295,7 +308,7 @@ scheduler that consumes them.
 1. Write-once `Store`, `LocalStore`, pluggable schemes, shard index, writer
    and plan, storage probe. **Done.**
 2. Store profiles, the transfer engine, and probe measurements of cold versus
-   cached concurrency and of range-parallel reads of one object. **In progress.**
+   cached concurrency and of range-parallel reads of one object. **Done.**
 3. Manifested collections (`shards`, `packed`) and the data tool (`archive`,
    `pull`, `verify`, `ls`, `warm`, `stage`), piloted on a per-record cache.
 4. Readers: `PackedTree`, `ShardedStream`, staging.
@@ -323,8 +336,11 @@ scheduler that consumes them.
 - Measurements so far come from CPU nodes; accelerator nodes may have a
   different network path. Cold multi-stream reads of data uploaded by other
   tools (rather than written through the mount) are not yet measured.
-- Whether byte ranges of one object read in parallel scale like separate
-  objects decides whether large files ever need splitting into parts.
+- Whether warming the cache tier from one node makes the data cached for
+  every node (a shared cache) or only for that node decides how `warm` and
+  staging are scheduled.
+- Cold concurrency was measured up to 32 streams from one node; the per-node
+  and aggregate ceilings are not yet known.
 - Exact resume across a changed world size is not possible with rank-based
   plans; the default is to fail loudly.
 - Whether node-local disks exist on the target compute nodes decides whether

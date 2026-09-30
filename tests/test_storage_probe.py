@@ -98,6 +98,33 @@ def test_probe_rejects_more_readers_than_shards(tmp_path):
         probe(str(tmp_path), **TINY, dataset_shards=2, readers=(4,))
 
 
+def _store_results(cold, warm, ranged_cold, ranged_warm, concurrent_cold):
+    return {
+        "large_single_stream": {"cold_get_mb_s": cold, "warm_get_mb_s": warm},
+        "large_ranged": {"ranges": 32, "part_bytes": 16 * 1024**2, "cold_get_mb_s": ranged_cold, "warm_get_mb_s": ranged_warm},
+        "large_concurrent": {"cold_get_32_streams_mb_s": concurrent_cold},
+        "small_list": {"keys": 64, "ms": 2900.0},
+        "small_get": {"p50_ms": 138.0},
+    }
+
+
+def test_recommended_profile_rejects_ranges_that_slow_cached_reads():
+    from koochak.storage.probe import _recommend_profile
+
+    # Object-storage mount: ranges help cold reads but cap cached ones.
+    remote = _recommend_profile(_store_results(15.9, 1017.3, 126.6, 154.6, 356.2), (1, 8, 32))
+    assert remote["range_streams"] == 1
+    assert remote["streams"] == 32
+    assert remote["list_is_cheap"] is False
+    assert remote["request_seconds"] == 0.138
+    # Parallel filesystem: ranges help both cold and cached reads.
+    parallel = _recommend_profile(_store_results(1029.0, 2266.7, 3222.0, 15371.0, 904.3), (1, 8, 32))
+    assert parallel["range_streams"] == 32
+    assert parallel["streams"] == 4
+    StoreProfile(**remote)
+    StoreProfile(**parallel)
+
+
 def test_probe_requires_an_existing_directory(tmp_path):
     with pytest.raises(FileNotFoundError):
         probe(str(tmp_path / "missing"), **TINY)
