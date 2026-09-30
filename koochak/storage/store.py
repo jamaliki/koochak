@@ -256,6 +256,10 @@ class LocalStore:
     ignore it.  ``verify_readback=True`` re-reads every new object until its
     size and SHA256 match what was written, retrying for up to
     ``settle_seconds`` on mounts whose close completes asynchronously.
+    ``read_settle_seconds`` retries opening a file that fails with ``ETIME``:
+    on some object-storage mounts a file closed on another node stays
+    unreadable for minutes. Other read errors are raised at once.
+
     ``profile`` records the mount's measured performance (default:
     ``LOCAL_PROFILE``). ``python -m koochak.storage.probe`` reports which
     settings and profile a mount needs.
@@ -271,6 +275,7 @@ class LocalStore:
         settle_seconds: float = 0.0,
         file_mode: int = 0o444,
         profile: Optional[StoreProfile] = None,
+        read_settle_seconds: float = 0.0,
     ) -> None:
         if publish not in _PUBLISH_MODES:
             raise ValueError(f"publish must be one of {_PUBLISH_MODES}, got {publish!r}")
@@ -283,6 +288,10 @@ class LocalStore:
             raise ValueError("settle_seconds requires verify_readback=True")
         if type(file_mode) is not int or not 0 <= file_mode <= 0o777:
             raise ValueError("file_mode must be a permission mode between 0 and 0o777")
+        read_settle = float(read_settle_seconds)
+        if not math.isfinite(read_settle) or read_settle < 0:
+            raise ValueError("read_settle_seconds must be a finite, non-negative number")
+        self.read_settle_seconds = read_settle
         if profile is not None and not isinstance(profile, StoreProfile):
             raise TypeError("profile must be a StoreProfile")
         self.profile = LOCAL_PROFILE if profile is None else profile
@@ -302,15 +311,25 @@ class LocalStore:
     def _path(self, key: str) -> str:
         return os.path.join(self.root, *validate_key(key).split("/"))
 
+    def _open_settled(self, path: str) -> BinaryIO:
+        deadline = time.monotonic() + self.read_settle_seconds
+        while True:
+            try:
+                return open(path, "rb")
+            except OSError as exc:
+                if exc.errno != errno.ETIME or time.monotonic() >= deadline:
+                    raise
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+
     def get(self, key: str, offset: int = 0, length: Optional[int] = None) -> bytes:
         _check_range(offset, length)
-        with open(self._path(key), "rb") as handle:
+        with self._open_settled(self._path(key)) as handle:
             if offset:
                 handle.seek(offset)
             return handle.read() if length is None else handle.read(length)
 
     def open(self, key: str) -> BinaryIO:
-        return open(self._path(key), "rb")
+        return self._open_settled(self._path(key))
 
     def put(self, key: str, data: PutData) -> ObjectInfo:
         path = self._path(key)

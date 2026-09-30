@@ -30,6 +30,7 @@ import os
 import stat
 import sys
 import time
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -131,6 +132,7 @@ class ArchiveReport:
     deleted_sources: int = 0
     changed_sources: tuple[str, ...] = ()
     missing_sources: int = 0
+    skipped: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -220,19 +222,40 @@ def scan_source(
     groups: Optional[Mapping[str, tuple[str, int]]] = None,
     exclude: Sequence[str] = (),
     files: Optional[Sequence[str]] = None,
+    include: Sequence[str] = (),
+    skip_symlinks: bool = False,
+    min_age_seconds: float = 0.0,
+    skipped: Optional[Counter] = None,
 ) -> List[SourceFile]:
     """Regular files under ``root`` (all of them, or exactly ``files``), sorted, with groups.
 
-    With ``files`` nothing is walked: each listed path must exist and be a
-    regular file, so a stale list fails instead of silently archiving less.
+    ``exclude`` globs prune files and whole directories; ``include`` globs,
+    when given, keep only matching files. Symlinks fail unless
+    ``skip_symlinks``; files modified less than ``min_age_seconds`` ago are
+    skipped (for example checkpoints a live run may still use). Skips are
+    counted in ``skipped``. With ``files`` nothing is walked: each listed path
+    must exist, so a stale list fails instead of silently archiving less.
     """
 
     root = os.path.abspath(os.fspath(root))
     if not os.path.isdir(root):
         raise FileNotFoundError(f"archive source is not a directory: {root}")
+    counts = skipped if skipped is not None else Counter()
+    cutoff_ns = time.time_ns() - int(min_age_seconds * 1e9) if min_age_seconds > 0 else None
 
     def excluded(relative: str) -> bool:
         return any(fnmatchcase(relative, pattern) for pattern in exclude)
+
+    def selected(relative: str, observed: os.stat_result) -> bool:
+        if include and not any(fnmatchcase(relative, pattern) for pattern in include):
+            return False
+        if stat.S_ISLNK(observed.st_mode) and skip_symlinks:
+            counts["symlinks"] += 1
+            return False
+        if cutoff_ns is not None and stat.S_ISREG(observed.st_mode) and observed.st_mtime_ns > cutoff_ns:
+            counts["recent"] += 1
+            return False
+        return True
 
     found: List[SourceFile] = []
     if files is not None:
@@ -246,7 +269,8 @@ def scan_source(
             except FileNotFoundError:
                 missing.append(relative)
                 continue
-            found.append(_source_file(relative, observed, groups))
+            if selected(relative, observed):
+                found.append(_source_file(relative, observed, groups))
         if missing:
             raise FileNotFoundError(
                 f"{len(missing)} listed paths do not exist under {root}, e.g. {missing[:5]}"
@@ -262,13 +286,19 @@ def scan_source(
             if excluded(relative):
                 continue
             if os.path.islink(os.path.join(directory, name)):
+                if skip_symlinks:
+                    counts["symlinks"] += 1
+                    continue
                 raise ValueError(f"{relative} is a symlink; archives store no links (use --exclude)")
             kept.append(name)
         child_directories[:] = kept
         for name in sorted(filenames):
             relative = prefix + name
-            if not excluded(relative):
-                found.append(_source_file(relative, os.lstat(os.path.join(directory, name)), groups))
+            if excluded(relative):
+                continue
+            observed = os.lstat(os.path.join(directory, name))
+            if selected(relative, observed):
+                found.append(_source_file(relative, observed, groups))
     if groups:
         present = {item.path for item in found}
         missing = [path for path in groups if path not in present and not excluded(path)]
@@ -489,6 +519,9 @@ def archive(
     pending_packs: int = 8,
     metadata: Optional[Mapping[str, Any]] = None,
     files: Optional[Sequence[str]] = None,
+    include: Sequence[str] = (),
+    skip_symlinks: bool = False,
+    min_age_seconds: float = 0.0,
     delete_source: bool = False,
     dry_run: bool = False,
     progress: Optional[ProgressFn] = None,
@@ -515,7 +548,17 @@ def archive(
     started = time.perf_counter()
     group_map = load_groups(groups) if isinstance(groups, (str, os.PathLike)) else groups
     listed = files
-    files = scan_source(source.root, groups=group_map, exclude=exclude, files=listed)
+    skipped: Counter = Counter()
+    files = scan_source(
+        source.root,
+        groups=group_map,
+        exclude=exclude,
+        files=listed,
+        include=include,
+        skip_symlinks=skip_symlinks,
+        min_age_seconds=min_age_seconds,
+        skipped=skipped,
+    )
     if not files:
         raise ValueError(f"nothing to archive under {source.root}")
     if object_bytes is None:
@@ -526,7 +569,7 @@ def archive(
     if dry_run:
         return ArchiveReport(
             len(files), total_bytes, len(plan.packs), len(plan.objects), 0, requests,
-            time.perf_counter() - started, True,
+            time.perf_counter() - started, True, skipped=dict(skipped),
         )
 
     entries: List[FileEntry] = []
@@ -613,7 +656,7 @@ def archive(
     return ArchiveReport(
         len(files), total_bytes, len(plan.packs), len(plan.objects), reused, requests,
         time.perf_counter() - started, False, collection.manifest_sha256,
-        deleted, changed, missing,
+        deleted, changed, missing, dict(skipped),
     )
 
 

@@ -669,7 +669,9 @@ checkpoints still use the POSIX path above until that phase lands.
   hard link. On mounts without hard links use `publish="exclusive"`
   (`O_EXCL` create, published on close); `fsync=False` and
   `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
-  close asynchronously.
+  close asynchronously. `read_settle_seconds` retries opening files that fail
+  with `ETIME`, which some object-storage mounts return for minutes after
+  another node closed the file.
 - `StoreProfile` records a store's measured performance (per-request cost,
   cold bandwidth per stream, useful concurrency, whether byte ranges of one
   object scale, part size, whether listing is acceptable). `LocalStore(...,
@@ -716,6 +718,10 @@ Collections and the data tool (`koochak.storage.collection`, `koochak.storage.ar
   files with merged range reads, checks every SHA256, restores mode and exact
   mtime, and skips files already present. `verify [--deep]` checks sizes or
   every byte; `ls [--include GLOB] [--long]` lists from the manifest.
+- `--include GLOB` keeps only matching files while walking (excludes still
+  prune directories); `--skip-symlinks` skips links instead of failing;
+  `--min-age-hours H` skips files modified in the last H hours (e.g.
+  checkpoints a live run may still use). Skips are counted in the report.
 - `--files-from LIST` archives exactly the listed paths (relative to SRC)
   without walking SRC. `--delete-source` makes the archive a move: after the
   committed collection passes a deep verify, sources whose size and mtime
