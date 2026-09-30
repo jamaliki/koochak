@@ -19,7 +19,7 @@ import sys
 import time
 from typing import Optional, Sequence
 
-from ..storage.archive import DEFAULT_PACK_BYTES, archive, pull, verify
+from ..storage.archive import DEFAULT_PACK_BYTES, archive, load_file_list, pull, verify
 from ..storage.collection import load_collection
 from ..storage.store import open_store
 from ..utils.sizes import parse_size
@@ -65,6 +65,17 @@ def _parser() -> argparse.ArgumentParser:
     packer.add_argument("--streams", type=int, default=None)
     packer.add_argument("--read-streams", type=int, default=8)
     packer.add_argument("--pending-packs", type=int, default=8)
+    packer.add_argument(
+        "--files-from",
+        default=None,
+        metavar="LIST",
+        help="archive exactly these paths (one per line, relative to SRC) instead of walking SRC",
+    )
+    packer.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="move: after the committed collection passes a deep verify, delete unchanged sources",
+    )
     packer.add_argument("--dry-run", action="store_true", help="plan only; write nothing")
 
     puller = commands.add_parser("pull", parents=[common], help="restore files from a collection")
@@ -90,8 +101,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     stores = args.stores
     if args.command == "archive":
+        source = open_store(args.source, stores_file=stores)
         report = archive(
-            open_store(args.source, stores_file=stores),
+            source,
             open_store(args.target, stores_file=stores),
             groups=args.groups,
             exclude=args.exclude,
@@ -101,6 +113,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             streams=args.streams,
             read_streams=args.read_streams,
             pending_packs=args.pending_packs,
+            metadata={"source": args.source, "source_root": getattr(source, "root", None)},
+            files=load_file_list(args.files_from) if args.files_from else None,
+            delete_source=args.delete_source,
             dry_run=args.dry_run,
             progress=_progress(),
         )
