@@ -205,6 +205,16 @@ checkpoints:
 
 Listing, `stat`, and existence checks on a collection come from its manifest.
 
+As implemented (`koochak/storage/collection.py`), the manifest is small and
+references a gzipped JSON-lines file table (sorted rows, gzip mtime 0, so the
+same collection always has the same bytes). Each file row records path, size,
+SHA256, mode, exact mtime, group, and either `(pack, offset)` or `object`.
+Grouping comes from a project-supplied table (`path,group[,order]`): Koochak
+does not interpret clusters, it keeps each group contiguous in one pack in the
+given order. Ownership computed at training time (which depends on world size
+and worker count) is therefore not baked into the layout; a worker loads each
+owned group with one range read, and staging copies an owner's share.
+
 ## Data tool
 `python -m koochak.data` (phase 3) moves collections:
 
@@ -309,8 +319,9 @@ scheduler that consumes them.
    and plan, storage probe. **Done.**
 2. Store profiles, the transfer engine, and probe measurements of cold versus
    cached concurrency and of range-parallel reads of one object. **Done.**
-3. Manifested collections (`shards`, `packed`) and the data tool (`archive`,
-   `pull`, `verify`, `ls`, `warm`, `stage`), piloted on a per-record cache.
+3. Manifested collections and the data tool. **`archive` (with `--groups`),
+   `pull`, `verify`, `ls` done**; `warm`, `stage`, and verified source
+   deletion remain; pilot on a per-record cache next.
 4. Readers: `PackedTree`, `ShardedStream`, staging.
 5. Checkpoints as parts: async saves, parallel parts, replication between tiers.
 6. Artifact manifests through `Store.put`.
