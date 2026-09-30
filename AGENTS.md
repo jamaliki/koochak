@@ -35,6 +35,10 @@ This doc tracks incremental design decisions and changes from the initial design
     `open_store`/`register_store` with `koochak.stores` entry points for
     private backends. Checkpoints do not use it yet (phase 3 of
     `specs/storage-abstraction.md`).
+  - `koochak/storage/stores_file.py` – named schemes from a private YAML
+    stores file (`$KOOCHAK_STORES` or `~/.config/koochak/stores.yaml`): roots,
+    publish modes, profiles. Replaces the need for private Python plugins;
+    never commit a real stores file (only `examples/storage/stores.example.yaml`).
   - `StoreProfile` (in `store.py`) records measured store performance;
     `profile_of` and `min_object_bytes` feed defaults to layers above.
   - `koochak/storage/transfer.py` – `copy_objects`: the single path for moving

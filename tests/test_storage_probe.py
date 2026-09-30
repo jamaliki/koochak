@@ -125,6 +125,15 @@ def test_recommended_profile_rejects_ranges_that_slow_cached_reads():
     StoreProfile(**parallel)
 
 
+def test_probe_emits_a_profile_block_for_the_stores_file(tmp_path, capsys):
+    from omegaconf import OmegaConf
+
+    argv = [str(tmp_path), "--small-count", "4", "--small-bytes", "64", "--large-bytes", "64K"]
+    assert main([*argv, "--streams", "1,2", "--emit-profile"]) == 0
+    block = OmegaConf.to_container(OmegaConf.create(capsys.readouterr().out))
+    StoreProfile(**block["profile"])
+
+
 def test_probe_requires_an_existing_directory(tmp_path):
     with pytest.raises(FileNotFoundError):
         probe(str(tmp_path / "missing"), **TINY)

@@ -197,6 +197,7 @@ state deterministically.
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
     - `store.py` – the `Store` protocol (write-once objects), `StoreProfile`, `LocalStore`, and `open_store`/`register_store` for pluggable backends.
     - `transfer.py` – `copy_objects`: parallel, range-splitting, verified, resumable copies between stores.
+    - `stores_file.py` – named `scheme://` stores from a private YAML file (`$KOOCHAK_STORES`).
     - `probe.py` – `python -m koochak.storage.probe <location>`: storage semantics and throughput report.
   - `utils/`
     - `config.py` – thin compatibility wrappers around `koochak.config` (`get/as_dict`).
@@ -653,6 +654,14 @@ checkpoints still use the POSIX path above until that phase lands.
   and any other `scheme://` to a factory registered with `register_store` or
   exposed by an installed package under the `koochak.stores` entry-point group.
   Site-specific backends live in private packages, not in this repository.
+- **Stores file.** Site-specific facts stay out of code: a private YAML file
+  maps scheme names to roots, publish modes, and measured profiles, and
+  `open_store("archive://datasets/foo")` returns a `LocalStore` rooted at
+  `<root>/datasets/foo` with those settings. The same relative path under two
+  schemes names the same data on two tiers. The file is `$KOOCHAK_STORES`, else
+  `~/.config/koochak/stores.yaml` (XDG); values resolve with OmegaConf
+  (`${oc.env:USER}`), unknown keys fail, and it holds no secrets. See
+  `examples/storage/stores.example.yaml`; keep the real file private.
 - `LocalStore(root, publish="link")` publishes via a hidden temp file plus a
   hard link. On mounts without hard links use `publish="exclusive"`
   (`O_EXCL` create, published on close); `fsync=False` and
@@ -676,7 +685,8 @@ checkpoints still use the POSIX path above until that phase lands.
   `LocalStore` settings and a `StoreProfile`, and measures small-object
   latency, listing, cold versus cached single-stream, concurrent, and
   range-parallel reads (page caches are dropped before cold reads where the OS
-  allows). `--checkpoint-bytes 4G --checkpoint-parts 1,8`
+  allows). `--emit-profile` prints just the recommended `profile:` block to
+  paste into the stores file. `--checkpoint-bytes 4G --checkpoint-parts 1,8`
   adds a checkpoint-sized write as 1..N concurrent parts with read-back
   timing; `--dataset-shards 32 --shard-bytes 256M --readers 1,4,16` builds a
   synthetic dataset with `ShardWriter` and reads it with N spawned processes

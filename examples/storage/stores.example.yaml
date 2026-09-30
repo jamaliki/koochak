@@ -1,0 +1,30 @@
+# Example stores file. Copy it to ~/.config/koochak/stores.yaml (or point
+# $KOOCHAK_STORES at your copy) and replace the placeholder roots. Keep the real
+# file private: it records where your data lives.
+#
+# Fill in `profile` from `python -m koochak.storage.probe <root> --json`
+# ("recommended_profile"). Omitted profile fields keep their defaults.
+version: 1
+stores:
+  scratch:
+    type: local
+    root: /path/to/parallel-filesystem/${oc.env:USER}
+    publish: link
+    profile:
+      request_seconds: 0.001
+      stream_mb_s: 1000
+      streams: 4
+      range_streams: 32
+      part_bytes: 16MiB
+      list_is_cheap: true
+  archive:
+    type: local
+    root: /path/to/object-storage-mount/${oc.env:USER}
+    # FUSE mounts over object storage usually lack hard links.
+    publish: exclusive
+    profile:
+      request_seconds: 0.15
+      stream_mb_s: 16
+      streams: 32
+      range_streams: 1
+      list_is_cheap: false
