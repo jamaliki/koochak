@@ -198,6 +198,9 @@ state deterministically.
     - `store.py` – the `Store` protocol (write-once objects), `StoreProfile`, `LocalStore`, and `open_store`/`register_store` for pluggable backends.
     - `transfer.py` – `copy_objects`: parallel, range-splitting, verified, resumable copies between stores.
     - `stores_file.py` – named `scheme://` stores from a private YAML file (`$KOOCHAK_STORES`).
+    - `collection.py` – manifested collections: `manifest.json` + `files.jsonl.gz`, tar packs, standalone objects.
+    - `archive.py` – `archive` (grouped packing, resumable), `pull` (subsets, verified, metadata restored), `verify`.
+  - `data/__main__.py` – `python -m koochak.data archive|pull|verify|ls`.
     - `probe.py` – `python -m koochak.storage.probe <location>`: storage semantics and throughput report.
   - `utils/`
     - `config.py` – thin compatibility wrappers around `koochak.config` (`get/as_dict`).
@@ -692,6 +695,29 @@ checkpoints still use the POSIX path above until that phase lands.
   synthetic dataset with `ShardWriter` and reads it with N spawned processes
   via `assign_shards` (cold and warm passes). Run it on a compute node; it
   cleans up after itself.
+
+Collections and the data tool (`koochak.storage.collection`, `koochak.storage.archive`):
+
+- A **collection** is many files under one prefix, described by
+  `manifest.json` (written last; the commit point) and `files.jsonl.gz` (per
+  file: path, size, SHA256, mode, exact mtime, group, and either its pack and
+  byte offset or its standalone object). Small files live in plain tar packs
+  (`packs/pack-NNNNNN.tar`), large ones as `objects/<path>`. Listing and `stat`
+  come from the manifest, never from listing storage.
+- `python -m koochak.data archive SRC DEST [--groups groups.csv]` packs a local
+  tree. The groups table (`path,group[,order]`) keeps each group's files
+  contiguous in one pack, in `order`, so a worker loads a group with one range
+  read; unlisted files group by directory. Files at least `--object-bytes`
+  (default from the target's profile) become objects; `--layout objects`
+  stores every file as-is (e.g. already-sharded datasets). Reruns resume from
+  per-pack records and refuse leftovers that do not match the plan.
+  `--dry-run` reports files, bytes, packs, objects, and request counts.
+- `python -m koochak.data pull SRC DEST [--include GLOB]` restores all or some
+  files with merged range reads, checks every SHA256, restores mode and exact
+  mtime, and skips files already present. `verify [--deep]` checks sizes or
+  every byte; `ls [--include GLOB] [--long]` lists from the manifest.
+- Symlinks and special files are refused (exclude them with `--exclude`).
+  Source deletion after a verified archive is not implemented yet.
 
 Datasets (`koochak.data.shards`):
 
