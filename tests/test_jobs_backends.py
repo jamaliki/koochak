@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hashlib
+import io
+import json
+import posixpath
+import shlex
 import sys
 import types
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +18,7 @@ import pytest
 from koochak.jobs import (
     EnvironmentProfile,
     prepare_run,
+    runner,
     submit_pazuzu,
     submit_scruffy,
 )
@@ -69,11 +76,50 @@ def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
         )
     )
 
+    runtime_path = posixpath.join(prepared.run_dir, "koochak-runtime.zip")
+    runtime, manifest = prepared.artifacts
+    assert (runtime.path, manifest.path) == (runtime_path, prepared.manifest_path)
+    assert manifest.sha256 == prepared.manifest_sha256
+
+    # The runtime archive must land before the manifest that pins it.
     assert result == "handle"
-    assert len(client.staged) == 1
-    assert client.staged[0][1] == prepared.artifacts[0].content
-    assert prepared.artifacts[0].content.decode() not in client.staged[0][0]
+    assert len(client.staged) == 2
+    (runtime_command, runtime_stdin, runtime_timeout), (
+        manifest_command,
+        manifest_stdin,
+        manifest_timeout,
+    ) = client.staged
+    runtime_argv = shlex.split(runtime_command)
+    manifest_argv = shlex.split(manifest_command)
+    assert runtime_argv[:3] == [prepared.python, "-I", "-c"]
+    assert runtime_argv[4:] == [runtime.path, runtime.sha256]
+    assert manifest_argv[:3] == [prepared.python, "-I", "-c"]
+    assert manifest_argv[4:] == [manifest.path, manifest.sha256]
+    assert runtime_argv[3] == manifest_argv[3]
+    assert manifest.content.decode() not in manifest_command
+    assert (runtime_timeout, manifest_timeout) == (60, 60)
+
+    assert runtime_stdin == runtime.content
+    assert hashlib.sha256(runtime_stdin).hexdigest() == runtime.sha256
+    with zipfile.ZipFile(io.BytesIO(runtime_stdin)) as archive:
+        assert archive.read("koochak/jobs/runner.py") == Path(
+            runner.__file__
+        ).read_bytes()
+
+    assert manifest_stdin == manifest.content
+    assert hashlib.sha256(manifest_stdin).hexdigest() == prepared.manifest_sha256
+    assert json.loads(manifest_stdin)["runner_runtime"] == {
+        "path": runtime.path,
+        "sha256": runtime.sha256,
+    }
+
     assert client.job.argv == prepared.runner_argv()
+    assert client.job.argv[4:] == [
+        runtime.path,
+        runtime.sha256,
+        manifest.path,
+        manifest.sha256,
+    ]
     assert client.job.environment == {}
     assert client.job.resources is resources
 
