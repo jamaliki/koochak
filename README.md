@@ -174,6 +174,7 @@ state deterministically.
   - `data/`
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
+    - `shards.py` – immutable dataset shards: `ShardWriter`, strict shard indexes, tar (WebDataset-layout) format, and `plan_shards`/`assign_shards` for per-worker reading.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -194,6 +195,8 @@ state deterministically.
     - `atomic.py` – atomic file writer.
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
+    - `store.py` – the `Store` protocol (write-once objects), `LocalStore`, and `open_store`/`register_store` for pluggable backends.
+    - `probe.py` – `python -m koochak.storage.probe <location>`: storage semantics and throughput report.
   - `utils/`
     - `config.py` – thin compatibility wrappers around `koochak.config` (`get/as_dict`).
     - `device.py` – `get_device(cfg)` and `get_lr(optimizer)`.
@@ -632,6 +635,56 @@ DDP compatibility:
   - `from koochak.storage.checkpoint import match_state_dict_to_model`
   - `target = getattr(model, 'module', model)`
   - `target.load_state_dict(match_state_dict_to_model(target, ckpt['model']))`
+
+## Storage Backends and Dataset Shards
+
+Koochak is moving its persistence onto one narrow interface so the same code
+runs on parallel filesystems, object stores, and FUSE mounts over object
+storage. See `specs/storage-abstraction.md` for the full design and phases;
+checkpoints still use the POSIX path above until that phase lands.
+
+- `koochak.storage.store.Store` holds **write-once** objects under relative
+  keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
+  the bytes read back), `stat`, `list(prefix)`, `delete`, and optional
+  `local_path`. There is no rename, append, overwrite, or symlink in the
+  contract, because object storage cannot provide them atomically.
+- `open_store(location)` maps plain paths and `file://` URIs to `LocalStore`,
+  and any other `scheme://` to a factory registered with `register_store` or
+  exposed by an installed package under the `koochak.stores` entry-point group.
+  Site-specific backends live in private packages, not in this repository.
+- `LocalStore(root, publish="link")` publishes via a hidden temp file plus a
+  hard link. On mounts without hard links use `publish="exclusive"`
+  (`O_EXCL` create, published on close); `fsync=False` and
+  `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
+  close asynchronously.
+- `python -m koochak.storage.probe <path-or-uri> [--json]` checks those
+  semantics (exclusive create, rename, hard links, symlinks, fsync, in-place
+  writes, visibility of unclosed files, read-back delay), recommends
+  `LocalStore` settings, and measures small-object latency, listing, and
+  single/multi-stream throughput. `--checkpoint-bytes 4G --checkpoint-parts 1,8`
+  adds a checkpoint-sized write as 1..N concurrent parts with read-back
+  timing; `--dataset-shards 32 --shard-bytes 256M --readers 1,4,16` builds a
+  synthetic dataset with `ShardWriter` and reads it with N spawned processes
+  via `assign_shards` (cold and warm passes). Run it on a compute node; it
+  cleans up after itself.
+
+Datasets (`koochak.data.shards`):
+
+- Build a dataset with `ShardWriter(store, "datasets/foo", target_bytes=...)`:
+  records are packed into ~`target_bytes` shards and `index.json` is written
+  last, so an interrupted build never commits. The index lists every shard's
+  key (relative to the index), size, SHA256, and record count; its own SHA256
+  identifies the dataset version. `TAR` stores `{"__key__": k, ext: bytes}`
+  samples in the WebDataset layout with deterministic headers.
+- `load_index`, `read_shard(..., verify=True)`, `describe_shard`, and
+  `write_index` read, verify, and index shards (including pre-existing files).
+- `plan_shards(index, num_workers=N, epoch=e, seed=s)` deals whole shards to
+  all `N` data-loading workers before anything is read: each shard goes to
+  exactly one worker per epoch, workers get contiguous runs balanced by record
+  count, and every process computes the same plan. It raises on every worker
+  alike if a worker would get nothing. `worker_coordinates(rank=..., world_size=...)`
+  returns the global worker id inside a DataLoader worker; capture rank and
+  world size in the main process when building the dataset.
 
 ## Resuming Across DDP/Single GPU
 
