@@ -21,6 +21,13 @@ def clean_registry(monkeypatch):
     monkeypatch.setattr(store_lib, "_FACTORIES", {})
 
 
+@pytest.fixture(autouse=True)
+def no_stores_file(monkeypatch, tmp_path):
+    # Keep a developer's real stores file out of these tests.
+    monkeypatch.delenv("KOOCHAK_STORES", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+
 def test_put_get_roundtrip_ranges_and_stat(local):
     info = local.put("a/b/obj.bin", b"0123456789")
     assert info == ObjectInfo("a/b/obj.bin", 10, hashlib.sha256(b"0123456789").hexdigest())

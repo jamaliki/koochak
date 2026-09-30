@@ -44,6 +44,7 @@ __all__ = [
     "profile_of",
     "register_store",
     "validate_key",
+    "validate_scheme",
 ]
 
 ENTRY_POINT_GROUP = "koochak.stores"
@@ -450,13 +451,30 @@ class LocalStore:
 _FACTORIES: Dict[str, StoreFactory] = {}
 
 
-def register_store(scheme: str, factory: StoreFactory) -> None:
-    """Map ``scheme://...`` locations to ``factory(location) -> Store``."""
+def _uri_subpath(location: str) -> str:
+    """The relative key prefix after ``scheme://`` (empty for the store root)."""
+
+    rest = location.split("://", 1)[1]
+    if "?" in rest or "#" in rest:
+        raise ValueError(f"store URIs take no query or fragment: {location!r}")
+    rest = rest[:-1] if rest.endswith("/") else rest
+    return "" if rest == "" else validate_key(unquote(rest), "store URI path")
+
+
+def validate_scheme(scheme: object) -> str:
+    """Return ``scheme`` if it is a lowercase URI scheme other than the built-in ``file``."""
 
     if not isinstance(scheme, str) or not _SCHEME.fullmatch(scheme):
         raise ValueError(f"invalid store scheme {scheme!r}")
     if scheme == "file":
         raise ValueError("the 'file' scheme is built in")
+    return scheme
+
+
+def register_store(scheme: str, factory: StoreFactory) -> None:
+    """Map ``scheme://...`` locations to ``factory(location) -> Store``."""
+
+    validate_scheme(scheme)
     if not callable(factory):
         raise TypeError("store factory must be callable")
     existing = _FACTORIES.get(scheme)
@@ -465,14 +483,22 @@ def register_store(scheme: str, factory: StoreFactory) -> None:
     _FACTORIES[scheme] = factory
 
 
-def _factory(scheme: str) -> StoreFactory:
+def _plugin_provides(scheme: str) -> bool:
+    return scheme in _FACTORIES or any(
+        entry.name == scheme for entry in metadata.entry_points(group=ENTRY_POINT_GROUP)
+    )
+
+
+def _factory(scheme: str, stores_file_schemes: Iterable[str] = ()) -> StoreFactory:
     factory = _FACTORIES.get(scheme)
     if factory is not None:
         return factory
     installed = list(metadata.entry_points(group=ENTRY_POINT_GROUP))
     matches = [entry for entry in installed if entry.name == scheme]
     if not matches:
-        known = sorted({"file", *_FACTORIES, *(entry.name for entry in installed)})
+        known = sorted(
+            {"file", *_FACTORIES, *(entry.name for entry in installed), *stores_file_schemes}
+        )
         raise ValueError(f"no store is registered for scheme {scheme!r}; known schemes: {known}")
     if len(matches) > 1:
         sources = sorted(entry.value for entry in matches)
@@ -482,8 +508,18 @@ def _factory(scheme: str) -> StoreFactory:
     return factory
 
 
-def open_store(location: Union[str, os.PathLike[str], Store]) -> Store:
-    """Return the store for a path, ``file://`` URI, or registered ``scheme://`` URI."""
+def open_store(
+    location: Union[str, os.PathLike[str], Store],
+    *,
+    stores_file: Optional[Union[str, os.PathLike[str]]] = None,
+) -> Store:
+    """Return the store for a path, ``file://`` URI, or named ``scheme://`` URI.
+
+    Schemes resolve, in order, through the stores file (see
+    ``koochak.storage.stores_file``; ``stores_file`` overrides its default
+    location), ``register_store``, and the ``koochak.stores`` entry points. A
+    scheme defined both in the stores file and by a plugin is an error.
+    """
 
     if isinstance(location, Store):
         return location
@@ -498,7 +534,16 @@ def open_store(location: Union[str, os.PathLike[str], Store]) -> Store:
         if parsed.netloc not in ("", "localhost") or parsed.params or parsed.query or parsed.fragment:
             raise ValueError(f"file URIs must be file:///absolute/path, got {text!r}")
         return LocalStore(unquote(parsed.path))
-    store = _factory(scheme)(text)
+    # Imported here: stores_file builds LocalStores from this module.
+    from .stores_file import load_default_or_given
+
+    specs = load_default_or_given(stores_file)
+    spec = specs.get(scheme)
+    if spec is not None:
+        if _plugin_provides(scheme):
+            raise ValueError(f"store scheme {scheme!r} is defined by both the stores file and a plugin")
+        return spec.open(_uri_subpath(text))
+    store = _factory(scheme, specs)(text)
     if not isinstance(store, Store):
         raise TypeError(
             f"store factory for {scheme!r} returned {type(store).__name__}, which is not a Store"

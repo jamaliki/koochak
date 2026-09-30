@@ -41,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 from ..data import shards as shards_lib
+from ..utils.sizes import parse_size
 from .atomic import _fsync_directory
 from .store import LocalStore, ObjectInfo, Store, open_store
 
@@ -655,6 +656,7 @@ def probe(
     record_bytes: int = 1024 * 1024,
     readers: Sequence[int] = (1, 4),
     keep: bool = False,
+    stores_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Probe ``location`` and return a JSON-serializable report.
 
@@ -712,7 +714,7 @@ def probe(
             "page_cache_eviction": getattr(os, "posix_fadvise", None) is not None,
         },
     }
-    target = open_store(location)
+    target = open_store(location, stores_file=stores_file)
     local_root = target.root if isinstance(target, LocalStore) else None
     if local_root is not None and not os.path.isdir(local_root):
         raise FileNotFoundError(f"probe location is not an existing directory: {local_root}")
@@ -779,13 +781,6 @@ def probe(
     return report
 
 
-def _parse_size(text: str) -> int:
-    units = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
-    value = text.strip().upper().removesuffix("B").removesuffix("I")
-    unit = value[-1:] if value[-1:] in units else ""
-    return int(float(value[: len(value) - len(unit)]) * units[unit])
-
-
 def _parse_counts(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in text.split(","))
 
@@ -816,8 +811,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("location", help="filesystem path, file:// URI, or registered scheme://")
     parser.add_argument("--small-count", type=int, default=64)
-    parser.add_argument("--small-bytes", type=_parse_size, default=4096)
-    parser.add_argument("--large-bytes", type=_parse_size, default=64 * 1024**2)
+    parser.add_argument("--small-bytes", type=parse_size, default=4096)
+    parser.add_argument("--large-bytes", type=parse_size, default=64 * 1024**2)
     parser.add_argument(
         "--streams",
         type=_parse_counts,
@@ -827,7 +822,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--settle-timeout", type=float, default=60.0)
     parser.add_argument(
         "--checkpoint-bytes",
-        type=_parse_size,
+        type=parse_size,
         default=0,
         help="checkpoint-sized payload to write and read back (default: 0, skip)",
     )
@@ -843,8 +838,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=0,
         help="shards in the synthetic dataset (default: 0, skip)",
     )
-    parser.add_argument("--shard-bytes", type=_parse_size, default=64 * 1024**2)
-    parser.add_argument("--record-bytes", type=_parse_size, default=1024**2)
+    parser.add_argument("--shard-bytes", type=parse_size, default=64 * 1024**2)
+    parser.add_argument("--record-bytes", type=parse_size, default=1024**2)
     parser.add_argument(
         "--readers",
         type=_parse_counts,
@@ -852,7 +847,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="comma-separated counts of parallel dataset reader processes",
     )
     parser.add_argument("--keep", action="store_true", help="leave probe files in place")
-    parser.add_argument("--json", action="store_true", help="print the full JSON report")
+    parser.add_argument("--stores", default=None, help="stores file (default: $KOOCHAK_STORES)")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="print the full JSON report")
+    output.add_argument(
+        "--emit-profile",
+        action="store_true",
+        help="print only the recommended profile, as a stores-file 'profile:' block",
+    )
     args = parser.parse_args(argv)
     report = probe(
         args.location,
@@ -868,7 +870,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         record_bytes=args.record_bytes,
         readers=args.readers,
         keep=args.keep,
+        stores_file=args.stores,
     )
+    if args.emit_profile:
+        profile = report.get("recommended_profile")
+        if profile is None:
+            raise SystemExit("no profile: the store phase was skipped for this location")
+        print("profile:")
+        for key in sorted(profile):
+            value = profile[key]
+            print(f"  {key}: {str(value).lower() if isinstance(value, bool) else value}")
+        return 0
     print(json.dumps(report, indent=2, sort_keys=True) if args.json else _format(report))
     return 0
 
