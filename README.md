@@ -716,8 +716,13 @@ Collections and the data tool (`koochak.storage.collection`, `koochak.storage.ar
   files with merged range reads, checks every SHA256, restores mode and exact
   mtime, and skips files already present. `verify [--deep]` checks sizes or
   every byte; `ls [--include GLOB] [--long]` lists from the manifest.
+- `--files-from LIST` archives exactly the listed paths (relative to SRC)
+  without walking SRC. `--delete-source` makes the archive a move: after the
+  committed collection passes a deep verify, sources whose size and mtime
+  still match the manifest are deleted; failed verification deletes
+  nothing and changed files are kept and reported. The manifest metadata
+  records the source location.
 - Symlinks and special files are refused (exclude them with `--exclude`).
-  Source deletion after a verified archive is not implemented yet.
 
 Datasets (`koochak.data.shards`):
 

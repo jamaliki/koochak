@@ -268,3 +268,69 @@ def test_command_line_archive_ls_verify_and_pull(tree, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["problems"] == []
     assert data_main(["pull", collection, str(tmp_path / "restored")]) == 0
     assert json.loads(capsys.readouterr().out)["copied"] == len(files)
+
+
+def test_file_lists_archive_exactly_the_listed_paths(tree, tmp_path):
+    source, files, _groups = tree
+    listed = ["raw/maps/big.map", "reports/summary.csv", "features/fp0/0000.npz"]
+    target = LocalStore(tmp_path / "collection")
+    report = archive(source, target, files=listed + ["reports/summary.csv"], pack_bytes=8 * 1024)
+    assert report.files == 3
+    assert [entry.path for entry in load_collection(target).files] == sorted(listed)
+    with pytest.raises(FileNotFoundError, match="do not exist"):
+        archive(source, LocalStore(tmp_path / "other"), files=["gone.pt"])
+    (Path(source.root) / "alias.pt").symlink_to(Path(source.root) / "reports" / "summary.csv")
+    with pytest.raises(ValueError, match="symlink"):
+        archive(source, LocalStore(tmp_path / "third"), files=["alias.pt"])
+
+
+def test_move_deletes_sources_only_after_deep_verification(tree, tmp_path, monkeypatch):
+    source, files, _groups = tree
+    root = Path(source.root)
+    moved = sorted(path for path in files if path.startswith("features/fp1/"))
+
+    failing = archive_lib.VerifyReport(1, 1, 0, True, problems=["forced failure"])
+    monkeypatch.setattr(archive_lib, "verify", lambda *args, **kwargs: failing)
+    with pytest.raises(ValueError, match="no source file was deleted"):
+        archive(source, LocalStore(tmp_path / "failed"), files=moved, delete_source=True)
+    assert all((root / path).exists() for path in moved)
+    monkeypatch.undo()
+
+    target = LocalStore(tmp_path / "collection")
+    report = archive(source, target, files=moved, pack_bytes=8 * 1024, delete_source=True)
+    assert (report.deleted_sources, report.changed_sources, report.missing_sources) == (len(moved), (), 0)
+    assert not any((root / path).exists() for path in moved)
+    assert (root / "features" / "fp1").is_dir()
+    assert (root / "features" / "fp0" / "0000.npz").exists()
+
+    restored = LocalStore(root)
+    assert pull(target, restored).copied == len(moved)
+    for relative in moved:
+        data, mode, mtime = files[relative]
+        observed = os.stat(root / relative)
+        assert (root / relative).read_bytes() == data
+        assert (stat.S_IMODE(observed.st_mode), observed.st_mtime_ns) == (mode, mtime)
+
+
+def test_changed_sources_are_kept_and_reported(tree, tmp_path):
+    source, _files, _groups = tree
+    target = LocalStore(tmp_path / "collection")
+    archive(source, target, files=["reports/summary.csv", "raw/maps/big.map"])
+    entries = load_collection(target).files
+    (Path(source.root) / "reports" / "summary.csv").write_bytes(b"edited after the archive")
+    deleted, changed, missing = archive_lib._delete_sources(source.root, entries)
+    assert (deleted, changed, missing) == (1, ("reports/summary.csv",), 0)
+    assert (Path(source.root) / "reports" / "summary.csv").exists()
+
+
+def test_command_line_move_records_its_source(tree, tmp_path, capsys):
+    source, files, _groups = tree
+    listing = tmp_path / "list.txt"
+    listing.write_text("# checkpoints\nraw/maps/big.map\n\nreports/summary.csv\n")
+    collection = str(tmp_path / "collection")
+    assert data_main(["archive", source.root, collection, "--files-from", str(listing), "--delete-source"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["deleted_sources"] == 2
+    metadata = load_collection(LocalStore(collection)).metadata
+    assert metadata["source"] == source.root
+    assert metadata["source_root"] == source.root

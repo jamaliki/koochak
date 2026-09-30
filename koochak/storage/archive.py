@@ -57,6 +57,7 @@ __all__ = [
     "SourceFile",
     "VerifyReport",
     "archive",
+    "load_file_list",
     "load_groups",
     "plan_archive",
     "pull",
@@ -127,6 +128,9 @@ class ArchiveReport:
     seconds: float
     dry_run: bool
     manifest_sha256: Optional[str] = None
+    deleted_sources: int = 0
+    changed_sources: tuple[str, ...] = ()
+    missing_sources: int = 0
 
 
 @dataclass(frozen=True)
@@ -182,13 +186,46 @@ def load_groups(path: Union[str, os.PathLike]) -> Dict[str, tuple[str, int]]:
     return groups
 
 
+def _source_file(
+    relative: str,
+    observed: os.stat_result,
+    groups: Optional[Mapping[str, tuple[str, int]]],
+) -> SourceFile:
+    if stat.S_ISLNK(observed.st_mode):
+        raise ValueError(f"{relative} is a symlink; archives store no links (use --exclude)")
+    if not stat.S_ISREG(observed.st_mode):
+        raise ValueError(f"{relative} is not a regular file")
+    validate_key(relative, "source path")
+    if groups is not None and relative in groups:
+        group, order = groups[relative]
+    else:
+        parent = relative.rpartition("/")[0]
+        group, order = f"dir:{parent or '.'}", _UNGROUPED_ORDER
+    return SourceFile(
+        relative, observed.st_size, stat.S_IMODE(observed.st_mode), observed.st_mtime_ns, group, order
+    )
+
+
+def load_file_list(path: Union[str, os.PathLike]) -> List[str]:
+    """Relative paths, one per line; blank lines and ``#`` comments are ignored."""
+
+    with open(path, encoding="utf-8") as handle:
+        lines = [line.rstrip("\n") for line in handle]
+    return [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+
 def scan_source(
     root: Union[str, os.PathLike],
     *,
     groups: Optional[Mapping[str, tuple[str, int]]] = None,
     exclude: Sequence[str] = (),
+    files: Optional[Sequence[str]] = None,
 ) -> List[SourceFile]:
-    """Every regular file under ``root``, sorted by path, with its group."""
+    """Regular files under ``root`` (all of them, or exactly ``files``), sorted, with groups.
+
+    With ``files`` nothing is walked: each listed path must exist and be a
+    regular file, so a stale list fails instead of silently archiving less.
+    """
 
     root = os.path.abspath(os.fspath(root))
     if not os.path.isdir(root):
@@ -197,7 +234,25 @@ def scan_source(
     def excluded(relative: str) -> bool:
         return any(fnmatchcase(relative, pattern) for pattern in exclude)
 
-    files: List[SourceFile] = []
+    found: List[SourceFile] = []
+    if files is not None:
+        missing = []
+        for relative in sorted(set(files)):
+            validate_key(relative, "listed path")
+            if excluded(relative):
+                continue
+            try:
+                observed = os.lstat(_local(root, relative))
+            except FileNotFoundError:
+                missing.append(relative)
+                continue
+            found.append(_source_file(relative, observed, groups))
+        if missing:
+            raise FileNotFoundError(
+                f"{len(missing)} listed paths do not exist under {root}, e.g. {missing[:5]}"
+            )
+        return found
+
     for directory, child_directories, filenames in os.walk(root, followlinks=False):
         relative_dir = os.path.relpath(directory, root)
         prefix = "" if relative_dir == "." else relative_dir.replace(os.sep, "/") + "/"
@@ -212,38 +267,18 @@ def scan_source(
         child_directories[:] = kept
         for name in sorted(filenames):
             relative = prefix + name
-            if excluded(relative):
-                continue
-            observed = os.lstat(os.path.join(directory, name))
-            if stat.S_ISLNK(observed.st_mode):
-                raise ValueError(f"{relative} is a symlink; archives store no links (use --exclude)")
-            if not stat.S_ISREG(observed.st_mode):
-                raise ValueError(f"{relative} is not a regular file")
-            validate_key(relative, "source path")
-            if groups is not None and relative in groups:
-                group, order = groups[relative]
-            else:
-                group, order = f"dir:{prefix[:-1] or '.'}", _UNGROUPED_ORDER
-            files.append(
-                SourceFile(
-                    relative,
-                    observed.st_size,
-                    stat.S_IMODE(observed.st_mode),
-                    observed.st_mtime_ns,
-                    group,
-                    order,
-                )
-            )
+            if not excluded(relative):
+                found.append(_source_file(relative, os.lstat(os.path.join(directory, name)), groups))
     if groups:
-        present = {item.path for item in files}
+        present = {item.path for item in found}
         missing = [path for path in groups if path not in present and not excluded(path)]
         if missing:
             raise ValueError(
                 f"the groups table lists {len(missing)} paths that are not under {root}, "
                 f"e.g. {missing[:5]}"
             )
-    files.sort(key=lambda item: item.path)
-    return files
+    found.sort(key=lambda item: item.path)
+    return found
 
 
 # ---------------------------------------------------------------- planning
@@ -453,14 +488,23 @@ def archive(
     read_streams: int = 8,
     pending_packs: int = 8,
     metadata: Optional[Mapping[str, Any]] = None,
+    files: Optional[Sequence[str]] = None,
+    delete_source: bool = False,
     dry_run: bool = False,
     progress: Optional[ProgressFn] = None,
 ) -> ArchiveReport:
     """Archive the local tree under ``source`` into a collection at ``target``.
 
-    ``object_bytes`` defaults to ``min_object_bytes(profile_of(target))``
+    ``files`` archives exactly those relative paths instead of walking the
+    tree. ``object_bytes`` defaults to ``min_object_bytes(profile_of(target))``
     (at least 1 MiB, at most ``pack_bytes``). Memory peaks near
     ``pending_packs * pack_bytes``.
+
+    ``delete_source`` turns the archive into a move: after the collection is
+    committed it is re-read and every SHA256 checked (``verify(deep=True)``);
+    only then are source files deleted, and only those whose size and mtime
+    still match the file table. Failed verification deletes nothing; changed
+    files are kept and reported. Directories are left in place.
     """
 
     if not isinstance(source, LocalStore):
@@ -470,7 +514,8 @@ def archive(
             raise ValueError(f"{name} must be a positive integer")
     started = time.perf_counter()
     group_map = load_groups(groups) if isinstance(groups, (str, os.PathLike)) else groups
-    files = scan_source(source.root, groups=group_map, exclude=exclude)
+    listed = files
+    files = scan_source(source.root, groups=group_map, exclude=exclude, files=listed)
     if not files:
         raise ValueError(f"nothing to archive under {source.root}")
     if object_bytes is None:
@@ -556,10 +601,44 @@ def archive(
         files=entries,
         metadata=metadata,
     )
+    deleted, changed, missing = 0, (), 0
+    if delete_source:
+        checked = verify(target, deep=True, streams=streams)
+        if not checked.ok:
+            raise ValueError(
+                f"deep verification of the new collection failed; no source file was deleted: "
+                f"{checked.problems[:5]}"
+            )
+        deleted, changed, missing = _delete_sources(source.root, collection.files)
     return ArchiveReport(
         len(files), total_bytes, len(plan.packs), len(plan.objects), reused, requests,
         time.perf_counter() - started, False, collection.manifest_sha256,
+        deleted, changed, missing,
     )
+
+
+def _delete_sources(root: str, entries: Sequence[FileEntry]) -> tuple[int, tuple[str, ...], int]:
+    """Delete archived sources that are unchanged since the archive read them."""
+
+    deleted = missing = 0
+    changed: List[str] = []
+    for entry in entries:
+        path = _local(root, entry.path)
+        try:
+            observed = os.lstat(path)
+        except FileNotFoundError:
+            missing += 1
+            continue
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_size != entry.size
+            or observed.st_mtime_ns != entry.mtime_ns
+        ):
+            changed.append(entry.path)
+            continue
+        os.remove(path)
+        deleted += 1
+    return deleted, tuple(changed), missing
 
 
 # ---------------------------------------------------------------- pull

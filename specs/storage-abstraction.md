@@ -320,8 +320,8 @@ scheduler that consumes them.
 2. Store profiles, the transfer engine, and probe measurements of cold versus
    cached concurrency and of range-parallel reads of one object. **Done.**
 3. Manifested collections and the data tool. **`archive` (with `--groups`),
-   `pull`, `verify`, `ls` done**; `warm`, `stage`, and verified source
-   deletion remain; pilot on a per-record cache next.
+   `pull`, `verify`, `ls`, `--files-from`, and verified moves
+   (`--delete-source`) done**; `warm` and `stage` remain.
 4. Readers: `PackedTree`, `ShardedStream`, staging.
 5. Checkpoints as parts: async saves, parallel parts, replication between tiers.
 6. Artifact manifests through `Store.put`.
