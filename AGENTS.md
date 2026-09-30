@@ -29,6 +29,20 @@ This doc tracks incremental design decisions and changes from the initial design
   - `koochak/storage/checkpoint.py` – atomic save/load, publication manifests,
     `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` convenience
     pointer and prunes checkpoint/manifest pairs with `keep_last_k`.
+  - `koochak/storage/store.py` – write-once `Store` protocol (`get`/`open`/
+    create-only `put`/`stat`/`list`/`delete`/`local_path`), `LocalStore`
+    (`publish="link"|"exclusive"`, optional fsync and read-back settling), and
+    `open_store`/`register_store` with `koochak.stores` entry points for
+    private backends. Checkpoints do not use it yet (phase 3 of
+    `specs/storage-abstraction.md`).
+  - `koochak/storage/probe.py` – `python -m koochak.storage.probe` reports
+    POSIX semantics, recommended `LocalStore` settings, latency, and throughput.
+
+- Datasets
+  - `koochak/data/shards.py` – `ShardWriter` (commit-last index), strict shard
+    indexes, deterministic WebDataset-layout `TAR` format, and pure
+    `plan_shards`/`assign_shards` that deal whole shards to every data-loading
+    worker before reading.
 
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
@@ -183,6 +197,12 @@ Done recently
 - Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
 
 Open TODOs (authoritative)
+- Storage abstraction (`specs/storage-abstraction.md`)
+  - Phase 1: write-once `Store`, `LocalStore`, pluggable schemes, shard index/writer/plan, storage probe [DONE]
+  - Phase 2: `ShardedStream` IterableDataset (bounded prefetch, verify, windowed shuffle, infinite per-worker streams, resume from `next_step`), staging, and local cache [TODO]
+  - Phase 3: checkpoints as parts + manifest via `Store` (async save, parallel parts, manifest-only selection, drop `latest.pt`) [TODO]
+  - Phase 4: artifact ready manifests via `Store.put` instead of hard links; coordinate URI paths with the artifact-gate consumer [TODO]
+  - Keep mutable run state (JSONL/CSV logs, compiler caches) off write-once object-storage mounts; they append [NOTE]
 - CLI: support entry kwargs [TODO]
   - Extend schema to include `entry.model_args`, `entry.model_kwargs`, `entry.dataset_args/kwargs`, `entry.eval_dataset_args/kwargs`.
   - Use OmegaConf-resolved values; pass args/kwargs to entry callables in `koochak.cli.train`.
