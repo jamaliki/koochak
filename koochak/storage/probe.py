@@ -286,31 +286,109 @@ def _probe_store(
         "ms": round(list_seconds * 1e3, 3),
     }
 
-    big = [f"{prefix}/large/{index:03d}" for index in range(max(streams))]
-    single = _timed(lambda: store.put(big[0], large))
-    first = _timed(lambda: store.get(big[0]))
-    second = _timed(lambda: store.get(big[0]))
+    # Separate objects for each cold measurement: a read warms what it touches.
+    count = max(streams)
+    size = len(large)
+    single_key = f"{prefix}/large/single"
+    ranged_key = f"{prefix}/large/ranged"
+    many = [f"{prefix}/large/{index:03d}" for index in range(count)]
+    put_single = _timed(lambda: store.put(single_key, _unique(large, 0)))
+    with ThreadPoolExecutor(max_workers=count + 1) as pool:
+        put_many = _timed(
+            lambda: list(
+                pool.map(
+                    lambda job: store.put(job[1], _unique(large, job[0])),
+                    enumerate([ranged_key, *many], start=1),
+                )
+            )
+        )
+    for key in (single_key, ranged_key, *many):
+        _drop_cached_pages(store, key)
+
+    cold = _timed(lambda: store.get(single_key))
+    warm = _timed(lambda: store.get(single_key))
     results["large_single_stream"] = {
-        "bytes": len(large),
-        "put_mb_s": _throughput(len(large), single),
-        "first_get_mb_s": _throughput(len(large), first),
-        "second_get_mb_s": _throughput(len(large), second),
+        "bytes": size,
+        "put_mb_s": _throughput(size, put_single),
+        "cold_get_mb_s": _throughput(size, cold),
+        "warm_get_mb_s": _throughput(size, warm),
     }
-    concurrent: Dict[str, Any] = {}
-    if len(big) > 1:
-        with ThreadPoolExecutor(max_workers=len(big) - 1) as pool:
-            seconds = _timed(lambda: list(pool.map(lambda k: store.put(k, large), big[1:])))
-        concurrent["put_streams"] = len(big) - 1
-        concurrent["put_mb_s"] = _throughput(len(large) * (len(big) - 1), seconds)
-    for count in streams:
-        with ThreadPoolExecutor(max_workers=count) as pool:
-            seconds = _timed(lambda: list(pool.map(store.get, big[:count])))
-        concurrent[f"get_{count}_streams_mb_s"] = _throughput(len(large) * count, seconds)
+    part = -(-size // count)
+    cold = _timed(lambda: _ranged_get(store, ranged_key, size, count, part))
+    warm = _timed(lambda: _ranged_get(store, ranged_key, size, count, part))
+    results["large_ranged"] = {
+        "ranges": count,
+        "part_bytes": part,
+        "cold_get_mb_s": _throughput(size, cold),
+        "warm_get_mb_s": _throughput(size, warm),
+    }
+    concurrent: Dict[str, Any] = {
+        "put_streams": count + 1,
+        "put_mb_s": _throughput(size * (count + 1), put_many),
+    }
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        seconds = _timed(lambda: list(pool.map(store.get, many)))
+    concurrent[f"cold_get_{count}_streams_mb_s"] = _throughput(size * count, seconds)
+    for streams_now in streams:
+        with ThreadPoolExecutor(max_workers=streams_now) as pool:
+            seconds = _timed(lambda: list(pool.map(store.get, many[:streams_now])))
+        concurrent[f"warm_get_{streams_now}_streams_mb_s"] = _throughput(size * streams_now, seconds)
     results["large_concurrent"] = concurrent
 
-    for created in [*small_keys, *big]:
+    for created in [*small_keys, single_key, ranged_key, *many]:
         store.delete(created)
     return results
+
+
+def _unique(data: bytes, tag: int) -> List[Any]:
+    """``data`` with a distinct 16-byte header, as chunks, without copying it."""
+
+    return [struct.pack("<QQ", 0x6B6F6F6368616B, tag), memoryview(data)[16:]]
+
+
+def _ranged_get(store: Store, key: str, size: int, ranges: int, part: int) -> None:
+    offsets = range(0, size, part)
+    with ThreadPoolExecutor(max_workers=ranges) as pool:
+        read = sum(pool.map(lambda offset: len(store.get(key, offset, min(part, size - offset))), offsets))
+    if read != size:
+        raise RuntimeError(f"ranged read of {key} returned {read} bytes, expected {size}")
+
+
+def _drop_cached_pages(store: Store, key: str) -> bool:
+    """Best effort: evict a local file's cached pages so the next read is cold."""
+
+    advise = getattr(os, "posix_fadvise", None)
+    path = store.local_path(key)
+    if advise is None or path is None:
+        return False
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        advise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        # Some filesystems reject the hint; the next read may then be warm.
+        return False
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _recommend_profile(store_results: Dict[str, Any], streams: Sequence[int]) -> Dict[str, Any]:
+    """A ``StoreProfile(**...)`` suggestion from the store-phase measurements."""
+
+    count = max(streams)
+    single = store_results["large_single_stream"]["cold_get_mb_s"]
+    ranged = store_results["large_ranged"]
+    concurrent = store_results["large_concurrent"][f"cold_get_{count}_streams_mb_s"]
+    listing = store_results["small_list"]
+    ranges_scale = count > 1 and ranged["cold_get_mb_s"] >= 2 * single
+    return {
+        "request_seconds": max(round(store_results["small_get"]["p50_ms"] / 1e3, 4), 0.0001),
+        "stream_mb_s": max(single, 0.1),
+        "streams": count if concurrent >= 2 * single else min(count, 4),
+        "range_streams": count if ranges_scale else 1,
+        "part_bytes": max(8 * 1024 * 1024, ranged["part_bytes"]) if ranges_scale else 64 * 1024 * 1024,
+        "list_is_cheap": listing["ms"] / max(listing["keys"], 1) < 1.0,
+    }
 
 
 def _payload(size: int, block: bytes, tag: int, counter: int) -> bytearray:
@@ -385,6 +463,8 @@ def _probe_checkpoint(
                 )
             )
             put_seconds = time.perf_counter() - start
+            for key in keys:
+                _drop_cached_pages(store, key)
             start = time.perf_counter()
             settled = list(pool.map(lambda info: _settle(store, info, settle_timeout), infos))
             readback_seconds = time.perf_counter() - start
@@ -534,6 +614,9 @@ def _probe_dataset(
         "build_mb_s": _throughput(index.size_bytes, build_seconds),
         "build_seconds": round(build_seconds, 3),
     }
+    # Only the first reader count starts cold; later passes measure cached reads.
+    for shard in index.shards:
+        _drop_cached_pages(store, shard.key)
     for readers in readers_options:
         _progress(f"dataset: reading with {readers} worker processes")
         results[f"read_{readers}_workers"] = _read_dataset(spec, index, readers, passes=2)
@@ -570,9 +653,13 @@ def probe(
     ``checkpoint_bytes=0`` and ``dataset_shards=0`` skip those phases.
     """
 
-    for label, value in (("small_count", small_count), ("small_bytes", small_bytes), ("large_bytes", large_bytes)):
-        if type(value) is not int or value < 4:
-            raise ValueError(f"{label} must be an integer >= 4")
+    for label, value, minimum in (
+        ("small_count", small_count, 4),
+        ("small_bytes", small_bytes, 4),
+        ("large_bytes", large_bytes, 64),
+    ):
+        if type(value) is not int or value < minimum:
+            raise ValueError(f"{label} must be an integer >= {minimum}")
     streams = _positive_ints(streams, "streams")
     checkpoint_parts = _positive_ints(checkpoint_parts, "checkpoint_parts")
     readers = _positive_ints(readers, "readers")
@@ -614,6 +701,7 @@ def probe(
             "shard_bytes": shard_bytes,
             "record_bytes": record_bytes,
             "readers": list(readers),
+            "page_cache_eviction": getattr(os, "posix_fadvise", None) is not None,
         },
     }
     target = open_store(location)
@@ -649,6 +737,7 @@ def probe(
                 large=large,
                 streams=streams,
             )
+            report["recommended_profile"] = _recommend_profile(report["store"], streams)
             block = os.urandom(max(_BLOCK, record_bytes if dataset_shards else 0))
             if checkpoint_bytes:
                 report["checkpoint"] = _probe_checkpoint(
@@ -701,6 +790,8 @@ def _format(report: Dict[str, Any]) -> str:
         lines.append(f"posix  {status}  {check:<20} {json.dumps(detail, sort_keys=True)}")
     if "recommended_local_store" in report:
         lines.append(f"recommended LocalStore settings: {report['recommended_local_store']}")
+    if "recommended_profile" in report:
+        lines.append(f"recommended StoreProfile: {report['recommended_profile']}")
     if "store_config" in report:
         lines.append(f"store  {report['store_config']}")
     for phase in ("store", "checkpoint", "dataset"):

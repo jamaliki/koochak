@@ -35,8 +35,15 @@ This doc tracks incremental design decisions and changes from the initial design
     `open_store`/`register_store` with `koochak.stores` entry points for
     private backends. Checkpoints do not use it yet (phase 3 of
     `specs/storage-abstraction.md`).
+  - `StoreProfile` (in `store.py`) records measured store performance;
+    `profile_of` and `min_object_bytes` feed defaults to layers above.
+  - `koochak/storage/transfer.py` – `copy_objects`: the single path for moving
+    bytes between stores (parallel items, range-parallel reads, in-flight
+    SHA256 checks, resume by skipping complete targets, fail-fast).
   - `koochak/storage/probe.py` – `python -m koochak.storage.probe` reports
-    POSIX semantics, recommended `LocalStore` settings, latency, and throughput.
+    POSIX semantics, recommended `LocalStore` settings and `StoreProfile`,
+    latency, cold/cached/range-parallel throughput, and optional checkpoint
+    and multi-process dataset phases.
 
 - Datasets
   - `koochak/data/shards.py` – `ShardWriter` (commit-last index), strict shard
@@ -199,9 +206,11 @@ Done recently
 Open TODOs (authoritative)
 - Storage abstraction (`specs/storage-abstraction.md`)
   - Phase 1: write-once `Store`, `LocalStore`, pluggable schemes, shard index/writer/plan, storage probe [DONE]
-  - Phase 2: `ShardedStream` IterableDataset (bounded prefetch, verify, windowed shuffle, infinite per-worker streams, resume from `next_step`), staging, and local cache [TODO]
-  - Phase 3: checkpoints as parts + manifest via `Store` (async save, parallel parts, manifest-only selection, drop `latest.pt`) [TODO]
-  - Phase 4: artifact ready manifests via `Store.put` instead of hard links; coordinate URI paths with the artifact-gate consumer [TODO]
+  - Phase 2: `StoreProfile`, `copy_objects` transfer engine, probe cold/cached/range-parallel measurements [DONE; cluster range-read run pending]
+  - Phase 3: manifested collections (`shards`, `packed` with file tables) and `python -m koochak.data` (`archive`, `pull`, `verify`, `ls`, `warm`, `stage`) [TODO]
+  - Phase 4: readers — `PackedTree` (path-addressed range reads + node-local cache), `ShardedStream` IterableDataset (bounded prefetch, verify, windowed shuffle, infinite per-worker streams, resume from `next_step`), staging [TODO]
+  - Phase 5: checkpoints as parts + manifest via `Store` (async save, parallel parts, manifest-only selection, replication between tiers, drop `latest.pt`) [TODO]
+  - Phase 6: artifact ready manifests via `Store.put` instead of hard links; coordinate URI paths with the artifact-gate consumer [TODO]
   - Keep mutable run state (JSONL/CSV logs, compiler caches) off write-once object-storage mounts; they append [NOTE]
 - CLI: support entry kwargs [TODO]
   - Extend schema to include `entry.model_args`, `entry.model_kwargs`, `entry.dataset_args/kwargs`, `entry.eval_dataset_args/kwargs`.

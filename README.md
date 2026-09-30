@@ -195,7 +195,8 @@ state deterministically.
     - `atomic.py` – atomic file writer.
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
-    - `store.py` – the `Store` protocol (write-once objects), `LocalStore`, and `open_store`/`register_store` for pluggable backends.
+    - `store.py` – the `Store` protocol (write-once objects), `StoreProfile`, `LocalStore`, and `open_store`/`register_store` for pluggable backends.
+    - `transfer.py` – `copy_objects`: parallel, range-splitting, verified, resumable copies between stores.
     - `probe.py` – `python -m koochak.storage.probe <location>`: storage semantics and throughput report.
   - `utils/`
     - `config.py` – thin compatibility wrappers around `koochak.config` (`get/as_dict`).
@@ -657,11 +658,25 @@ checkpoints still use the POSIX path above until that phase lands.
   (`O_EXCL` create, published on close); `fsync=False` and
   `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
   close asynchronously.
+- `StoreProfile` records a store's measured performance (per-request cost,
+  cold bandwidth per stream, useful concurrency, whether byte ranges of one
+  object scale, part size, whether listing is acceptable). `LocalStore(...,
+  profile=...)` attaches one; `profile_of(store)` returns it (a conservative
+  remote default otherwise), and `min_object_bytes(profile)` gives the size
+  below which files should be packed rather than stored individually.
+- `koochak.storage.transfer.copy_objects(source, target, items)` is the one
+  way bytes move between stores: `streams` items at once, large objects read
+  as parallel byte ranges into one create-only `put`, SHA256 checked in flight
+  against manifest digests (a mismatching new object is removed), existing
+  targets of the expected size skipped so reruns resume, first failure raised.
+  Defaults come from the stores' profiles.
 - `python -m koochak.storage.probe <path-or-uri> [--json]` checks those
   semantics (exclusive create, rename, hard links, symlinks, fsync, in-place
   writes, visibility of unclosed files, read-back delay), recommends
-  `LocalStore` settings, and measures small-object latency, listing, and
-  single/multi-stream throughput. `--checkpoint-bytes 4G --checkpoint-parts 1,8`
+  `LocalStore` settings and a `StoreProfile`, and measures small-object
+  latency, listing, cold versus cached single-stream, concurrent, and
+  range-parallel reads (page caches are dropped before cold reads where the OS
+  allows). `--checkpoint-bytes 4G --checkpoint-parts 1,8`
   adds a checkpoint-sized write as 1..N concurrent parts with read-back
   timing; `--dataset-shards 32 --shard-bytes 256M --readers 1,4,16` builds a
   synthetic dataset with `ShardWriter` and reads it with N spawned processes

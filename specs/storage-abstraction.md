@@ -64,6 +64,36 @@ What this means for the design:
 - Anything that appends (loggers) or links (artifact manifests, `latest.pt`)
   cannot live on the object-storage mount.
 
+Real training data comes in two shapes, which need different layouts:
+
+- **Already-sharded datasets**: hundreds to thousands of 10–20 MB shard files
+  plus a few sidecars (metadata JSON, parquet tables). Per-request overhead is
+  tolerable, but globbing thousands of files on object storage takes minutes
+  per process. They need an index, not repacking.
+- **Per-record caches**: around a million files of 1–700 KB (a feature file
+  plus a sub-KB JSON sidecar per record, raw inputs, per-entry reports), read
+  by random access within each worker's partition. At 0.2–0.9 s per request
+  they are unusable on object storage file by file. They must be packed.
+
+A simple rule separates the two. The fraction of time lost to per-request cost
+is `t_req / (t_req + size / bandwidth)`. With `t_req` of 0.2–0.9 s and about
+15 MB/s cold per stream, a 70 KB file is almost entirely overhead, a 14 MB shard
+about 20–50%, and a 512 MB pack a few percent.
+
+Moving data with a general per-file tool (copy, verify, delete source, one file
+at a time) showed what the data tooling must avoid:
+
+- Compile-cache directories moved at 30–70 KB/s (about 0.5 files/s) and did not
+  finish within a day.
+- Moves that were interrupted left training datasets split between tiers, with
+  hundreds of thousands of files present only on the destination.
+- Nothing recorded the collection as a whole, so a directory could only be
+  understood by listing it, which is the slowest operation on object storage.
+
+The data tooling must therefore pack small files, move whole collections under
+a manifest written last, and delete sources only after the destination
+manifest is committed and verified.
+
 ## Goals
 - One interface for durable bytes, with semantics every backend can honour.
 - Datasets read per worker at file granularity, with no listing at startup and
@@ -109,6 +139,95 @@ group. A private package typically registers a scheme whose factory returns a
 mystore = "my_private_pkg.koochak_store:open_mystore"
 ```
 
+## Store profiles
+Performance facts belong to a store, not to call sites. A `StoreProfile`
+records what the probe measured:
+
+- `request_seconds`: fixed cost of one small request;
+- `stream_mb_s`: uncached bandwidth of one stream;
+- `streams`: concurrent transfers worth running against the store;
+- `range_streams`: parallel byte-range reads worth running on one large object
+  (1 when ranges do not scale);
+- `part_bytes`: range and part size;
+- `list_is_cheap`: whether listing is acceptable at all.
+
+`profile_of(store)` returns the store's profile (a conservative default when a
+backend declares none). Every layer takes its defaults from it: transfer
+concurrency, range splitting, prefetch depth, and `min_object_bytes(profile)`,
+the size below which files should be packed rather than stored as objects. The
+probe emits a recommended profile, and a private package attaches it when it
+registers a scheme, e.g. `LocalStore(root, publish="exclusive", profile=...)`.
+
+## Transfer engine
+`koochak/storage/transfer.py` is the only code that moves bytes between
+stores. `copy_objects(source, target, items)` takes explicit items (source
+key, target key, expected size and SHA256 when a manifest provides them) and:
+
+- runs `profile.streams` items concurrently, and reads large objects as
+  `range_streams` parallel byte ranges while writing them as one sequential,
+  create-only `put`;
+- hashes bytes in flight and, when an expected SHA256 is given, removes a
+  just-written object that does not match and raises;
+- skips targets that already exist with the expected size, so interrupted
+  transfers resume; refuses targets that exist with a different size;
+- fails fast: the first error stops new work, waits for in-flight items, and
+  raises.
+
+Archive, pull, staging, cache warming, and checkpoint replication all call it.
+
+## Manifested collections
+One manifest format describes any immutable collection, written last and
+read instead of listing. Three layouts cover datasets, archives, and
+checkpoints:
+
+- **`shards`**: files stored as-is, with size, SHA256, and optional record
+  counts (the dataset index above generalizes to this).
+- **`packed`**: small files packed into ~256 MB–1 GB tar packs plus a file
+  table mapping each path to its pack, byte offset, size, SHA256, and mode.
+  Large files (above `min_object_bytes`) stay standalone objects. Packs are
+  plain tar and the manifest is JSON, so archives remain usable without
+  Koochak.
+- **`parts`**: a checkpoint split into parts that are written and read in
+  parallel.
+
+Listing, `stat`, and existence checks on a collection come from its manifest.
+
+## Data tool
+`python -m koochak.data` (phase 3) moves collections:
+
+- `archive SRC DEST --layout packed|shards`: walk a POSIX source (listing is
+  cheap there), pack or index, upload in parallel, write the manifest last.
+  Deterministic ordering makes reruns resume. `--dry-run` reports file counts,
+  bytes, packs, and an estimated time from the target's profile.
+  `--delete-source` deletes originals only after the committed manifest has
+  been verified by re-reading the destination.
+- `pull SRC DEST [--include GLOB]`: restore a collection or a subset (one file
+  is one range read), verify, resume.
+- `ls`, `verify`, `warm`, `stage`: manifest-only listing, integrity checks,
+  cache warming for backends with a cache tier, and copying a worker's or
+  node's share into RAM, local disk, or another store.
+
+Per-dataset layout files choose the layout, the grouping key for packs (for
+example a cluster id, so each worker's partition maps to a few packs), and
+which tiny sidecars are folded into one table.
+
+## Readers
+- `PackedTree`: read-only, path-addressed access to a `packed` collection:
+  `read(path)` is one range read, backed by a node-local cache, and a worker
+  can preload the packs it owns. Per-record loaders call it instead of opening
+  files.
+- `ShardedStream`: streaming reads of a `shards` collection (below).
+- Staging copies a node's owned shards or packs to faster storage before
+  training.
+
+## Where each piece lives
+- **Koochak (public):** everything above, site-neutral.
+- **A private package:** scheme registrations with measured profiles, layout
+  files for its datasets, path-mirroring policy between tiers, and wrappers
+  that run transfers as jobs on compute nodes.
+- **Project repositories:** loaders read through manifests instead of listing
+  directories.
+
 ## Datasets
 Implemented in `koochak/data/shards.py`:
 
@@ -124,7 +243,7 @@ Implemented in `koochak/data/shards.py`:
    count. It is pure and deterministic, needs no coordination, and fails
    identically on every worker when shards are too few or too uneven.
 
-Next (phase 2):
+Next (phase 4):
 
 - `ShardedStream(IterableDataset)`: read the plan for this worker, prefetch a
   bounded number of shards in a background thread, verify, decode, and apply a
@@ -142,7 +261,7 @@ Next (phase 2):
 - Size shards so per-request latency is negligible (hundreds of MB), and keep at
   least ~10 shards per data-loading worker for shuffle quality and balance.
 
-## Checkpoints (phase 3)
+## Checkpoints (phase 5)
 A checkpoint becomes parts plus a manifest written last:
 
 ```
@@ -165,12 +284,23 @@ run/step000005000.ready.json   # create-only; step, next_step, metrics, per-part
 - **Replication.** Copying a committed checkpoint between stores (parts, then
   manifest) gives tiering, e.g. fast local disk first, then object storage.
 
-## Artifacts (phase 4)
+## Artifacts (phase 6)
 `storage.artifact.publish_artifact` uses hard links, which object-storage
 mounts reject. Move ready manifests onto `Store.put`, and let the published
 `path` become a store URI. Artifact gates that validate manifests must then
 read through a `Store` too, which needs a coordinated protocol change in the
 scheduler that consumes them.
+
+## Phases
+1. Write-once `Store`, `LocalStore`, pluggable schemes, shard index, writer
+   and plan, storage probe. **Done.**
+2. Store profiles, the transfer engine, and probe measurements of cold versus
+   cached concurrency and of range-parallel reads of one object. **In progress.**
+3. Manifested collections (`shards`, `packed`) and the data tool (`archive`,
+   `pull`, `verify`, `ls`, `warm`, `stage`), piloted on a per-record cache.
+4. Readers: `PackedTree`, `ShardedStream`, staging.
+5. Checkpoints as parts: async saves, parallel parts, replication between tiers.
+6. Artifact manifests through `Store.put`.
 
 ## Testing Plan
 - Store: round trips, byte ranges, create-only conflicts, streamed puts,
@@ -180,8 +310,11 @@ scheduler that consumes them.
 - Shards: tar determinism and compatibility with `tarfile`, writer rollover,
   commit-last, rerun idempotence, tamper detection, verification, and plan
   completeness, balance, determinism, and starvation errors.
-- Probe: local run with cleanup, recommendation without hard links, CLI JSON.
-- Phases 2 and 3 add resume-determinism tests across partial runs and
+- Probe: local run with cleanup, recommendation without hard links, CLI JSON,
+  checkpoint and multi-process dataset phases, recommended profile.
+- Transfer: parallel copies, range-parallel reads, resume by skipping complete
+  targets, refusal of mismatched targets, SHA256 mismatch cleanup, fail-fast.
+- Later phases add resume-determinism tests across partial runs and
   mocked-mount tests for exclusive publish and delayed read-back.
 
 ## Risks and Open Questions
@@ -190,8 +323,8 @@ scheduler that consumes them.
 - Measurements so far come from CPU nodes; accelerator nodes may have a
   different network path. Cold multi-stream reads of data uploaded by other
   tools (rather than written through the mount) are not yet measured.
-- The probe's concurrent-read phase mixes cached and uncached objects; phase 2
-  should measure them separately and evict page caches before cold reads.
+- Whether byte ranges of one object read in parallel scale like separate
+  objects decides whether large files ever need splitting into parts.
 - Exact resume across a changed world size is not possible with rank-based
   plans; the default is to fail loudly.
 - Whether node-local disks exist on the target compute nodes decides whether
