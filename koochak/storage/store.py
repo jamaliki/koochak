@@ -241,6 +241,10 @@ def _file_digest(path: str) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+# Errors an object-storage mount returns while another node's close is still committing.
+_SETTLING_ERRNOS = (errno.ETIME, errno.EIO)
+
+
 class LocalStore:
     """Store backed by a POSIX directory tree.
 
@@ -256,9 +260,10 @@ class LocalStore:
     ignore it.  ``verify_readback=True`` re-reads every new object until its
     size and SHA256 match what was written, retrying for up to
     ``settle_seconds`` on mounts whose close completes asynchronously.
-    ``read_settle_seconds`` retries opening a file that fails with ``ETIME``:
-    on some object-storage mounts a file closed on another node stays
-    unreadable for minutes. Other read errors are raised at once.
+    ``read_settle_seconds`` retries opening a file that fails with ``ETIME``
+    or ``EIO``: on some object-storage mounts a file closed on another node
+    stays unreadable for minutes while its upload commits. Other read errors,
+    and these once the window has passed, are raised.
 
     ``profile`` records the mount's measured performance (default:
     ``LOCAL_PROFILE``). ``python -m koochak.storage.probe`` reports which
@@ -317,7 +322,7 @@ class LocalStore:
             try:
                 return open(path, "rb")
             except OSError as exc:
-                if exc.errno != errno.ETIME or time.monotonic() >= deadline:
+                if exc.errno not in _SETTLING_ERRNOS or time.monotonic() >= deadline:
                     raise
             time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
 
