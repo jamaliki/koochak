@@ -123,7 +123,7 @@ def test_parse_nvidia_smi_csv_preserves_rank_node_and_uuid(monkeypatch: pytest.M
         step=30,
         rank=9,
         world_size=16,
-        hostname="gpu-8.eit-gbi.science",
+        hostname="gpu-8.example.org",
         slurm_node="gpu-8",
         cuda_device=2,
         gpu_query_id="2",

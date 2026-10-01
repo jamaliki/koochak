@@ -174,6 +174,7 @@ state deterministically.
   - `data/`
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
+    - `shards.py` – immutable dataset shards: `ShardWriter`, strict shard indexes, tar (WebDataset-layout) format, and `plan_shards`/`assign_shards` for per-worker reading.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -194,6 +195,13 @@ state deterministically.
     - `atomic.py` – atomic file writer.
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
+    - `store.py` – the `Store` protocol (write-once objects), `StoreProfile`, `LocalStore`, and `open_store`/`register_store` for pluggable backends.
+    - `transfer.py` – `copy_objects`: parallel, range-splitting, verified, resumable copies between stores.
+    - `stores_file.py` – named `scheme://` stores from a private YAML file (`$KOOCHAK_STORES`).
+    - `collection.py` – manifested collections: `manifest.json` + `files.jsonl.gz`, tar packs, standalone objects.
+    - `archive.py` – `archive` (grouped packing, resumable), `pull` (subsets, verified, metadata restored), `verify`.
+  - `data/__main__.py` – `python -m koochak.data archive|pull|verify|ls`.
+    - `probe.py` – `python -m koochak.storage.probe <location>`: storage semantics and throughput report.
   - `utils/`
     - `config.py` – thin compatibility wrappers around `koochak.config` (`get/as_dict`).
     - `device.py` – `get_device(cfg)` and `get_lr(optimizer)`.
@@ -632,6 +640,113 @@ DDP compatibility:
   - `from koochak.storage.checkpoint import match_state_dict_to_model`
   - `target = getattr(model, 'module', model)`
   - `target.load_state_dict(match_state_dict_to_model(target, ckpt['model']))`
+
+## Storage Backends and Dataset Shards
+
+Koochak is moving its persistence onto one narrow interface so the same code
+runs on parallel filesystems, object stores, and FUSE mounts over object
+storage. See `specs/storage-abstraction.md` for the full design and phases;
+checkpoints still use the POSIX path above until that phase lands.
+
+- `koochak.storage.store.Store` holds **write-once** objects under relative
+  keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
+  the bytes read back), `stat`, `list(prefix)`, `delete`, and optional
+  `local_path`. There is no rename, append, overwrite, or symlink in the
+  contract, because object storage cannot provide them atomically.
+- `open_store(location)` maps plain paths and `file://` URIs to `LocalStore`,
+  and any other `scheme://` to a factory registered with `register_store` or
+  exposed by an installed package under the `koochak.stores` entry-point group.
+  Site-specific backends live in private packages, not in this repository.
+- **Stores file.** Site-specific facts stay out of code: a private YAML file
+  maps scheme names to roots, publish modes, and measured profiles, and
+  `open_store("archive://datasets/foo")` returns a `LocalStore` rooted at
+  `<root>/datasets/foo` with those settings. The same relative path under two
+  schemes names the same data on two tiers. The file is `$KOOCHAK_STORES`, else
+  `~/.config/koochak/stores.yaml` (XDG); values resolve with OmegaConf
+  (`${oc.env:USER}`), unknown keys fail, and it holds no secrets. See
+  `examples/storage/stores.example.yaml`; keep the real file private.
+- `LocalStore(root, publish="link")` publishes via a hidden temp file plus a
+  hard link. On mounts without hard links use `publish="exclusive"`
+  (`O_EXCL` create, published on close); `fsync=False` and
+  `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
+  close asynchronously. `read_settle_seconds` retries opening files that fail
+  with `ETIME`, which some object-storage mounts return for minutes after
+  another node closed the file.
+- `StoreProfile` records a store's measured performance (per-request cost,
+  cold bandwidth per stream, useful concurrency, whether byte ranges of one
+  object scale, part size, whether listing is acceptable). `LocalStore(...,
+  profile=...)` attaches one; `profile_of(store)` returns it (a conservative
+  remote default otherwise), and `min_object_bytes(profile)` gives the size
+  below which files should be packed rather than stored individually.
+- `koochak.storage.transfer.copy_objects(source, target, items)` is the one
+  way bytes move between stores: `streams` items at once, large objects read
+  as parallel byte ranges into one create-only `put`, SHA256 checked in flight
+  against manifest digests (a mismatching new object is removed), existing
+  targets of the expected size skipped so reruns resume, first failure raised.
+  Defaults come from the stores' profiles.
+- `python -m koochak.storage.probe <path-or-uri> [--json]` checks those
+  semantics (exclusive create, rename, hard links, symlinks, fsync, in-place
+  writes, visibility of unclosed files, read-back delay), recommends
+  `LocalStore` settings and a `StoreProfile`, and measures small-object
+  latency, listing, cold versus cached single-stream, concurrent, and
+  range-parallel reads (page caches are dropped before cold reads where the OS
+  allows). `--emit-profile` prints just the recommended `profile:` block to
+  paste into the stores file. `--checkpoint-bytes 4G --checkpoint-parts 1,8`
+  adds a checkpoint-sized write as 1..N concurrent parts with read-back
+  timing; `--dataset-shards 32 --shard-bytes 256M --readers 1,4,16` builds a
+  synthetic dataset with `ShardWriter` and reads it with N spawned processes
+  via `assign_shards` (cold and warm passes). Run it on a compute node; it
+  cleans up after itself.
+
+Collections and the data tool (`koochak.storage.collection`, `koochak.storage.archive`):
+
+- A **collection** is many files under one prefix, described by
+  `manifest.json` (written last; the commit point) and `files.jsonl.gz` (per
+  file: path, size, SHA256, mode, exact mtime, group, and either its pack and
+  byte offset or its standalone object). Small files live in plain tar packs
+  (`packs/pack-NNNNNN.tar`), large ones as `objects/<path>`. Listing and `stat`
+  come from the manifest, never from listing storage.
+- `python -m koochak.data archive SRC DEST [--groups groups.csv]` packs a local
+  tree. The groups table (`path,group[,order]`) keeps each group's files
+  contiguous in one pack, in `order`, so a worker loads a group with one range
+  read; unlisted files group by directory. Files at least `--object-bytes`
+  (default from the target's profile) become objects; `--layout objects`
+  stores every file as-is (e.g. already-sharded datasets). Reruns resume from
+  per-pack records and refuse leftovers that do not match the plan.
+  `--dry-run` reports files, bytes, packs, objects, and request counts.
+- `python -m koochak.data pull SRC DEST [--include GLOB]` restores all or some
+  files with merged range reads, checks every SHA256, restores mode and exact
+  mtime, and skips files already present. `verify [--deep]` checks sizes or
+  every byte; `ls [--include GLOB] [--long]` lists from the manifest.
+- `--include GLOB` keeps only matching files while walking (excludes still
+  prune directories); `--skip-symlinks` skips links instead of failing;
+  `--min-age-hours H` skips files modified in the last H hours (e.g.
+  checkpoints a live run may still use). Skips are counted in the report.
+- `--files-from LIST` archives exactly the listed paths (relative to SRC)
+  without walking SRC. `--delete-source` makes the archive a move: after the
+  committed collection passes a deep verify, sources whose size and mtime
+  still match the manifest are deleted; failed verification deletes
+  nothing and changed files are kept and reported. The manifest metadata
+  records the source location.
+- Symlinks and special files are refused (exclude them with `--exclude`).
+
+Datasets (`koochak.data.shards`):
+
+- Build a dataset with `ShardWriter(store, "datasets/foo", target_bytes=...)`:
+  records are packed into ~`target_bytes` shards and `index.json` is written
+  last, so an interrupted build never commits. The index lists every shard's
+  key (relative to the index), size, SHA256, and record count; its own SHA256
+  identifies the dataset version. `TAR` stores `{"__key__": k, ext: bytes}`
+  samples in the WebDataset layout with deterministic headers.
+- `load_index`, `read_shard(..., verify=True)`, `describe_shard`, and
+  `write_index` read, verify, and index shards (including pre-existing files).
+- `plan_shards(index, num_workers=N, epoch=e, seed=s)` deals whole shards to
+  all `N` data-loading workers before anything is read: each shard goes to
+  exactly one worker per epoch, workers get contiguous runs balanced by record
+  count, and every process computes the same plan. It raises on every worker
+  alike if a worker would get nothing. `worker_coordinates(rank=..., world_size=...)`
+  returns the global worker id inside a DataLoader worker; capture rank and
+  world size in the main process when building the dataset.
 
 ## Resuming Across DDP/Single GPU
 
