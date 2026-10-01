@@ -191,7 +191,7 @@ state deterministically.
     - `build.py` – tiny builders for optimizers/schedulers (supports cosine, step, plateau, cosine_warmup).
   - `storage/`
     - `artifact.py` – immutable file/directory ready manifests with deterministic ordering, size, SHA256, provenance, and counts.
-    - `checkpoint.py` – checkpoint save/load (atomic), `latest`, `best`.
+    - `checkpoint.py` – checkpoint publication through a `Store` (manifest last, optional background thread), load, auto-resume, `latest`, `best`.
     - `atomic.py` – atomic file writer.
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
@@ -310,7 +310,7 @@ logging: { csv_path: ..., jsonl_path: ... }
 wandb: { enabled: false, project: ... }
 ```
 
-The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the highest valid published numbered checkpoint under `train.out_dir` (or starts cleanly), and calls `training_loop` with `train_cfg`. Pass `--resume none` to disable this lookup.
+The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the highest valid published numbered checkpoint in `train.checkpoint_dir` (default `train.out_dir`; or starts cleanly), and calls `training_loop` with `train_cfg`. Pass `--resume none` to disable this lookup.
 
 ## Reproducible Job Submission
 
@@ -604,17 +604,46 @@ Koochak enforces them only when a later attempt finds durable checkpoint state.
   `next_step=N`; periodic checkpoints retain their zero-based update index and
   record `next_step=step+1`. This keeps filenames and resume cursors
   unambiguous when a run is extended.
-- `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` atomically installs
-  and syncs the numbered checkpoint, then atomically publishes
-  `<path>.ready.json` with its stable artifact ID, byte size, and SHA256. It
-  keeps only the last `k` checkpoint/manifest pairs and maintains `latest.pt`.
+- Checkpoints go to `train.checkpoint_dir`, which defaults to `train.out_dir`
+  and may be a directory or a named `scheme://` URI from the stores file (see
+  below). Logs, W&B files, and GPU-health summaries always stay in `out_dir`:
+  they append, which write-once object-storage mounts refuse. So a run can keep
+  its logs on a POSIX filesystem and its checkpoints on object storage:
+
+  ```yaml
+  train:
+    out_dir: /posix/runs/exp0              # logs
+    checkpoint_dir: archive://runs/exp0    # checkpoints, via the stores file
+    checkpoint_async: true
+  ```
+
+- Every save goes through the checkpoint store
+  (`koochak.storage.checkpoint.publish(store, name, data, keep_last_k=k)`): the
+  numbered checkpoint is written create-only and synced, then
+  `<path>.ready.json` commits it with its stable artifact ID, byte size, and
+  SHA256. Re-saving an existing step first uncommits it (manifest, then file).
+  Pruning keeps the last `k` pairs and deletes each manifest before its
+  checkpoint. Directory stores also keep a `latest.pt` symlink; write-once
+  stores (`publish: exclusive`) get none, because the fallback would be a full
+  copy of every checkpoint. `save(ckpt, path, keep_last_k)` wraps `publish` for
+  a directory path.
+- `train.checkpoint_async: true` serializes each periodic checkpoint at once and
+  publishes it on a background thread, with at most one publication in flight,
+  so rank 0 does not stall on slow storage. `on_checkpoint` fires when the
+  manifest has committed (the hook's tensors are live by then; read the saved
+  file for exact values), a failed background publication fails training on
+  its next step, and terminal, evacuation, and GPU-health checkpoints drain the
+  pending publication and then save synchronously. Code that reads a checkpoint
+  file as soon as `_save_checkpoint` returns needs synchronous saves.
 - Bind Scruffy dependencies to the immutable numbered artifact ID, such as
   `checkpoint/step000100000.pt`, never to the mutable `latest.pt` alias.
 - `koochak.storage.checkpoint.load(path)` loads to CPU.
-- `koochak.storage.checkpoint.latest(dir)` returns `latest.pt` if present or the most recent step checkpoint.
-- `koochak.storage.checkpoint.highest_valid_published(dir)` selects the highest numbered checkpoint whose exact ready manifest, path, size, SHA256, and resume cursor validate. It never treats `latest.pt`, a directory, or incomplete/corrupt scaffolding as evidence.
-- `koochak.storage.checkpoint.resolve_auto_resume(dir)` returns `(path, checkpoint)` from the same single payload read whose manifest, path, size, SHA256, and cursor were validated. Use `checkpoint["next_step"]` before constructing a dataset, then pass both values as `checkpoint_dict` and `auto_resume_path` to `training_loop(..., resume="auto")` to retain selection events and typed artifact republishing.
-- `koochak.storage.checkpoint.best(dir, key)` selects the lowest metric across checkpoints.
+- `koochak.storage.checkpoint.latest(location)` returns `latest.pt` if present or the most recent step checkpoint.
+- `koochak.storage.checkpoint.highest_valid_published(location)` selects the highest numbered checkpoint whose exact ready manifest, path, size, SHA256, and resume cursor validate. It never treats `latest.pt`, a directory, or incomplete/corrupt scaffolding as evidence. Reads go through the checkpoint store, so a mount with `read_settle_seconds` waits out files another node has just closed. A missing or invalid candidate falls back to a lower one; any other I/O error is raised, so an unreadable newest checkpoint never silently rolls training back.
+- `koochak.storage.checkpoint.resolve_auto_resume(location)` returns `(path, checkpoint)` from the same single payload read whose manifest, path, size, SHA256, and cursor were validated. Use `checkpoint["next_step"]` before constructing a dataset, then pass both values as `checkpoint_dict` and `auto_resume_path` to `training_loop(..., resume="auto")` to retain selection events and typed artifact republishing.
+- `koochak.storage.checkpoint.best(location, key)` selects the lowest metric across checkpoints.
+- Every `location` above is a directory, a `scheme://` URI, or a `Store`
+  (`checkpoint_store(location)` resolves it).
 
 ### Safe evacuation and resume
 
@@ -645,8 +674,9 @@ DDP compatibility:
 
 Koochak is moving its persistence onto one narrow interface so the same code
 runs on parallel filesystems, object stores, and FUSE mounts over object
-storage. See `specs/storage-abstraction.md` for the full design and phases;
-checkpoints still use the POSIX path above until that phase lands.
+storage. See `specs/storage-abstraction.md` for the full design and phases.
+Checkpoints are published through a `Store` (see Checkpointing above); splitting
+them into parallel parts and replicating them between tiers remain.
 
 - `koochak.storage.store.Store` holds **write-once** objects under relative
   keys: `get` (whole or byte range), `open`, `put` (create-only; returns once

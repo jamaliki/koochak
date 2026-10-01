@@ -285,7 +285,21 @@ Next (phase 4):
   least ~10 shards per data-loading worker for shuffle quality and balance.
 
 ## Checkpoints (phase 5)
-A checkpoint becomes parts plus a manifest written last:
+**Done (single-file checkpoints).** `train.checkpoint_dir` (default `out_dir`)
+takes a directory or a stores-file `scheme://` URI; logs stay in `out_dir`,
+since they append. Every save goes through `checkpoint.publish(store, ...)`:
+the `step<N>.pt` object is written create-only, then its unchanged v1
+`.ready.json` manifest; re-saving a step uncommits it first; pruning deletes
+manifests before checkpoints. Directory stores keep the `latest.pt` symlink,
+write-once stores get none. `train.checkpoint_async` serializes on the training
+thread and publishes on one background thread (one in flight); `on_checkpoint`
+fires after the manifest commits, failures surface on the next step, and
+terminal, evacuation, and GPU-health saves drain first. Resume reads through
+the store (so `read_settle_seconds` applies) and raises I/O errors other than a
+missing file instead of falling back to an older checkpoint. The serialized
+bytes are held in memory during the upload, so no node-local disk is needed.
+
+**Remaining:** a checkpoint becomes parts plus a manifest written last:
 
 ```
 run/step000005000/model.pt
@@ -323,7 +337,9 @@ scheduler that consumes them.
    `pull`, `verify`, `ls`, `--files-from`, and verified moves
    (`--delete-source`) done**; `warm` and `stage` remain.
 4. Readers: `PackedTree`, `ShardedStream`, staging.
-5. Checkpoints as parts: async saves, parallel parts, replication between tiers.
+5. Checkpoints through `Store`: URIs for `checkpoint_dir`, manifest-last
+   publication, background saves, settling reads on resume. **Done**; parts,
+   per-rank state, and replication between tiers remain.
 6. Artifact manifests through `Store.put`.
 
 ## Testing Plan
