@@ -48,8 +48,12 @@ standalone Slurm transport"]
 verify digests · preflight · exec"]
     loop(["training_loop()
 iterables · DDP · AMP · hooks"])
-    outputs[("checkpoints · ready manifests
+    logs[("train.out_dir
 metrics · logs · events")]
+    checkpoints[("train.checkpoint_dir
+numbered checkpoints · ready manifests")]
+    stores["Stores file
+private scheme:// → root · publish mode"]
 
     config --> prepare
     profile --> prepare
@@ -59,7 +63,10 @@ metrics · logs · events")]
     route -->|standalone job| pazuzu
     scruffy --> runner
     pazuzu --> runner
-    runner --> loop --> outputs
+    runner --> loop
+    loop --> logs
+    loop --> checkpoints
+    stores -.->|resolves scheme://| checkpoints
 
     classDef input fill:#F4F0FF,stroke:#6D5BD0,color:#241C3A,stroke-width:1.5px;
     classDef core fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
@@ -69,13 +76,13 @@ metrics · logs · events")]
     classDef runtime fill:#E8F0FF,stroke:#4977B8,color:#172D4D,stroke-width:1.5px;
     classDef result fill:#F4EDC9,stroke:#9C7B21,color:#352B10,stroke-width:1.5px;
 
-    class config,profile,script input;
+    class config,profile,script,stores input;
     class prepare,bundle core;
     class route choice;
     class scruffy scruffyNode;
     class pazuzu pazuzuNode;
     class runner,loop runtime;
-    class outputs result;
+    class logs,checkpoints result;
     linkStyle default stroke:#88859A,stroke-width:1.5px;
 ```
 
@@ -83,7 +90,9 @@ The backend choice does not alter the prepared workload. Both paths invoke the
 same runner, which rejects configuration or environment drift before importing
 training code. Once admitted, `training_loop()` remains the small functional
 core; checkpointing, logging, distributed execution, and workload events attach
-through focused helpers and hooks.
+through focused helpers and hooks. Logs stay in `out_dir`, while checkpoints go
+to `checkpoint_dir`, which can be a write-once object store named in a private
+stores file.
 
 ### Inside `training_loop()`
 
@@ -97,7 +106,7 @@ iterables · train_cfg · scheduler"]
 hooks · eval_fn · checkpoint_dict"]
 
     setup["Setup once
-device → shard → start hook → compile → DDP → resume"]
+device → shard → start hook → compile → DDP → resume from the checkpoint store"]
     batch["Next batch
 optional CUDA prefetch + prepare_batch_fn"]
     micro["Micro-step × grad_accum
@@ -112,9 +121,13 @@ metrics · rank timing · hooks"]
     health["Protect
 GPU health watchdog"]
     periodic["Persist
-evaluation · atomic checkpoint"]
-    publication["When checkpointed
-fsync .pt → .ready.json → typed artifact event"]
+evaluation · serialize numbered checkpoint"]
+    background["checkpoint_async
+hand off · one publication in flight"]
+    publication["Publish through the checkpoint store
+create-only .pt → .ready.json → prune manifest-first"]
+    announce["After commit
+on_checkpoint · typed artifact event"]
     done{"max_steps reached
 or data exhausted?"}
     result[["Resume-ready checkpoint
@@ -124,7 +137,10 @@ model · optimizer · RNG · EMA · config"]]
     data --> setup
     extensions --> setup
     setup --> batch --> micro --> gradients --> update
-    update --> hooks --> health --> periodic --> publication --> done
+    update --> hooks --> health --> periodic
+    periodic -->|synchronous| publication --> announce --> done
+    periodic -->|checkpoint_async| background --> done
+    background -.->|background thread| publication
     done -->|next step| batch
     done -->|finished| result
 
@@ -142,7 +158,7 @@ model · optimizer · RNG · EMA · config"]]
     class batch dataNode;
     class micro,gradients compute;
     class update updateNode;
-    class hooks,health,periodic,publication boundary;
+    class hooks,health,periodic,background,publication,announce boundary;
     class done choice;
     class result resultNode;
     linkStyle default stroke:#88859A,stroke-width:1.5px;
@@ -152,7 +168,9 @@ The user-defined `step_fn` owns model semantics and returns a loss plus optional
 metrics. Koochak owns the repetitive mechanics around it. Optional behavior is
 composed through functions and event hooks rather than subclasses, while the
 returned checkpoint captures everything required to resume the optimization
-state deterministically.
+state deterministically. With `train.checkpoint_async`, the loop keeps training
+while a background thread publishes the checkpoint; `on_checkpoint` fires once
+its manifest has committed, and the terminal save waits for any pending one.
 
 ## Goals
 
@@ -175,6 +193,7 @@ state deterministically.
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
     - `shards.py` – immutable dataset shards: `ShardWriter`, strict shard indexes, tar (WebDataset-layout) format, and `plan_shards`/`assign_shards` for per-worker reading.
+    - `packed.py` – `PackedGroups`/`GroupStream`: each data-loading worker streams whole packs of a grouped collection (prefetch, SHA256 checks, windowed shuffle, endless passes, resume) and receives its groups' files by path; `PackCache` keeps cycled packs in memory.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -677,6 +696,83 @@ runs on parallel filesystems, object stores, and FUSE mounts over object
 storage. See `specs/storage-abstraction.md` for the full design and phases.
 Checkpoints are published through a `Store` (see Checkpointing above); splitting
 them into parallel parts and replicating them between tiers remain.
+
+```mermaid
+flowchart TB
+    storesfile["Stores file
+private YAML · $KOOCHAK_STORES"]
+    plugins["Plugin stores
+koochak.stores entry points"]
+    probe["Storage probe
+semantics · settings · profile"]
+    open(["open_store(location)"])
+    local["LocalStore
+link: POSIX · exclusive: object-storage FUSE
+fsync · read-back · read_settle_seconds"]
+    store[["Store protocol
+get · open · put create-only · stat · list · delete"]]
+
+    checkpoints["Checkpoints
+publish · prune · resolve_auto_resume"]
+    shards["Dataset shards
+ShardWriter · plan_shards · assign_shards"]
+    transfer["copy_objects
+parallel · ranged · SHA256 · resumable"]
+    collections[("Collections
+manifest.json · files.jsonl.gz · packs · objects")]
+    tool["python -m koochak.data
+archive · pull · verify · ls"]
+
+    probe -.->|recommends| storesfile
+    storesfile --> open
+    plugins --> open
+    open --> local --> store
+    open -->|custom backend| store
+    store --> checkpoints
+    store --> shards
+    store --> transfer --> collections
+    tool --> transfer
+
+    classDef input fill:#F4F0FF,stroke:#6D5BD0,color:#241C3A,stroke-width:1.5px;
+    classDef core fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
+    classDef runtime fill:#E8F0FF,stroke:#4977B8,color:#172D4D,stroke-width:1.5px;
+    classDef toolNode fill:#DDF7F3,stroke:#168B83,color:#123B38,stroke-width:1.5px;
+    classDef result fill:#F4EDC9,stroke:#9C7B21,color:#352B10,stroke-width:1.5px;
+
+    class storesfile,plugins,probe input;
+    class open,store core;
+    class local,checkpoints,shards,transfer runtime;
+    class tool toolNode;
+    class collections result;
+    linkStyle default stroke:#88859A,stroke-width:1.5px;
+```
+
+Every layer above the protocol is backend-neutral: the same checkpoint,
+shard, and archive code runs against a parallel filesystem or an
+object-storage mount, and the stores file carries the site-specific settings.
+
+**Training on grouped collections.** Archive a dataset with `--groups`
+(`path,group,order`) so every file one training record needs is stored
+contiguously, then stream it:
+
+```python
+from koochak.data.packed import GroupStream, PackCache, PackedGroups
+from koochak.storage.store import open_store
+
+store = open_store("archive://datasets/my-data/v1")
+packed = PackedGroups.load(store)             # file table, groups, packs
+plan = packed.plan(num_owners=world_size * workers_per_rank, seed=0)
+stream = GroupStream(store, packed, plan[owner], seed=epoch_seed, window=2, prefetch=2,
+                     cache=PackCache(4 << 30), retries=3)
+for group in stream:                          # endless; a seeded shuffle per window of packs
+    payload = group.files["some/original/path.npz"]
+```
+
+Each worker owns whole packs (balanced by group count), fetches them whole in
+a background thread, verifies them against the manifest, and yields their
+groups shuffled within windows of `window` packs. `start=n` skips `n` groups
+without reading the skipped packs. Plans for disjoint selections (`select=`)
+can be combined to balance several kinds of groups separately.
 
 - `koochak.storage.store.Store` holds **write-once** objects under relative
   keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
