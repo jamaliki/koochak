@@ -235,10 +235,19 @@ example a cluster id, so each worker's partition maps to a few packs), and
 which tiny sidecars are folded into one table.
 
 ## Readers
-- `PackedTree`: read-only, path-addressed access to a `packed` collection:
-  `read(path)` is one range read, backed by a node-local cache, and a worker
-  can preload the packs it owns. Per-record loaders call it instead of opening
-  files.
+- **Done:** `koochak/data/packed.py` streams a grouped `packed` collection.
+  `PackedGroups.plan` deals whole packs to data-loading workers (reusing
+  `plan_shards`, with each pack's groups as its records); a group belongs to
+  the owner of the pack holding its first file. `GroupStream` fetches whole
+  packs ahead in a background thread, verifies them against the manifest,
+  yields each window of packs' groups in a seeded shuffle, reshuffles every
+  pass, never ends, and resumes by skipping groups without reading their
+  packs. Groups that spill into another pack, and standalone objects, are
+  read with range requests. `PackCache` keeps recently used packs in memory
+  for data cycled faster than the rest. Per-record loaders read a group's
+  files by their original paths.
+- `PackedTree`: random access to single files of a `packed` collection
+  (`read(path)` as one range read, with a node-local cache).
 - `ShardedStream`: streaming reads of a `shards` collection (below).
 - Staging copies a node's owned shards or packs to faster storage before
   training.

@@ -193,6 +193,7 @@ its manifest has committed, and the terminal save waits for any pending one.
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
     - `shards.py` – immutable dataset shards: `ShardWriter`, strict shard indexes, tar (WebDataset-layout) format, and `plan_shards`/`assign_shards` for per-worker reading.
+    - `packed.py` – `PackedGroups`/`GroupStream`: each data-loading worker streams whole packs of a grouped collection (prefetch, SHA256 checks, windowed shuffle, endless passes, resume) and receives its groups' files by path; `PackCache` keeps cycled packs in memory.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -749,6 +750,29 @@ archive · pull · verify · ls"]
 Every layer above the protocol is backend-neutral: the same checkpoint,
 shard, and archive code runs against a parallel filesystem or an
 object-storage mount, and the stores file carries the site-specific settings.
+
+**Training on grouped collections.** Archive a dataset with `--groups`
+(`path,group,order`) so every file one training record needs is stored
+contiguously, then stream it:
+
+```python
+from koochak.data.packed import GroupStream, PackCache, PackedGroups
+from koochak.storage.store import open_store
+
+store = open_store("archive://datasets/my-data/v1")
+packed = PackedGroups.load(store)             # file table, groups, packs
+plan = packed.plan(num_owners=world_size * workers_per_rank, seed=0)
+stream = GroupStream(store, packed, plan[owner], seed=epoch_seed, window=2, prefetch=2,
+                     cache=PackCache(4 << 30), retries=3)
+for group in stream:                          # endless; a seeded shuffle per window of packs
+    payload = group.files["some/original/path.npz"]
+```
+
+Each worker owns whole packs (balanced by group count), fetches them whole in
+a background thread, verifies them against the manifest, and yields their
+groups shuffled within windows of `window` packs. `start=n` skips `n` groups
+without reading the skipped packs. Plans for disjoint selections (`select=`)
+can be combined to balance several kinds of groups separately.
 
 - `koochak.storage.store.Store` holds **write-once** objects under relative
   keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
