@@ -141,3 +141,21 @@ def test_invalid_arguments_fail_fast(tmp_path: Path) -> None:
         GroupStream(store, packed, packs, select=lambda name: False)
     with pytest.raises(ValueError):
         packed.plan(num_owners=2, select=lambda name: False)
+
+
+def test_load_group_reads_one_group_with_one_range_request(tmp_path: Path, monkeypatch) -> None:
+    store, packed = build(tmp_path, groups=4, files_per_group=6, size=9000, pack_bytes=40_000)
+    calls = []
+    real_get = LocalStore.get
+
+    def counted(self, key, offset=0, length=None):
+        calls.append((key, offset, length))
+        return real_get(self, key, offset, length)
+
+    monkeypatch.setattr(LocalStore, "get", counted)
+    for name, info in packed.groups.items():
+        calls.clear()
+        group = packed.load_group(store, name)
+        number = int(name.split("-")[1])
+        assert group.files[f"g{number:03d}/f2.bin"] == bytes([number % 251, 2]) * 4500
+        assert len(calls) == len({entry.pack for entry in info.files})

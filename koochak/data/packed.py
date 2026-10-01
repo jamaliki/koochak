@@ -106,6 +106,37 @@ class PackedGroups:
 
         return cls(load_collection(store))
 
+    def load_group(self, store: Store, name: str, *, verify: bool = True) -> LoadedGroup:
+        """Read one group with one range request per pack it occupies.
+
+        A group's files are contiguous in its primary pack, so a group that
+        fits in one pack is a single request; standalone objects are read
+        whole. Every file is checked against its file-table size and SHA256
+        when ``verify`` is set.
+        """
+
+        info = self.groups[name]
+        by_pack: dict[int, list[FileEntry]] = {}
+        for entry in info.files:
+            if entry.pack is not None:
+                by_pack.setdefault(entry.pack, []).append(entry)
+        files: dict[str, bytes] = {}
+        for pack, entries in by_pack.items():
+            begin = min(entry.offset or 0 for entry in entries)
+            end = max((entry.offset or 0) + entry.size for entry in entries)
+            span = store.get(self.collection.packs[pack].key, begin, end - begin)
+            for entry in entries:
+                start = (entry.offset or 0) - begin
+                files[entry.path] = span[start : start + entry.size]
+        for entry in info.files:
+            if entry.pack is None:
+                files[entry.path] = store.get(object_key(entry.path))
+        for entry in info.files:
+            data = files[entry.path]
+            if len(data) != entry.size or (verify and hashlib.sha256(data).hexdigest() != entry.sha256):
+                raise ValueError(f"{entry.path} does not match its file-table size and SHA256")
+        return LoadedGroup(name, MappingProxyType(files), MappingProxyType({e.path: e for e in info.files}))
+
     def plan(
         self,
         *,
