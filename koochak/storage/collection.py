@@ -38,11 +38,14 @@ __all__ = [
     "Collection",
     "FileEntry",
     "PackEntry",
+    "PackRange",
     "load_collection",
     "member_header",
     "object_key",
     "pack_key",
+    "pack_ranges",
     "put_once",
+    "read_pack_range",
     "tar_padding",
     "write_collection",
 ]
@@ -186,6 +189,65 @@ class Collection:
         for entry in self.files:
             if not patterns or any(fnmatchcase(entry.path, pattern) for pattern in patterns):
                 yield entry
+
+
+@dataclass(frozen=True)
+class PackRange:
+    """One read of ``length`` bytes at ``start`` in a pack, covering whole member files."""
+
+    pack: PackEntry
+    start: int
+    length: int
+    members: tuple[FileEntry, ...]
+
+
+def pack_ranges(
+    files: Iterable[FileEntry], packs: Sequence[PackEntry], *, merge_gap: int, max_range: int
+) -> list[PackRange]:
+    """Cover packed ``files`` with few reads, in pack and offset order.
+
+    Neighbours in one pack share a read when the gap between them is at most
+    ``merge_gap`` bytes and the read stays within ``max_range`` bytes.
+    """
+
+    by_pack: Dict[int, list[FileEntry]] = {}
+    for entry in files:
+        if entry.pack is None:
+            raise ValueError(f"{entry.path} is a standalone object, not a pack member")
+        by_pack.setdefault(entry.pack, []).append(entry)
+    ranges: list[PackRange] = []
+    for index, members in sorted(by_pack.items()):
+        members.sort(key=lambda entry: entry.offset)
+        current: list[FileEntry] = []
+        start = end = 0
+        for entry in members:
+            entry_end = entry.offset + entry.size
+            if current and (entry.offset - end > merge_gap or entry_end - start > max_range):
+                ranges.append(PackRange(packs[index], start, end - start, tuple(current)))
+                current = []
+            if not current:
+                start = entry.offset
+            current.append(entry)
+            end = entry_end
+        if current:
+            ranges.append(PackRange(packs[index], start, end - start, tuple(current)))
+    return ranges
+
+
+def read_pack_range(store: Store, part: PackRange, *, verify: bool = True) -> Dict[str, bytes]:
+    """Read one range and split it into its files, checking each file's SHA256 when ``verify``."""
+
+    data = store.get(part.pack.key, part.start, part.length)
+    if len(data) != part.length:
+        raise ValueError(f"{part.pack.key} is shorter than its manifest says")
+    files: Dict[str, bytes] = {}
+    for entry in part.members:
+        begin = entry.offset - part.start
+        blob = data[begin : begin + entry.size]
+        if verify and hashlib.sha256(blob).hexdigest() != entry.sha256:
+            raise ValueError(f"{entry.path} in {part.pack.key} does not match its SHA256")
+        files[entry.path] = blob
+    return files
 
 
 def _canonical_json(value: Any) -> bytes:

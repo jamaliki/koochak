@@ -18,6 +18,9 @@ likes to be read, with few large sequential requests:
   in a seeded shuffle. Passes follow one another inside the stream, so ranks
   never run out of data at different times; ``start`` skips groups for
   resumption without reading the skipped packs.
+- ``PackedGroups.read_files`` reads chosen files on their own, for scattered
+  reads outside the streams (one small sidecar per record, say), where loading
+  whole groups would read far more than is needed.
 - ``PackCache`` keeps recently fetched packs in memory up to a byte budget and
   can be shared by several streams in one process, so data that is cycled
   more often than the rest is not fetched again.
@@ -35,7 +38,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Iterator, Mapping, Optional, Sequence
 
-from ..storage.collection import Collection, FileEntry, object_key
+from ..storage.collection import Collection, FileEntry, object_key, pack_ranges, read_pack_range
 from ..storage.store import Store
 from .shards import Shard, plan_shards
 
@@ -63,6 +66,12 @@ class LoadedGroup:
 
 def _rank(seed: int, epoch: int, key: str) -> bytes:
     return hashlib.sha256(f"{seed}\x00{epoch}\x00{key}".encode("utf-8")).digest()
+
+
+def _checked(data: bytes, entry: FileEntry, verify: bool) -> bytes:
+    if len(data) != entry.size or (verify and hashlib.sha256(data).hexdigest() != entry.sha256):
+        raise ValueError(f"{entry.path} does not match its file-table size and SHA256")
+    return data
 
 
 class PackedGroups:
@@ -136,6 +145,43 @@ class PackedGroups:
             if len(data) != entry.size or (verify and hashlib.sha256(data).hexdigest() != entry.sha256):
                 raise ValueError(f"{entry.path} does not match its file-table size and SHA256")
         return LoadedGroup(name, MappingProxyType(files), MappingProxyType({e.path: e for e in info.files}))
+
+    def read_files(
+        self,
+        store: Store,
+        entries: Sequence[FileEntry],
+        *,
+        verify: bool = True,
+        streams: int = 16,
+        merge_gap: int = 64 * 1024,
+        max_range: int = 16 * 1024 * 1024,
+    ) -> dict[str, bytes]:
+        """Read just these files, keyed by path, with ``streams`` requests in flight.
+
+        Each file costs its own bytes rather than its group's. Files of one
+        pack at most ``merge_gap`` bytes apart share a request; standalone
+        objects are read whole. Every file is checked against its size and,
+        when ``verify`` is set, its SHA256.
+        """
+
+        unique = {entry.path: entry for entry in entries}
+        packed = [entry for entry in unique.values() if entry.pack is not None]
+        reads: list[Callable[[], dict[str, bytes]]] = [
+            lambda part=part: read_pack_range(store, part, verify=verify)
+            for part in pack_ranges(packed, self.collection.packs, merge_gap=merge_gap, max_range=max_range)
+        ]
+        for entry in unique.values():
+            if entry.pack is None:
+                reads.append(lambda entry=entry: {entry.path: _checked(store.get(entry.object), entry, verify)})
+        files: dict[str, bytes] = {}
+        if len(reads) <= 1 or streams <= 1:
+            for read in reads:
+                files.update(read())
+            return files
+        with ThreadPoolExecutor(max_workers=min(streams, len(reads)), thread_name_prefix="koochak-read") as pool:
+            for part in pool.map(lambda read: read(), reads):
+                files.update(part)
+        return files
 
     def plan(
         self,

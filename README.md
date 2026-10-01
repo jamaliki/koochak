@@ -193,7 +193,7 @@ its manifest has committed, and the terminal save waits for any pending one.
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
     - `shards.py` – immutable dataset shards: `ShardWriter`, strict shard indexes, tar (WebDataset-layout) format, and `plan_shards`/`assign_shards` for per-worker reading.
-    - `packed.py` – `PackedGroups`/`GroupStream`: each data-loading worker streams whole packs of a grouped collection (prefetch, SHA256 checks, windowed shuffle, endless passes, resume) and receives its groups' files by path; `PackCache` keeps cycled packs in memory.
+    - `packed.py` – `PackedGroups`/`GroupStream`: each data-loading worker streams whole packs of a grouped collection (prefetch, SHA256 checks, windowed shuffle, endless passes, resume) and receives its groups' files by path; `PackCache` keeps cycled packs in memory; `PackedGroups.read_files` reads scattered single files in parallel.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -773,6 +773,11 @@ a background thread, verifies them against the manifest, and yields their
 groups shuffled within windows of `window` packs. `start=n` skips `n` groups
 without reading the skipped packs. Plans for disjoint selections (`select=`)
 can be combined to balance several kinds of groups separately.
+
+Reads outside the streams, such as a small sidecar per record while the
+dataset is built, belong in one `packed.read_files(store, entries, streams=32)`
+call: it reads only those files' bytes (neighbours share a request), never
+their whole groups, with many requests in flight.
 
 - `koochak.storage.store.Store` holds **write-once** objects under relative
   keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
