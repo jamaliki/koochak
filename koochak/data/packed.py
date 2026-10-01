@@ -18,9 +18,9 @@ likes to be read, with few large sequential requests:
   in a seeded shuffle. Passes follow one another inside the stream, so ranks
   never run out of data at different times; ``start`` skips groups for
   resumption without reading the skipped packs.
-- ``PackedGroups.read_files`` reads chosen files on their own, for scattered
-  reads outside the streams (one small sidecar per record, say), where loading
-  whole groups would read far more than is needed.
+- ``PackedGroups.read_files`` reads chosen files on their own, opening each
+  pack once, for scattered reads outside the streams (an evaluation record's
+  files, say), where loading whole groups would read far more than is needed.
 - ``PackCache`` keeps recently fetched packs in memory up to a byte budget and
   can be shared by several streams in one process, so data that is cycled
   more often than the rest is not fetched again.
@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Iterator, Mapping, Optional, Sequence
 
-from ..storage.collection import Collection, FileEntry, object_key, pack_ranges, read_pack_range
+from ..storage.collection import Collection, FileEntry, PackRange, object_key, pack_ranges, read_pack_ranges
 from ..storage.store import Store
 from .shards import Shard, plan_shards
 
@@ -156,19 +156,23 @@ class PackedGroups:
         merge_gap: int = 64 * 1024,
         max_range: int = 16 * 1024 * 1024,
     ) -> dict[str, bytes]:
-        """Read just these files, keyed by path, with ``streams`` requests in flight.
+        """Read just these files, keyed by path, with ``streams`` packs open at once.
 
-        Each file costs its own bytes rather than its group's. Files of one
-        pack at most ``merge_gap`` bytes apart share a request; standalone
-        objects are read whole. Every file is checked against its size and,
-        when ``verify`` is set, its SHA256.
+        Each file costs its own bytes rather than its group's, and each pack is
+        opened once however many of the files it holds (on object-storage
+        mounts an open can cost more than the reads). Files of one pack at most
+        ``merge_gap`` bytes apart share a request; standalone objects are read
+        whole. Every file is checked against its size and, when ``verify`` is
+        set, its SHA256.
         """
 
         unique = {entry.path: entry for entry in entries}
         packed = [entry for entry in unique.values() if entry.pack is not None]
+        by_pack: dict[str, list[PackRange]] = {}
+        for part in pack_ranges(packed, self.collection.packs, merge_gap=merge_gap, max_range=max_range):
+            by_pack.setdefault(part.pack.key, []).append(part)
         reads: list[Callable[[], dict[str, bytes]]] = [
-            lambda part=part: read_pack_range(store, part, verify=verify)
-            for part in pack_ranges(packed, self.collection.packs, merge_gap=merge_gap, max_range=max_range)
+            lambda parts=parts: read_pack_ranges(store, parts, verify=verify) for parts in by_pack.values()
         ]
         for entry in unique.values():
             if entry.pack is None:

@@ -46,6 +46,7 @@ __all__ = [
     "pack_ranges",
     "put_once",
     "read_pack_range",
+    "read_pack_ranges",
     "tar_padding",
     "write_collection",
 ]
@@ -237,7 +238,27 @@ def pack_ranges(
 def read_pack_range(store: Store, part: PackRange, *, verify: bool = True) -> Dict[str, bytes]:
     """Read one range and split it into its files, checking each file's SHA256 when ``verify``."""
 
-    data = store.get(part.pack.key, part.start, part.length)
+    return _split(part, store.get(part.pack.key, part.start, part.length), verify)
+
+
+def read_pack_ranges(store: Store, parts: Sequence[PackRange], *, verify: bool = True) -> Dict[str, bytes]:
+    """Read several ranges of one pack through a single open handle.
+
+    On object-storage mounts opening a file can cost far more than reading a
+    few kilobytes from it, so scattered files of one pack share one open.
+    """
+
+    if len({part.pack.key for part in parts}) != 1:
+        raise ValueError("read_pack_ranges reads ranges of exactly one pack")
+    files: Dict[str, bytes] = {}
+    with store.open(parts[0].pack.key) as handle:
+        for part in sorted(parts, key=lambda item: item.start):
+            handle.seek(part.start)
+            files.update(_split(part, handle.read(part.length), verify))
+    return files
+
+
+def _split(part: PackRange, data: bytes, verify: bool) -> Dict[str, bytes]:
     if len(data) != part.length:
         raise ValueError(f"{part.pack.key} is shorter than its manifest says")
     files: Dict[str, bytes] = {}

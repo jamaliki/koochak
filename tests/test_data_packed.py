@@ -171,18 +171,46 @@ def test_read_files_reads_only_the_requested_bytes(tmp_path: Path, monkeypatch) 
         calls.append((key, offset, length))
         return real_get(self, key, offset, length)
 
+    opened, reads = [], []
+    real_open = LocalStore.open
+
+    class Counted:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def seek(self, offset):
+            return self.handle.seek(offset)
+
+        def read(self, length):
+            reads.append(length)
+            return self.handle.read(length)
+
+    def counted_open(self, key):
+        opened.append(key)
+        return Counted(real_open(self, key))
+
     monkeypatch.setattr(LocalStore, "get", counted)
+    monkeypatch.setattr(LocalStore, "open", counted_open)
     wanted = [entries[f"g{g:03d}/f1.bin"] for g in range(6)]
     files = packed.read_files(store, wanted, merge_gap=0, streams=4)
     assert files == {f"g{g:03d}/f1.bin": bytes([g, 1]) * 1500 for g in range(6)}
-    assert len(calls) == 6 and all(length == 3000 for _, _, length in calls)
+    # One open per pack, one exact read per file, no whole-object gets.
+    assert sorted(opened) == sorted({packed.collection.packs[e.pack].key for e in wanted})
+    assert len(set(opened)) < 6 and reads == [3000] * 6 and not calls
 
-    calls.clear()
+    opened.clear(), reads.clear()
     neighbours = [entries["g002/f1.bin"], entries["g002/f2.bin"], entries["g002/f1.bin"]]
     assert sorted(packed.read_files(store, neighbours, merge_gap=1024)) == ["g002/f1.bin", "g002/f2.bin"]
-    assert len(calls) == 1 and calls[0][2] < 2 * 3000 + 1024
+    assert len(opened) == 1 and len(reads) == 1 and reads[0] < 2 * 3000 + 1024
 
     monkeypatch.setattr(LocalStore, "get", real_get)
+    monkeypatch.setattr(LocalStore, "open", real_open)
     target = entries["g003/f1.bin"]
     pack = Path(store.local_path(packed.collection.packs[target.pack].key))
     pack.chmod(0o644)
