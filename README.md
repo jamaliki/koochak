@@ -772,8 +772,8 @@ object-storage mount, and the stores file carries the site-specific settings.
   (`O_EXCL` create, published on close); `fsync=False` and
   `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
   close asynchronously. `read_settle_seconds` retries opening files that fail
-  with `ETIME`, which some object-storage mounts return for minutes after
-  another node closed the file.
+  with `ETIME` or `EIO`, which some object-storage mounts return for minutes
+  after another node closed the file.
 - `StoreProfile` records a store's measured performance (per-request cost,
   cold bandwidth per stream, useful concurrency, whether byte ranges of one
   object scale, part size, whether listing is acceptable). `LocalStore(...,

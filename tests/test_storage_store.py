@@ -243,3 +243,33 @@ def test_reads_wait_out_files_still_settling_on_other_nodes(tmp_path, monkeypatc
     monkeypatch.setattr(store_lib, "open", missing, raising=False)
     with pytest.raises(FileNotFoundError):
         settling.get("k")
+
+
+def test_settling_reads_also_wait_out_io_errors_but_not_forever(tmp_path, monkeypatch):
+    settling = LocalStore(tmp_path, read_settle_seconds=5.0)
+    settling.put("k", b"payload")
+    real_open = open
+    calls = []
+
+    def committing_open(path, mode="r", *args, **kwargs):
+        calls.append(path)
+        if len(calls) < 3:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib, "open", committing_open, raising=False)
+    monkeypatch.setattr(store_lib.time, "sleep", lambda _seconds: None)
+    assert settling.get("k") == b"payload"
+    assert len(calls) == 3
+
+    def broken_open(path, mode="r", *args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(store_lib, "open", broken_open, raising=False)
+    impatient = LocalStore(tmp_path)
+    with pytest.raises(OSError):
+        impatient.get("k")
+    clock = iter(range(0, 10_000, 3))
+    monkeypatch.setattr(store_lib.time, "monotonic", lambda: next(clock))
+    with pytest.raises(OSError):
+        settling.get("k")
