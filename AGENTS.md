@@ -26,9 +26,41 @@ This doc tracks incremental design decisions and changes from the initial design
   - The loop shards the dataset when `config.ddp=True`, and places `barrier()` calls around checkpointing. Only rank 0 writes checkpoints.
 
 - Storage
-  - `koochak/storage/checkpoint.py` – atomic save/load, publication manifests,
-    `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` convenience
-    pointer and prunes checkpoint/manifest pairs with `keep_last_k`.
+  - `koochak/storage/checkpoint.py` – checkpoints published through a `Store`
+    (`checkpoint_store(location)` for a directory or `scheme://` URI,
+    `publish`: create-only checkpoint, then its ready manifest; pruning deletes
+    manifests first), optional `BackgroundPublisher` (one publication in
+    flight), load, `resolve_auto_resume`, `latest`, `best`. Directory stores
+    keep a `latest.pt` symlink; write-once stores get none. Resume raises I/O
+    errors other than a missing file instead of rolling back.
+  - `train.checkpoint_dir` (default `out_dir`) separates checkpoints from logs;
+    `train.checkpoint_async` publishes periodic checkpoints in the background
+    and fires `on_checkpoint` after the manifest commits.
+  - `koochak/storage/store.py` – write-once `Store` protocol (`get`/`open`/
+    create-only `put`/`stat`/`list`/`delete`/`local_path`), `LocalStore`
+    (`publish="link"|"exclusive"`, optional fsync and read-back settling), and
+    `open_store`/`register_store` with `koochak.stores` entry points for
+    private backends. Checkpoints are published through it (phase 5 of
+    `specs/storage-abstraction.md`, without parts or replication yet).
+  - `koochak/storage/stores_file.py` – named schemes from a private YAML
+    stores file (`$KOOCHAK_STORES` or `~/.config/koochak/stores.yaml`): roots,
+    publish modes, profiles. Replaces the need for private Python plugins;
+    never commit a real stores file (only `examples/storage/stores.example.yaml`).
+  - `StoreProfile` (in `store.py`) records measured store performance;
+    `profile_of` and `min_object_bytes` feed defaults to layers above.
+  - `koochak/storage/transfer.py` – `copy_objects`: the single path for moving
+    bytes between stores (parallel items, range-parallel reads, in-flight
+    SHA256 checks, resume by skipping complete targets, fail-fast).
+  - `koochak/storage/probe.py` – `python -m koochak.storage.probe` reports
+    POSIX semantics, recommended `LocalStore` settings and `StoreProfile`,
+    latency, cold/cached/range-parallel throughput, and optional checkpoint
+    and multi-process dataset phases.
+
+- Datasets
+  - `koochak/data/shards.py` – `ShardWriter` (commit-last index), strict shard
+    indexes, deterministic WebDataset-layout `TAR` format, and pure
+    `plan_shards`/`assign_shards` that deal whole shards to every data-loading
+    worker before reading.
 
 - Logging
   - `koochak/logging/stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
@@ -39,8 +71,10 @@ This doc tracks incremental design decisions and changes from the initial design
     deterministic artifact evidence after their ready manifest exists; full
     config objects and checkpoint contents never enter coordination events.
     Scruffy checkpoint acknowledgement is opt-in and synchronous only for
-    strict artifact events; configured rejection/timeout fails closed, while
-    the default telemetry path remains asynchronous and non-fatal.
+    strict artifact events; configured rejection/conflict fails closed, while
+    an unresolved timeout is reconciled without republishing and becomes a
+    checkpoint-safe retryable result after the numbered checkpoint is durable.
+    The default telemetry path remains asynchronous and non-fatal.
   - Stdout and W&B record resolved config at `on_train_start`; CSV/JSONL remain metric logs.
 
 - Jobs
@@ -181,6 +215,14 @@ Done recently
 - Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
 
 Open TODOs (authoritative)
+- Storage abstraction (`specs/storage-abstraction.md`)
+  - Phase 1: write-once `Store`, `LocalStore`, pluggable schemes, shard index/writer/plan, storage probe [DONE]
+  - Phase 2: `StoreProfile`, `copy_objects` transfer engine, probe cold/cached/range-parallel measurements [DONE]
+  - Phase 3: manifested collections and `python -m koochak.data` — `archive` (grouped packs via `--groups`, `--layout objects`, resumable), `pull` (subsets, verified, mode/mtime restored), `verify`, `ls` [DONE]; `--files-from` and `--delete-source` (move after deep verification) [DONE]; `warm`, `stage` [TODO]
+  - Phase 4: readers — `PackedTree` (path-addressed range reads + node-local cache), `ShardedStream` IterableDataset (bounded prefetch, verify, windowed shuffle, infinite per-worker streams, resume from `next_step`), staging [TODO]
+  - Phase 5: checkpoints via `Store` — `train.checkpoint_dir` URIs, create-only publish with manifest last, manifest-first pruning, background publication (`train.checkpoint_async`), settling reads on resume, no `latest.pt` on write-once stores [DONE]; parallel parts, per-rank sharded state, replication between tiers, dropping `latest.pt` everywhere [TODO]
+  - Phase 6: artifact ready manifests via `Store.put` instead of hard links; coordinate URI paths with the artifact-gate consumer [TODO]
+  - Keep mutable run state (JSONL/CSV logs, compiler caches) off write-once object-storage mounts; they append [NOTE]
 - CLI: support entry kwargs [TODO]
   - Extend schema to include `entry.model_args`, `entry.model_kwargs`, `entry.dataset_args/kwargs`, `entry.eval_dataset_args/kwargs`.
   - Use OmegaConf-resolved values; pass args/kwargs to entry callables in `koochak.cli.train`.

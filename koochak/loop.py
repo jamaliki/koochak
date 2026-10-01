@@ -185,6 +185,8 @@ class _TrainSettings:
     rank_timing_extra_keys: tuple[str, ...]
     out_dir: str
     keep_last_k: int
+    checkpoint_dir: str
+    checkpoint_async: bool
     prefetch_batches: int
     prefetch_pipeline: str
     prefetch_threaded: bool
@@ -217,6 +219,12 @@ class _TrainSettings:
             not ddp_bucket_cap_list or any(value <= 0 for value in ddp_bucket_cap_list)
         ):
             raise ValueError("train.ddp_bucket_cap_mb_list must contain positive values")
+        out_dir = canonical_dir(get(train_cfg, "out_dir", "./runs/exp0"))
+        checkpoint_dir = get(train_cfg, "checkpoint_dir", None)
+        if checkpoint_dir is None:
+            checkpoint_dir = out_dir
+        elif "://" not in str(checkpoint_dir):
+            checkpoint_dir = canonical_dir(checkpoint_dir)
         return cls(
             ddp_enabled=bool(get(train_cfg, "ddp", False)),
             shard_dataset_enabled=bool(get(train_cfg, "shard_dataset", False)),
@@ -238,8 +246,10 @@ class _TrainSettings:
             rank_timing_extra_keys=tuple(
                 str(k) for k in (get(train_cfg, "rank_timing_keys", ()) or ())
             ),
-            out_dir=canonical_dir(get(train_cfg, "out_dir", "./runs/exp0")),
+            out_dir=out_dir,
             keep_last_k=int(get(train_cfg, "keep_last_k", 3)),
+            checkpoint_dir=str(checkpoint_dir),
+            checkpoint_async=bool(get(train_cfg, "checkpoint_async", False)),
             prefetch_batches=int(get(train_cfg, "prefetch_batches", 0)),
             prefetch_pipeline=str(get(train_cfg, "prefetch_pipeline", "single")),
             prefetch_threaded=bool(get(train_cfg, "prefetch_threaded", False)),
@@ -525,6 +535,15 @@ class _TrainLoop:
         self.rank = dist_lib.rank()
         self.world_size = dist_lib.world_size()
         self.is_rank0 = dist_lib.rank0()
+        self.checkpoint_store = checkpoint_lib.checkpoint_store(self.settings.checkpoint_dir)
+        # Only rank 0 writes checkpoints, so only rank 0 publishes in the background.
+        self.checkpoint_publisher: Optional[checkpoint_lib.BackgroundPublisher] = (
+            checkpoint_lib.BackgroundPublisher(
+                self.checkpoint_store, keep_last_k=self.settings.keep_last_k
+            )
+            if self.settings.checkpoint_async and self.is_rank0
+            else None
+        )
 
         self.scaler = make_scaler(self.settings.amp_mode)
         self.cfg_json = config_lib.as_dict(config_json if config_json is not None else train_config)
@@ -767,7 +786,7 @@ class _TrainLoop:
                 self.ctx["auto_resume_selected"] = True
                 return self.auto_resume_path
             return None
-        selection = checkpoint_lib.resolve_auto_resume(self.settings.out_dir)
+        selection = checkpoint_lib.resolve_auto_resume(self.checkpoint_store)
         if selection is not None:
             path, self.checkpoint_dict = selection
             self.ctx["auto_resume_selected"] = True
@@ -910,14 +929,45 @@ class _TrainLoop:
         next_step: Optional[int] = None,
         metrics: Optional[Dict[str, Any]] = None,
         emit_hook: bool = True,
+        background: bool = False,
     ) -> tuple[str, Dict[str, Any]]:
+        """Serialize a checkpoint now and publish it to ``train.checkpoint_dir``.
+
+        With ``background`` (and ``train.checkpoint_async``) the publication runs
+        on a background thread and ``on_checkpoint`` fires once its manifest has
+        committed; the returned path does not exist before then.  Any earlier
+        background publication is drained first, so at most one is in flight.
+        """
+
         ckpt = self._build_checkpoint(step, next_step=next_step, metrics=metrics)
         os.makedirs(self.settings.out_dir, exist_ok=True)
-        path = os.path.join(self.settings.out_dir, f"step{step:09d}.pt")
-        saved_path = checkpoint_lib.save(ckpt, path, keep_last_k=self.settings.keep_last_k)
+        name = f"step{step:09d}.pt"
+        data = checkpoint_lib.serialize(ckpt)
+        self._drain_checkpoint()
+        if background and self.checkpoint_publisher is not None:
+            path = self.checkpoint_publisher.submit(name, data, (ckpt, step, emit_hook))
+            return path, ckpt
+        saved_path = checkpoint_lib.publish(
+            self.checkpoint_store, name, data, keep_last_k=self.settings.keep_last_k
+        )
         if emit_hook:
             _emit(self.hooks, "on_checkpoint", saved_path, ckpt, self._step_ctx(step))
         return saved_path, ckpt
+
+    def _announce_checkpoint(self, finished: Optional[tuple[str, Any]]) -> None:
+        if finished is None:
+            return
+        path, (ckpt, step, emit_hook) = finished
+        if emit_hook:
+            _emit(self.hooks, "on_checkpoint", path, ckpt, self._step_ctx(step))
+
+    def _poll_checkpoint(self) -> None:
+        if self.checkpoint_publisher is not None:
+            self._announce_checkpoint(self.checkpoint_publisher.poll())
+
+    def _drain_checkpoint(self) -> None:
+        if self.checkpoint_publisher is not None:
+            self._announce_checkpoint(self.checkpoint_publisher.wait())
 
     # ------------------------------------------------------------------ inner loop
 
@@ -1288,8 +1338,8 @@ class _TrainLoop:
             # Persist it before announcing completion so downstream consumers
             # can immediately resolve the final immutable artifact.
             self._gather_checkpoint_rng = True
-            terminal_path = os.path.join(
-                self.settings.out_dir, f"step{next_step:09d}.pt"
+            terminal_path = checkpoint_lib.checkpoint_path(
+                self.checkpoint_store, f"step{next_step:09d}.pt"
             )
             if self.is_rank0:
                 terminal_path, self.final_ckpt = self._save_checkpoint(
@@ -1325,6 +1375,8 @@ class _TrainLoop:
             raise
         finally:
             self.evacuation.uninstall()
+            if self.checkpoint_publisher is not None:
+                self.checkpoint_publisher.close()
             close_iterator = getattr(it, "close", None) if it is not None else None
             if callable(close_iterator):
                 close_iterator()
@@ -1445,8 +1497,9 @@ class _TrainLoop:
 
         checkpoint_start = self._profile_start()
         if step > 0 and (step % self.settings.ckpt_every == 0) and self.is_rank0:
-            _, ckpt = self._save_checkpoint(step)
+            _, ckpt = self._save_checkpoint(step, background=self.settings.checkpoint_async)
             self.final_ckpt = ckpt
+        self._poll_checkpoint()
         self._profile_add(
             stats.profile_timing_totals,
             "profile_loop_checkpoint_time_s",

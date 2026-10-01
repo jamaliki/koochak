@@ -22,6 +22,10 @@ def test_repository_has_no_private_cluster_strings() -> None:
         "login." + "sand" + "pit",
         "/mnt/" + "lustre/users/",
         "kiarash-" + "eitgbi",
+        "/mnt/" + "user-data",
+        "gbi-" + "shared",
+        "eit-" + "gbi",
+        "llu" + "xio",
     ]
 
     for token in forbidden:
