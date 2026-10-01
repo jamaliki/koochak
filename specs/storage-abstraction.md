@@ -245,9 +245,11 @@ which tiny sidecars are folded into one table.
   packs. Groups that spill into another pack, and standalone objects, are
   read with range requests. `PackCache` keeps recently used packs in memory
   for data cycled faster than the rest. Per-record loaders read a group's
-  files by their original paths.
-- `PackedTree`: random access to single files of a `packed` collection
-  (`read(path)` as one range read, with a node-local cache).
+  files by their original paths. `PackedGroups.read_files` reads chosen
+  files on their own (one range per file or run of neighbours, in parallel)
+  for scattered reads outside the streams, such as one small sidecar per
+  record while a dataset is built.
+- `PackedTree`: a node-local cache in front of single-file reads.
 - `ShardedStream`: streaming reads of a `shards` collection (below).
 - Staging copies a node's owned shards or packs to faster storage before
   training.

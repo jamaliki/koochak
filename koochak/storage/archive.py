@@ -40,11 +40,14 @@ from .collection import (
     TAR_END,
     FileEntry,
     PackEntry,
+    PackRange,
     load_collection,
     member_header,
     object_key,
     pack_key,
+    pack_ranges,
     put_once,
+    read_pack_range,
     tar_padding,
     write_collection,
 )
@@ -687,37 +690,6 @@ def _delete_sources(root: str, entries: Sequence[FileEntry]) -> tuple[int, tuple
 # ---------------------------------------------------------------- pull
 
 
-@dataclass(frozen=True)
-class _Range:
-    pack: PackEntry
-    start: int
-    length: int
-    members: tuple[FileEntry, ...]
-
-
-def _ranges(files: Sequence[FileEntry], packs: Sequence[PackEntry], merge_gap: int, max_range: int) -> List[_Range]:
-    by_pack: Dict[int, List[FileEntry]] = {}
-    for entry in files:
-        by_pack.setdefault(entry.pack, []).append(entry)  # type: ignore[arg-type]
-    ranges: List[_Range] = []
-    for index, members in sorted(by_pack.items()):
-        members.sort(key=lambda entry: entry.offset)
-        current: List[FileEntry] = []
-        start = end = 0
-        for entry in members:
-            entry_end = entry.offset + entry.size
-            if current and (entry.offset - end > merge_gap or entry_end - start > max_range):
-                ranges.append(_Range(packs[index], start, end - start, tuple(current)))
-                current = []
-            if not current:
-                start = entry.offset
-            current.append(entry)
-            end = entry_end
-        if current:
-            ranges.append(_Range(packs[index], start, end - start, tuple(current)))
-    return ranges
-
-
 def _restore_metadata(target: Store, entry: FileEntry) -> None:
     path = target.local_path(entry.path)
     if path is not None:
@@ -725,16 +697,9 @@ def _restore_metadata(target: Store, entry: FileEntry) -> None:
         os.utime(path, ns=(entry.mtime_ns, entry.mtime_ns))
 
 
-def _pull_range(source: Store, target: Store, part: _Range) -> int:
-    data = source.get(part.pack.key, part.start, part.length)
-    if len(data) != part.length:
-        raise ValueError(f"{part.pack.key} is shorter than its manifest says")
-    for entry in part.members:
-        begin = entry.offset - part.start
-        blob = data[begin : begin + entry.size]
-        if hashlib.sha256(blob).hexdigest() != entry.sha256:
-            raise ValueError(f"{entry.path} in {part.pack.key} does not match its SHA256")
-        target.put(entry.path, blob)
+def _pull_range(source: Store, target: Store, part: PackRange) -> int:
+    for path, blob in read_pack_range(source, part).items():
+        target.put(path, blob)
     return sum(entry.size for entry in part.members)
 
 
@@ -778,7 +743,9 @@ def pull(
             streams=streams,
         )
         copied_bytes += report.bytes_copied
-    ranges = _ranges([entry for entry in todo if entry.pack is not None], collection.packs, merge_gap, max_range)
+    ranges = pack_ranges(
+        [entry for entry in todo if entry.pack is not None], collection.packs, merge_gap=merge_gap, max_range=max_range
+    )
     with ThreadPoolExecutor(max_workers=max(1, streams)) as pool:
         futures = [pool.submit(_pull_range, source, target, part) for part in ranges]
         for done, future in enumerate(as_completed(futures), start=1):

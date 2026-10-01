@@ -159,3 +159,50 @@ def test_load_group_reads_one_group_with_one_range_request(tmp_path: Path, monke
         number = int(name.split("-")[1])
         assert group.files[f"g{number:03d}/f2.bin"] == bytes([number % 251, 2]) * 4500
         assert len(calls) == len({entry.pack for entry in info.files})
+
+
+def test_read_files_reads_only_the_requested_bytes(tmp_path: Path, monkeypatch) -> None:
+    store, packed = build(tmp_path, groups=6, files_per_group=4, size=3000, pack_bytes=40_000)
+    entries = {entry.path: entry for entry in packed.collection.files}
+    calls = []
+    real_get = LocalStore.get
+
+    def counted(self, key, offset=0, length=None):
+        calls.append((key, offset, length))
+        return real_get(self, key, offset, length)
+
+    monkeypatch.setattr(LocalStore, "get", counted)
+    wanted = [entries[f"g{g:03d}/f1.bin"] for g in range(6)]
+    files = packed.read_files(store, wanted, merge_gap=0, streams=4)
+    assert files == {f"g{g:03d}/f1.bin": bytes([g, 1]) * 1500 for g in range(6)}
+    assert len(calls) == 6 and all(length == 3000 for _, _, length in calls)
+
+    calls.clear()
+    neighbours = [entries["g002/f1.bin"], entries["g002/f2.bin"], entries["g002/f1.bin"]]
+    assert sorted(packed.read_files(store, neighbours, merge_gap=1024)) == ["g002/f1.bin", "g002/f2.bin"]
+    assert len(calls) == 1 and calls[0][2] < 2 * 3000 + 1024
+
+    monkeypatch.setattr(LocalStore, "get", real_get)
+    target = entries["g003/f1.bin"]
+    pack = Path(store.local_path(packed.collection.packs[target.pack].key))
+    pack.chmod(0o644)
+    data = bytearray(pack.read_bytes())
+    data[target.offset + 10] ^= 0xFF
+    pack.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="SHA256"):
+        packed.read_files(store, [target])
+    assert len(packed.read_files(store, [target], verify=False)[target.path]) == 3000
+
+
+def test_read_files_reads_standalone_objects_whole(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "small.bin").write_bytes(b"s" * 100)
+    (source / "large.bin").write_bytes(b"L" * 50_000)
+    store = LocalStore(tmp_path / "collection")
+    archive(LocalStore(source), store, groups={"small.bin": ("g0", 0), "large.bin": ("g0", 0)},
+            pack_bytes=8192, object_bytes=8192)
+    packed = PackedGroups.load(store)
+    assert {entry.path: entry.object is not None for entry in packed.collection.files} == {
+        "large.bin": True, "small.bin": False}
+    assert packed.read_files(store, packed.collection.files) == {"small.bin": b"s" * 100, "large.bin": b"L" * 50_000}
