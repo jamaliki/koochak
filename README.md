@@ -777,7 +777,9 @@ can be combined to balance several kinds of groups separately.
 Reads outside the streams, such as a small sidecar per record while the
 dataset is built, belong in one `packed.read_files(store, entries, streams=32)`
 call: it reads only those files' bytes (neighbours share a request), never
-their whole groups, with many requests in flight.
+their whole groups, and opens each pack once. On an object-storage mount an
+open can take a second or more and the mount admits only a few per second, so
+opening once per pack rather than once per file is several times faster.
 
 - `koochak.storage.store.Store` holds **write-once** objects under relative
   keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
