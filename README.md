@@ -48,8 +48,12 @@ standalone Slurm transport"]
 verify digests · preflight · exec"]
     loop(["training_loop()
 iterables · DDP · AMP · hooks"])
-    outputs[("checkpoints · ready manifests
+    logs[("train.out_dir
 metrics · logs · events")]
+    checkpoints[("train.checkpoint_dir
+numbered checkpoints · ready manifests")]
+    stores["Stores file
+private scheme:// → root · publish mode"]
 
     config --> prepare
     profile --> prepare
@@ -59,7 +63,10 @@ metrics · logs · events")]
     route -->|standalone job| pazuzu
     scruffy --> runner
     pazuzu --> runner
-    runner --> loop --> outputs
+    runner --> loop
+    loop --> logs
+    loop --> checkpoints
+    stores -.->|resolves scheme://| checkpoints
 
     classDef input fill:#F4F0FF,stroke:#6D5BD0,color:#241C3A,stroke-width:1.5px;
     classDef core fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
@@ -69,13 +76,13 @@ metrics · logs · events")]
     classDef runtime fill:#E8F0FF,stroke:#4977B8,color:#172D4D,stroke-width:1.5px;
     classDef result fill:#F4EDC9,stroke:#9C7B21,color:#352B10,stroke-width:1.5px;
 
-    class config,profile,script input;
+    class config,profile,script,stores input;
     class prepare,bundle core;
     class route choice;
     class scruffy scruffyNode;
     class pazuzu pazuzuNode;
     class runner,loop runtime;
-    class outputs result;
+    class logs,checkpoints result;
     linkStyle default stroke:#88859A,stroke-width:1.5px;
 ```
 
@@ -83,7 +90,9 @@ The backend choice does not alter the prepared workload. Both paths invoke the
 same runner, which rejects configuration or environment drift before importing
 training code. Once admitted, `training_loop()` remains the small functional
 core; checkpointing, logging, distributed execution, and workload events attach
-through focused helpers and hooks.
+through focused helpers and hooks. Logs stay in `out_dir`, while checkpoints go
+to `checkpoint_dir`, which can be a write-once object store named in a private
+stores file.
 
 ### Inside `training_loop()`
 
@@ -97,7 +106,7 @@ iterables · train_cfg · scheduler"]
 hooks · eval_fn · checkpoint_dict"]
 
     setup["Setup once
-device → shard → start hook → compile → DDP → resume"]
+device → shard → start hook → compile → DDP → resume from the checkpoint store"]
     batch["Next batch
 optional CUDA prefetch + prepare_batch_fn"]
     micro["Micro-step × grad_accum
@@ -112,9 +121,13 @@ metrics · rank timing · hooks"]
     health["Protect
 GPU health watchdog"]
     periodic["Persist
-evaluation · atomic checkpoint"]
-    publication["When checkpointed
-fsync .pt → .ready.json → typed artifact event"]
+evaluation · serialize numbered checkpoint"]
+    background["checkpoint_async
+hand off · one publication in flight"]
+    publication["Publish through the checkpoint store
+create-only .pt → .ready.json → prune manifest-first"]
+    announce["After commit
+on_checkpoint · typed artifact event"]
     done{"max_steps reached
 or data exhausted?"}
     result[["Resume-ready checkpoint
@@ -124,7 +137,10 @@ model · optimizer · RNG · EMA · config"]]
     data --> setup
     extensions --> setup
     setup --> batch --> micro --> gradients --> update
-    update --> hooks --> health --> periodic --> publication --> done
+    update --> hooks --> health --> periodic
+    periodic -->|synchronous| publication --> announce --> done
+    periodic -->|checkpoint_async| background --> done
+    background -.->|background thread| publication
     done -->|next step| batch
     done -->|finished| result
 
@@ -142,7 +158,7 @@ model · optimizer · RNG · EMA · config"]]
     class batch dataNode;
     class micro,gradients compute;
     class update updateNode;
-    class hooks,health,periodic,publication boundary;
+    class hooks,health,periodic,background,publication,announce boundary;
     class done choice;
     class result resultNode;
     linkStyle default stroke:#88859A,stroke-width:1.5px;
@@ -152,7 +168,9 @@ The user-defined `step_fn` owns model semantics and returns a loss plus optional
 metrics. Koochak owns the repetitive mechanics around it. Optional behavior is
 composed through functions and event hooks rather than subclasses, while the
 returned checkpoint captures everything required to resume the optimization
-state deterministically.
+state deterministically. With `train.checkpoint_async`, the loop keeps training
+while a background thread publishes the checkpoint; `on_checkpoint` fires once
+its manifest has committed, and the terminal save waits for any pending one.
 
 ## Goals
 
@@ -175,6 +193,7 @@ state deterministically.
     - `iterable.py` – `to_device(batch, device)`, `cycle(iterable)`, and `take(iterable, n)`.
     - `sharding.py` – `shard_dataset(..., mode=...)`, `shard_iterable_dataset`, `shard_map_dataset`.
     - `shards.py` – immutable dataset shards: `ShardWriter`, strict shard indexes, tar (WebDataset-layout) format, and `plan_shards`/`assign_shards` for per-worker reading.
+    - `packed.py` – `PackedGroups`/`GroupStream`: each data-loading worker streams whole packs of a grouped collection (prefetch, SHA256 checks, windowed shuffle, endless passes, resume) and receives its groups' files by path; `PackCache` keeps cycled packs in memory; `PackedGroups.read_files` reads scattered single files in parallel.
   - `logging/`
     - `stdout.py` – compact TSV stdout logger + `make_stdout_hooks()`.
     - `csv.py` – `CSVLogger` and `make_csv_hooks(path)`.
@@ -191,7 +210,7 @@ state deterministically.
     - `build.py` – tiny builders for optimizers/schedulers (supports cosine, step, plateau, cosine_warmup).
   - `storage/`
     - `artifact.py` – immutable file/directory ready manifests with deterministic ordering, size, SHA256, provenance, and counts.
-    - `checkpoint.py` – checkpoint save/load (atomic), `latest`, `best`.
+    - `checkpoint.py` – checkpoint publication through a `Store` (manifest last, optional background thread), load, auto-resume, `latest`, `best`.
     - `atomic.py` – atomic file writer.
     - `fs.py` – small FS utilities (`mkdir_p`, `latest`, `best`).
     - `pruning.py` – `prune_keep_last_k(dir, pattern, k)`.
@@ -310,7 +329,7 @@ logging: { csv_path: ..., jsonl_path: ... }
 wandb: { enabled: false, project: ... }
 ```
 
-The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the highest valid published numbered checkpoint under `train.out_dir` (or starts cleanly), and calls `training_loop` with `train_cfg`. Pass `--resume none` to disable this lookup.
+The CLI loads config via `koochak.config.load_config`, prints the summary, builds the optimizer/scheduler from `optim`, attaches stdout/CSV/JSONL/W&B hooks, resumes from the highest valid published numbered checkpoint in `train.checkpoint_dir` (default `train.out_dir`; or starts cleanly), and calls `training_loop` with `train_cfg`. Pass `--resume none` to disable this lookup.
 
 ## Reproducible Job Submission
 
@@ -604,17 +623,46 @@ Koochak enforces them only when a later attempt finds durable checkpoint state.
   `next_step=N`; periodic checkpoints retain their zero-based update index and
   record `next_step=step+1`. This keeps filenames and resume cursors
   unambiguous when a run is extended.
-- `koochak.storage.checkpoint.save(ckpt, path, keep_last_k)` atomically installs
-  and syncs the numbered checkpoint, then atomically publishes
-  `<path>.ready.json` with its stable artifact ID, byte size, and SHA256. It
-  keeps only the last `k` checkpoint/manifest pairs and maintains `latest.pt`.
+- Checkpoints go to `train.checkpoint_dir`, which defaults to `train.out_dir`
+  and may be a directory or a named `scheme://` URI from the stores file (see
+  below). Logs, W&B files, and GPU-health summaries always stay in `out_dir`:
+  they append, which write-once object-storage mounts refuse. So a run can keep
+  its logs on a POSIX filesystem and its checkpoints on object storage:
+
+  ```yaml
+  train:
+    out_dir: /posix/runs/exp0              # logs
+    checkpoint_dir: archive://runs/exp0    # checkpoints, via the stores file
+    checkpoint_async: true
+  ```
+
+- Every save goes through the checkpoint store
+  (`koochak.storage.checkpoint.publish(store, name, data, keep_last_k=k)`): the
+  numbered checkpoint is written create-only and synced, then
+  `<path>.ready.json` commits it with its stable artifact ID, byte size, and
+  SHA256. Re-saving an existing step first uncommits it (manifest, then file).
+  Pruning keeps the last `k` pairs and deletes each manifest before its
+  checkpoint. Directory stores also keep a `latest.pt` symlink; write-once
+  stores (`publish: exclusive`) get none, because the fallback would be a full
+  copy of every checkpoint. `save(ckpt, path, keep_last_k)` wraps `publish` for
+  a directory path.
+- `train.checkpoint_async: true` serializes each periodic checkpoint at once and
+  publishes it on a background thread, with at most one publication in flight,
+  so rank 0 does not stall on slow storage. `on_checkpoint` fires when the
+  manifest has committed (the hook's tensors are live by then; read the saved
+  file for exact values), a failed background publication fails training on
+  its next step, and terminal, evacuation, and GPU-health checkpoints drain the
+  pending publication and then save synchronously. Code that reads a checkpoint
+  file as soon as `_save_checkpoint` returns needs synchronous saves.
 - Bind Scruffy dependencies to the immutable numbered artifact ID, such as
   `checkpoint/step000100000.pt`, never to the mutable `latest.pt` alias.
 - `koochak.storage.checkpoint.load(path)` loads to CPU.
-- `koochak.storage.checkpoint.latest(dir)` returns `latest.pt` if present or the most recent step checkpoint.
-- `koochak.storage.checkpoint.highest_valid_published(dir)` selects the highest numbered checkpoint whose exact ready manifest, path, size, SHA256, and resume cursor validate. It never treats `latest.pt`, a directory, or incomplete/corrupt scaffolding as evidence.
-- `koochak.storage.checkpoint.resolve_auto_resume(dir)` returns `(path, checkpoint)` from the same single payload read whose manifest, path, size, SHA256, and cursor were validated. Use `checkpoint["next_step"]` before constructing a dataset, then pass both values as `checkpoint_dict` and `auto_resume_path` to `training_loop(..., resume="auto")` to retain selection events and typed artifact republishing.
-- `koochak.storage.checkpoint.best(dir, key)` selects the lowest metric across checkpoints.
+- `koochak.storage.checkpoint.latest(location)` returns `latest.pt` if present or the most recent step checkpoint.
+- `koochak.storage.checkpoint.highest_valid_published(location)` selects the highest numbered checkpoint whose exact ready manifest, path, size, SHA256, and resume cursor validate. It never treats `latest.pt`, a directory, or incomplete/corrupt scaffolding as evidence. Reads go through the checkpoint store, so a mount with `read_settle_seconds` waits out files another node has just closed. A missing or invalid candidate falls back to a lower one; any other I/O error is raised, so an unreadable newest checkpoint never silently rolls training back.
+- `koochak.storage.checkpoint.resolve_auto_resume(location)` returns `(path, checkpoint)` from the same single payload read whose manifest, path, size, SHA256, and cursor were validated. Use `checkpoint["next_step"]` before constructing a dataset, then pass both values as `checkpoint_dict` and `auto_resume_path` to `training_loop(..., resume="auto")` to retain selection events and typed artifact republishing.
+- `koochak.storage.checkpoint.best(location, key)` selects the lowest metric across checkpoints.
+- Every `location` above is a directory, a `scheme://` URI, or a `Store`
+  (`checkpoint_store(location)` resolves it).
 
 ### Safe evacuation and resume
 
@@ -645,8 +693,93 @@ DDP compatibility:
 
 Koochak is moving its persistence onto one narrow interface so the same code
 runs on parallel filesystems, object stores, and FUSE mounts over object
-storage. See `specs/storage-abstraction.md` for the full design and phases;
-checkpoints still use the POSIX path above until that phase lands.
+storage. See `specs/storage-abstraction.md` for the full design and phases.
+Checkpoints are published through a `Store` (see Checkpointing above); splitting
+them into parallel parts and replicating them between tiers remain.
+
+```mermaid
+flowchart TB
+    storesfile["Stores file
+private YAML · $KOOCHAK_STORES"]
+    plugins["Plugin stores
+koochak.stores entry points"]
+    probe["Storage probe
+semantics · settings · profile"]
+    open(["open_store(location)"])
+    local["LocalStore
+link: POSIX · exclusive: object-storage FUSE
+fsync · read-back · read_settle_seconds"]
+    store[["Store protocol
+get · open · put create-only · stat · list · delete"]]
+
+    checkpoints["Checkpoints
+publish · prune · resolve_auto_resume"]
+    shards["Dataset shards
+ShardWriter · plan_shards · assign_shards"]
+    transfer["copy_objects
+parallel · ranged · SHA256 · resumable"]
+    collections[("Collections
+manifest.json · files.jsonl.gz · packs · objects")]
+    tool["python -m koochak.data
+archive · pull · verify · ls"]
+
+    probe -.->|recommends| storesfile
+    storesfile --> open
+    plugins --> open
+    open --> local --> store
+    open -->|custom backend| store
+    store --> checkpoints
+    store --> shards
+    store --> transfer --> collections
+    tool --> transfer
+
+    classDef input fill:#F4F0FF,stroke:#6D5BD0,color:#241C3A,stroke-width:1.5px;
+    classDef core fill:#5B4B8A,stroke:#C7B9FF,color:#FFFFFF,stroke-width:1.5px;
+    classDef runtime fill:#E8F0FF,stroke:#4977B8,color:#172D4D,stroke-width:1.5px;
+    classDef toolNode fill:#DDF7F3,stroke:#168B83,color:#123B38,stroke-width:1.5px;
+    classDef result fill:#F4EDC9,stroke:#9C7B21,color:#352B10,stroke-width:1.5px;
+
+    class storesfile,plugins,probe input;
+    class open,store core;
+    class local,checkpoints,shards,transfer runtime;
+    class tool toolNode;
+    class collections result;
+    linkStyle default stroke:#88859A,stroke-width:1.5px;
+```
+
+Every layer above the protocol is backend-neutral: the same checkpoint,
+shard, and archive code runs against a parallel filesystem or an
+object-storage mount, and the stores file carries the site-specific settings.
+
+**Training on grouped collections.** Archive a dataset with `--groups`
+(`path,group,order`) so every file one training record needs is stored
+contiguously, then stream it:
+
+```python
+from koochak.data.packed import GroupStream, PackCache, PackedGroups
+from koochak.storage.store import open_store
+
+store = open_store("archive://datasets/my-data/v1")
+packed = PackedGroups.load(store)             # file table, groups, packs
+plan = packed.plan(num_owners=world_size * workers_per_rank, seed=0)
+stream = GroupStream(store, packed, plan[owner], seed=epoch_seed, window=2, prefetch=2,
+                     cache=PackCache(4 << 30), retries=3)
+for group in stream:                          # endless; a seeded shuffle per window of packs
+    payload = group.files["some/original/path.npz"]
+```
+
+Each worker owns whole packs (balanced by group count), fetches them whole in
+a background thread, verifies them against the manifest, and yields their
+groups shuffled within windows of `window` packs. `start=n` skips `n` groups
+without reading the skipped packs. Plans for disjoint selections (`select=`)
+can be combined to balance several kinds of groups separately.
+
+Reads outside the streams, such as a small sidecar per record while the
+dataset is built, belong in one `packed.read_files(store, entries, streams=32)`
+call: it reads only those files' bytes (neighbours share a request), never
+their whole groups, and opens each pack once. On an object-storage mount an
+open can take a second or more and the mount admits only a few per second, so
+opening once per pack rather than once per file is several times faster.
 
 - `koochak.storage.store.Store` holds **write-once** objects under relative
   keys: `get` (whole or byte range), `open`, `put` (create-only; returns once
@@ -670,8 +803,8 @@ checkpoints still use the POSIX path above until that phase lands.
   (`O_EXCL` create, published on close); `fsync=False` and
   `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
   close asynchronously. `read_settle_seconds` retries opening files that fail
-  with `ETIME`, which some object-storage mounts return for minutes after
-  another node closed the file.
+  with `ETIME` or `EIO`, which some object-storage mounts return for minutes
+  after another node closed the file.
 - `StoreProfile` records a store's measured performance (per-request cost,
   cold bandwidth per stream, useful concurrency, whether byte ranges of one
   object scale, part size, whether listing is acceptable). `LocalStore(...,

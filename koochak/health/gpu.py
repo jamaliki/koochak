@@ -20,6 +20,11 @@ WARMUP_STEPS = 20
 CHECK_EVERY_STEPS = 10
 REQUIRE_UTILIZATION_PCT = 80.0
 CONSECUTIVE_FAILURES = 2
+THERMAL_GRACE_SECONDS = 2 * 60 * 60
+THERMAL_MAX_SAMPLE_GAP_SECONDS = 5 * 60
+THERMAL_REASONS = frozenset({
+    "sw_thermal_slowdown", "hw_thermal_slowdown", "gpu_temp_high", "memory_temp_high",
+})
 MAX_GPU_TEMP_C = 86.0
 MAX_MEMORY_TEMP_C = 94.0
 MIN_SM_CLOCK_FRAC = 0.70
@@ -180,6 +185,7 @@ class GpuHealthFailure:
     reasons: List[str]
     consecutive_failures: int
     slurm_action: str
+    thermal_duration_seconds: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         payload = self.sample.to_dict()
@@ -189,6 +195,7 @@ class GpuHealthFailure:
                 "reasons": list(self.reasons),
                 "consecutive_failures": int(self.consecutive_failures),
                 "slurm_action": self.slurm_action,
+                "thermal_duration_seconds": self.thermal_duration_seconds,
             }
         )
         return payload
@@ -319,6 +326,9 @@ class GpuHealthWatchdog:
         self.slurm_action = "exit" if self.slurm_mutation_blocked_reason else self.requested_slurm_action
         self.exit_code = EXIT_CODE
         self._consecutive_failures = 0
+        self._thermal_started_at: Optional[float] = None
+        self._thermal_last_sample_at: Optional[float] = None
+        self._thermal_samples = 0
         self._notice_written = False
 
     def should_check_step(self, step: int) -> bool:
@@ -328,26 +338,51 @@ class GpuHealthWatchdog:
         sample = self._query_sample(step)
         if sample is None:
             self._consecutive_failures = 0
+            self._thermal_duration(False, time.monotonic())
             return None
 
-        self._append_jsonl("gpu_health", sample.to_dict())
         reasons = evaluate_sample(sample)
-        if not reasons:
-            self._consecutive_failures = 0
-            return None
-
-        self._consecutive_failures += 1
-        if self._consecutive_failures < CONSECUTIVE_FAILURES:
+        thermal = bool(THERMAL_REASONS.intersection(reasons))
+        duration = self._thermal_duration(thermal, time.monotonic())
+        self._append_jsonl("gpu_health", {
+            **sample.to_dict(), "thermal_duration_seconds": duration,
+            "thermal_grace_seconds": THERMAL_GRACE_SECONDS,
+        })
+        # Thermal throttling also lowers clocks and can set the aggregate HW
+        # slowdown flag. Those effects must not bypass the thermal grace period.
+        urgent = [reason for reason in reasons if reason not in THERMAL_REASONS
+                  and not (thermal and reason in {"hw_slowdown", "sm_clock_low"})]
+        self._consecutive_failures = self._consecutive_failures + 1 if urgent else 0
+        if self._consecutive_failures >= CONSECUTIVE_FAILURES:
+            reasons, count = urgent, self._consecutive_failures
+        elif thermal and duration >= THERMAL_GRACE_SECONDS and self._thermal_samples >= 2:
+            count = self._thermal_samples
+        else:
             return None
 
         failure = GpuHealthFailure(
             sample=sample,
             reasons=reasons,
-            consecutive_failures=self._consecutive_failures,
+            consecutive_failures=count,
             slurm_action=self.slurm_action,
+            thermal_duration_seconds=duration,
         )
         self._append_jsonl("gpu_health_failures", failure.to_dict())
         return failure
+
+    def _thermal_duration(self, thermal: bool, now: float) -> float:
+        if not thermal:
+            self._thermal_started_at = self._thermal_last_sample_at = None
+            self._thermal_samples = 0
+            return 0.0
+        if (self._thermal_last_sample_at is None
+                or now - self._thermal_last_sample_at > THERMAL_MAX_SAMPLE_GAP_SECONDS):
+            self._thermal_started_at = now
+            self._thermal_samples = 0
+        self._thermal_last_sample_at = now
+        self._thermal_samples += 1
+        assert self._thermal_started_at is not None
+        return now - self._thermal_started_at
 
     def gather_failures(self, local_failure: Optional[GpuHealthFailure]) -> List[Dict[str, Any]]:
         payload = local_failure.to_dict() if local_failure is not None else None

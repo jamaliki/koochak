@@ -235,10 +235,21 @@ example a cluster id, so each worker's partition maps to a few packs), and
 which tiny sidecars are folded into one table.
 
 ## Readers
-- `PackedTree`: read-only, path-addressed access to a `packed` collection:
-  `read(path)` is one range read, backed by a node-local cache, and a worker
-  can preload the packs it owns. Per-record loaders call it instead of opening
-  files.
+- **Done:** `koochak/data/packed.py` streams a grouped `packed` collection.
+  `PackedGroups.plan` deals whole packs to data-loading workers (reusing
+  `plan_shards`, with each pack's groups as its records); a group belongs to
+  the owner of the pack holding its first file. `GroupStream` fetches whole
+  packs ahead in a background thread, verifies them against the manifest,
+  yields each window of packs' groups in a seeded shuffle, reshuffles every
+  pass, never ends, and resumes by skipping groups without reading their
+  packs. Groups that spill into another pack, and standalone objects, are
+  read with range requests. `PackCache` keeps recently used packs in memory
+  for data cycled faster than the rest. Per-record loaders read a group's
+  files by their original paths. `PackedGroups.read_files` reads chosen
+  files on their own (one range per file or run of neighbours, one open per
+  pack, packs in parallel) for scattered reads outside the streams, such as one small sidecar per
+  record while a dataset is built.
+- `PackedTree`: a node-local cache in front of single-file reads.
 - `ShardedStream`: streaming reads of a `shards` collection (below).
 - Staging copies a node's owned shards or packs to faster storage before
   training.
@@ -285,7 +296,21 @@ Next (phase 4):
   least ~10 shards per data-loading worker for shuffle quality and balance.
 
 ## Checkpoints (phase 5)
-A checkpoint becomes parts plus a manifest written last:
+**Done (single-file checkpoints).** `train.checkpoint_dir` (default `out_dir`)
+takes a directory or a stores-file `scheme://` URI; logs stay in `out_dir`,
+since they append. Every save goes through `checkpoint.publish(store, ...)`:
+the `step<N>.pt` object is written create-only, then its unchanged v1
+`.ready.json` manifest; re-saving a step uncommits it first; pruning deletes
+manifests before checkpoints. Directory stores keep the `latest.pt` symlink,
+write-once stores get none. `train.checkpoint_async` serializes on the training
+thread and publishes on one background thread (one in flight); `on_checkpoint`
+fires after the manifest commits, failures surface on the next step, and
+terminal, evacuation, and GPU-health saves drain first. Resume reads through
+the store (so `read_settle_seconds` applies) and raises I/O errors other than a
+missing file instead of falling back to an older checkpoint. The serialized
+bytes are held in memory during the upload, so no node-local disk is needed.
+
+**Remaining:** a checkpoint becomes parts plus a manifest written last:
 
 ```
 run/step000005000/model.pt
@@ -323,7 +348,9 @@ scheduler that consumes them.
    `pull`, `verify`, `ls`, `--files-from`, and verified moves
    (`--delete-source`) done**; `warm` and `stage` remain.
 4. Readers: `PackedTree`, `ShardedStream`, staging.
-5. Checkpoints as parts: async saves, parallel parts, replication between tiers.
+5. Checkpoints through `Store`: URIs for `checkpoint_dir`, manifest-last
+   publication, background saves, settling reads on resume. **Done**; parts,
+   per-rank state, and replication between tiers remain.
 6. Artifact manifests through `Store.put`.
 
 ## Testing Plan

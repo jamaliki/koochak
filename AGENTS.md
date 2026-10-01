@@ -26,15 +26,22 @@ This doc tracks incremental design decisions and changes from the initial design
   - The loop shards the dataset when `config.ddp=True`, and places `barrier()` calls around checkpointing. Only rank 0 writes checkpoints.
 
 - Storage
-  - `koochak/storage/checkpoint.py` – atomic save/load, publication manifests,
-    `latest(dir)`, and `best(dir, key)`; maintains a `latest.pt` convenience
-    pointer and prunes checkpoint/manifest pairs with `keep_last_k`.
+  - `koochak/storage/checkpoint.py` – checkpoints published through a `Store`
+    (`checkpoint_store(location)` for a directory or `scheme://` URI,
+    `publish`: create-only checkpoint, then its ready manifest; pruning deletes
+    manifests first), optional `BackgroundPublisher` (one publication in
+    flight), load, `resolve_auto_resume`, `latest`, `best`. Directory stores
+    keep a `latest.pt` symlink; write-once stores get none. Resume raises I/O
+    errors other than a missing file instead of rolling back.
+  - `train.checkpoint_dir` (default `out_dir`) separates checkpoints from logs;
+    `train.checkpoint_async` publishes periodic checkpoints in the background
+    and fires `on_checkpoint` after the manifest commits.
   - `koochak/storage/store.py` – write-once `Store` protocol (`get`/`open`/
     create-only `put`/`stat`/`list`/`delete`/`local_path`), `LocalStore`
     (`publish="link"|"exclusive"`, optional fsync and read-back settling), and
     `open_store`/`register_store` with `koochak.stores` entry points for
-    private backends. Checkpoints do not use it yet (phase 3 of
-    `specs/storage-abstraction.md`).
+    private backends. Checkpoints are published through it (phase 5 of
+    `specs/storage-abstraction.md`, without parts or replication yet).
   - `koochak/storage/stores_file.py` – named schemes from a private YAML
     stores file (`$KOOCHAK_STORES` or `~/.config/koochak/stores.yaml`): roots,
     publish modes, profiles. Replaces the need for private Python plugins;
@@ -212,8 +219,8 @@ Open TODOs (authoritative)
   - Phase 1: write-once `Store`, `LocalStore`, pluggable schemes, shard index/writer/plan, storage probe [DONE]
   - Phase 2: `StoreProfile`, `copy_objects` transfer engine, probe cold/cached/range-parallel measurements [DONE]
   - Phase 3: manifested collections and `python -m koochak.data` — `archive` (grouped packs via `--groups`, `--layout objects`, resumable), `pull` (subsets, verified, mode/mtime restored), `verify`, `ls` [DONE]; `--files-from` and `--delete-source` (move after deep verification) [DONE]; `warm`, `stage` [TODO]
-  - Phase 4: readers — `PackedTree` (path-addressed range reads + node-local cache), `ShardedStream` IterableDataset (bounded prefetch, verify, windowed shuffle, infinite per-worker streams, resume from `next_step`), staging [TODO]
-  - Phase 5: checkpoints as parts + manifest via `Store` (async save, parallel parts, manifest-only selection, replication between tiers, drop `latest.pt`) [TODO]
+  - Phase 4: readers — `koochak/data/packed.py`: `PackedGroups.plan` (whole packs of a grouped collection per worker, balanced by group count), `GroupStream` (bounded whole-pack prefetch, SHA256 checks, windowed shuffle, endless passes, `start` resume, retries), `PackCache`, `read_files` (scattered single files as range reads, one open per pack, packs in parallel; `collection.pack_ranges`/`read_pack_range(s)`, shared with `pull`) [DONE]; `ShardedStream` over `ShardWriter` datasets, node-local staging and caches [TODO]
+  - Phase 5: checkpoints via `Store` — `train.checkpoint_dir` URIs, create-only publish with manifest last, manifest-first pruning, background publication (`train.checkpoint_async`), settling reads on resume, no `latest.pt` on write-once stores [DONE]; parallel parts, per-rank sharded state, replication between tiers, dropping `latest.pt` everywhere [TODO]
   - Phase 6: artifact ready manifests via `Store.put` instead of hard links; coordinate URI paths with the artifact-gate consumer [TODO]
   - Keep mutable run state (JSONL/CSV logs, compiler caches) off write-once object-storage mounts; they append [NOTE]
 - CLI: support entry kwargs [TODO]

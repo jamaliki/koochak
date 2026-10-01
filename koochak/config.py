@@ -83,6 +83,11 @@ class TrainConfig:
     device: Optional[str] = None
     out_dir: str = "./runs/exp0"
     keep_last_k: int = 3
+    # Numbered checkpoints go here (a directory or a stores-file scheme:// URI);
+    # None keeps them in out_dir. Logs always stay in out_dir.
+    checkpoint_dir: Optional[str] = None
+    # Publish periodic checkpoints on a background thread (one in flight).
+    checkpoint_async: bool = False
     shard_dataset: bool = False
     shard_dataset_mode: Optional[str] = None
     shard_eval_dataset: bool = False
