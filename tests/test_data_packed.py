@@ -234,3 +234,38 @@ def test_read_files_reads_standalone_objects_whole(tmp_path: Path) -> None:
     assert {entry.path: entry.object is not None for entry in packed.collection.files} == {
         "large.bin": True, "small.bin": False}
     assert packed.read_files(store, packed.collection.files) == {"small.bin": b"s" * 100, "large.bin": b"L" * 50_000}
+
+
+def test_read_files_finishes_a_pack_with_ranged_reads_when_its_handle_drops(tmp_path, monkeypatch):
+    store, packed = build(tmp_path, groups=6, files_per_group=4, size=3000, pack_bytes=40_000)
+    store = LocalStore(store.root, read_settle_seconds=5.0)
+    entries = {entry.path: entry for entry in packed.collection.files}
+    real_open = LocalStore.open
+
+    class Dropping:
+        def __init__(self, handle):
+            self.handle, self.reads = handle, 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def seek(self, offset):
+            return self.handle.seek(offset)
+
+        def read(self, length):
+            self.reads += 1
+            if self.reads == 2:
+                raise OSError(errno.ECONNABORTED, "Software caused connection abort")
+            return self.handle.read(length)
+
+    monkeypatch.setattr(LocalStore, "open", lambda self, key: Dropping(real_open(self, key)))
+    wanted = [entries[f"g{g:03d}/f{f}.bin"] for g in range(3) for f in (0, 3)]
+    files = packed.read_files(store, wanted, merge_gap=0, streams=1)
+    assert files == {e.path: bytes([int(e.path[1:4]) % 251, int(e.path[-5])]) * 1500 for e in wanted}
+
+    monkeypatch.setattr(LocalStore, "open", lambda self, key: (_ for _ in ()).throw(PermissionError(key)))
+    with pytest.raises(PermissionError):
+        packed.read_files(store, wanted[:1])

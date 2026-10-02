@@ -88,6 +88,24 @@ def _load_manifest(manifest_path: str, expected_sha256: str) -> dict[str, Any]:
     return document
 
 
+# How long a required file on an object-storage mount may keep failing with a
+# transient error (see ``storage.store.transient_read_error``) before preflight fails.
+TRANSIENT_FILE_WAIT_SECONDS = 900.0
+
+
+def _is_file(filename: str, *, wait_seconds: float = TRANSIENT_FILE_WAIT_SECONDS) -> bool:
+    from ..storage.store import transient_read_error
+
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            return Path(filename).is_file()
+        except OSError as error:
+            if not transient_read_error(error) or time.monotonic() >= deadline:
+                raise
+        time.sleep(min(10.0, max(0.0, deadline - time.monotonic())))
+
+
 def _require_executable(executable: str) -> None:
     if not Path(executable).is_file() or not os.access(executable, os.X_OK):
         raise PreflightError(f"required executable is unavailable: {executable}")
@@ -105,7 +123,7 @@ def _requirements(environment: Mapping[str, Any]) -> dict[str, str]:
         _require_executable(executable)
         observed[f"executable:{executable}"] = "available"
     for filename in requirements["files"]:
-        if not Path(filename).is_file():
+        if not _is_file(filename):
             raise PreflightError(f"required file is unavailable: {filename}")
         observed[f"file:{filename}"] = "available"
     import_paths = _profile_import_paths(environment)

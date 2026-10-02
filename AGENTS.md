@@ -38,7 +38,8 @@ This doc tracks incremental design decisions and changes from the initial design
     and fires `on_checkpoint` after the manifest commits.
   - `koochak/storage/store.py` – write-once `Store` protocol (`get`/`open`/
     create-only `put`/`stat`/`list`/`delete`/`local_path`), `LocalStore`
-    (`publish="link"|"exclusive"`, optional fsync and read-back settling), and
+    (`publish="link"|"exclusive"`, optional fsync and read-back settling;
+    `read_settle_seconds` reads also wait out a mount's dropped connection), and
     `open_store`/`register_store` with `koochak.stores` entry points for
     private backends. Checkpoints are published through it (phase 5 of
     `specs/storage-abstraction.md`, without parts or replication yet).

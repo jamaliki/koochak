@@ -616,3 +616,33 @@ def test_partial_output_event_publication_replays_with_stable_ids(
     current = 1
     runner._publish_outputs(tuple(outputs), environment)
     assert attempts[0] == attempts[1]
+
+
+def test_required_files_wait_out_a_dropped_mount_but_not_forever(tmp_path, monkeypatch):
+    import errno
+    from pathlib import Path
+
+    target = tmp_path / "config.yaml"
+    target.write_text("x")
+    real_is_file = Path.is_file
+    failures = {"left": 2}
+
+    def flaky(self):
+        if self == target and failures["left"]:
+            failures["left"] -= 1
+            raise ConnectionAbortedError(errno.ECONNABORTED, "Software caused connection abort")
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", flaky)
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+    assert runner._is_file(str(target)) is True
+    assert runner._is_file(str(tmp_path / "missing")) is False
+
+    failures["left"] = 10**6
+    clock = iter(range(0, 10**6, 100))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+    with pytest.raises(ConnectionAbortedError):
+        runner._is_file(str(target), wait_seconds=500)
+    monkeypatch.setattr(Path, "is_file", lambda self: (_ for _ in ()).throw(PermissionError(str(self))))
+    with pytest.raises(PermissionError):
+        runner._is_file(str(target))

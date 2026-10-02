@@ -273,3 +273,51 @@ def test_settling_reads_also_wait_out_io_errors_but_not_forever(tmp_path, monkey
     monkeypatch.setattr(store_lib.time, "monotonic", lambda: next(clock))
     with pytest.raises(OSError):
         settling.get("k")
+
+
+@pytest.mark.parametrize("code", [errno.ECONNABORTED, errno.ECONNRESET, errno.ENOTCONN])
+def test_settling_reads_wait_out_a_mount_that_drops_its_connection(tmp_path, monkeypatch, code):
+    settling = LocalStore(tmp_path, read_settle_seconds=5.0)
+    settling.put("k", b"payload")
+    real_open, real_stat = open, store_lib.os.stat
+    failures = {"read": 2, "stat": 2}
+
+    class Dropping:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def seek(self, offset):
+            return self.handle.seek(offset)
+
+        def read(self, *args):
+            if failures["read"]:
+                failures["read"] -= 1
+                raise OSError(code, "Software caused connection abort")
+            return self.handle.read(*args)
+
+    def flaky_stat(path, *args, **kwargs):
+        if failures["stat"]:
+            failures["stat"] -= 1
+            raise OSError(code, "Software caused connection abort")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib, "open", lambda path, mode="r", *a, **k: Dropping(real_open(path, mode, *a, **k)),
+                        raising=False)
+    monkeypatch.setattr(store_lib.os, "stat", flaky_stat)
+    monkeypatch.setattr(store_lib.time, "sleep", lambda _seconds: None)
+    assert settling.get("k", 2, 3) == b"ylo"
+    assert settling.stat("k").size == 7
+    assert store_lib.transient_read_error(OSError(code, "x")) and not store_lib.transient_read_error(OSError(errno.ENOENT, "x"))
+
+    failures.update(read=1, stat=1)
+    impatient = LocalStore(tmp_path)
+    with pytest.raises(OSError):
+        impatient.get("k")
+    with pytest.raises(OSError):
+        impatient.stat("k")
