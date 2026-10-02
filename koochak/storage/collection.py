@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence
 
-from .store import Store, validate_key
+from .store import Store, transient_read_error, validate_key
 
 __all__ = [
     "COLLECTION_KIND",
@@ -251,10 +251,18 @@ def read_pack_ranges(store: Store, parts: Sequence[PackRange], *, verify: bool =
     if len({part.pack.key for part in parts}) != 1:
         raise ValueError("read_pack_ranges reads ranges of exactly one pack")
     files: Dict[str, bytes] = {}
-    with store.open(parts[0].pack.key) as handle:
-        for part in sorted(parts, key=lambda item: item.start):
-            handle.seek(part.start)
-            files.update(_split(part, handle.read(part.length), verify))
+    try:
+        with store.open(parts[0].pack.key) as handle:
+            for part in sorted(parts, key=lambda item: item.start):
+                handle.seek(part.start)
+                files.update(_split(part, handle.read(part.length), verify))
+    except OSError as error:
+        if not transient_read_error(error):
+            raise
+        # The handle lost its mount mid-read: finish with ranged gets, which settle.
+        for part in parts:
+            if any(member.path not in files for member in part.members):
+                files.update(read_pack_range(store, part, verify=verify))
     return files
 
 

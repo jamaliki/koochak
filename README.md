@@ -801,9 +801,12 @@ opening once per pack rather than once per file is several times faster.
   hard link. On mounts without hard links use `publish="exclusive"`
   (`O_EXCL` create, published on close); `fsync=False` and
   `verify_readback=True, settle_seconds=...` cover mounts that reject fsync or
-  close asynchronously. `read_settle_seconds` retries opening files that fail
-  with `ETIME` or `EIO`, which some object-storage mounts return for minutes
-  after another node closed the file.
+  close asynchronously. `read_settle_seconds` retries reads (`open`, `get`,
+  `stat`) that fail with `ETIME` or `EIO`, which some object-storage mounts
+  return for minutes after another node closed a file, or with a lost
+  connection (`ECONNABORTED`, `ECONNRESET`, `ENOTCONN`) while the mount's
+  client is cut off from the service. Writes are never retried. The job
+  runner's required-file preflight waits out the same errors for 15 minutes.
 - `StoreProfile` records a store's measured performance (per-request cost,
   cold bandwidth per stream, useful concurrency, whether byte ranges of one
   object scale, part size, whether listing is acceptable). `LocalStore(...,

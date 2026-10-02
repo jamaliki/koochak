@@ -25,7 +25,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from importlib import metadata
-from typing import BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Union, runtime_checkable
+from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Union, runtime_checkable
 from urllib.parse import unquote, urlparse
 
 from ..utils.paths import canonical_dir
@@ -45,6 +45,7 @@ __all__ = [
     "register_store",
     "validate_key",
     "validate_scheme",
+    "transient_read_error",
 ]
 
 ENTRY_POINT_GROUP = "koochak.stores"
@@ -241,8 +242,16 @@ def _file_digest(path: str) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-# Errors an object-storage mount returns while another node's close is still committing.
-_SETTLING_ERRNOS = (errno.ETIME, errno.EIO)
+# Errors an object-storage mount returns while another node's close is still committing
+# (ETIME, EIO), or while its client briefly loses the backing service (connection
+# aborted, reset or not connected: a FUSE mount dropping out for a few minutes).
+_SETTLING_ERRNOS = (errno.ETIME, errno.EIO, errno.ECONNABORTED, errno.ECONNRESET, errno.ENOTCONN)
+
+
+def transient_read_error(error: BaseException) -> bool:
+    """Whether a read failed in a way that settling reads wait out (see ``LocalStore``)."""
+
+    return isinstance(error, OSError) and error.errno in _SETTLING_ERRNOS
 
 
 class LocalStore:
@@ -260,10 +269,12 @@ class LocalStore:
     ignore it.  ``verify_readback=True`` re-reads every new object until its
     size and SHA256 match what was written, retrying for up to
     ``settle_seconds`` on mounts whose close completes asynchronously.
-    ``read_settle_seconds`` retries opening a file that fails with ``ETIME``
-    or ``EIO``: on some object-storage mounts a file closed on another node
-    stays unreadable for minutes while its upload commits. Other read errors,
-    and these once the window has passed, are raised.
+    ``read_settle_seconds`` retries reads (``open``, ``get``, ``stat``) that
+    fail with ``ETIME``, ``EIO`` or a lost connection: on some object-storage
+    mounts a file closed on another node stays unreadable for minutes while its
+    upload commits, and the mount's client can drop its connection to the
+    service for a few minutes. Other read errors, and these once the window has
+    passed, are raised. Writes are never retried.
 
     ``profile`` records the mount's measured performance (default:
     ``LOCAL_PROFILE``). ``python -m koochak.storage.probe`` reports which
@@ -316,22 +327,30 @@ class LocalStore:
     def _path(self, key: str) -> str:
         return os.path.join(self.root, *validate_key(key).split("/"))
 
-    def _open_settled(self, path: str) -> BinaryIO:
+    def _settled(self, read: Callable[[], Any]) -> Any:
         deadline = time.monotonic() + self.read_settle_seconds
         while True:
             try:
-                return open(path, "rb")
+                return read()
             except OSError as exc:
                 if exc.errno not in _SETTLING_ERRNOS or time.monotonic() >= deadline:
                     raise
             time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
 
+    def _open_settled(self, path: str) -> BinaryIO:
+        return self._settled(lambda: open(path, "rb"))
+
     def get(self, key: str, offset: int = 0, length: Optional[int] = None) -> bytes:
         _check_range(offset, length)
-        with self._open_settled(self._path(key)) as handle:
-            if offset:
-                handle.seek(offset)
-            return handle.read() if length is None else handle.read(length)
+        path = self._path(key)
+
+        def read() -> bytes:
+            with open(path, "rb") as handle:
+                if offset:
+                    handle.seek(offset)
+                return handle.read() if length is None else handle.read(length)
+
+        return self._settled(read)
 
     def open(self, key: str) -> BinaryIO:
         return self._open_settled(self._path(key))
@@ -430,8 +449,9 @@ class LocalStore:
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
     def stat(self, key: str) -> Optional[ObjectInfo]:
+        path = self._path(key)
         try:
-            observed = os.stat(self._path(key))
+            observed = self._settled(lambda: os.stat(path))
         except (FileNotFoundError, NotADirectoryError):
             return None
         if not stat.S_ISREG(observed.st_mode):
