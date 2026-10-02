@@ -11,7 +11,7 @@ This doc tracks incremental design decisions and changes from the initial design
 
 - Core loop
   - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. The loop atomically saves its terminal in-memory state before completion hooks and returns the same resume-ready checkpoint dict.
-  - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner plus warnings when gradients become non-finite.
+  - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner. Clipping and the optional nonfinite-gradient check reject invalid entries before the optimizer step.
 
 - Hooks
   - `koochak/core/hooks.py` provides `merge`, `add`, and `emit` utilities.
@@ -87,6 +87,7 @@ This doc tracks incremental design decisions and changes from the initial design
 
 - Optim
   - `koochak/optim/build.py` – tiny builders for optimizers (AdamW/Adam/SGD) and schedulers (cosine, step, plateau). Added cosine-with-warmup (`cosine_warmup`).
+  - `koochak/optim/grad_clip.py` clips the joint L2 norm. It retains foreach operations for normal gradients, uses scaled reductions after norm overflow, and logs the norm, coefficient, and fallback use without making full-sized FP64 copies.
 
 - Example
   - `examples/mnist/` – YAML-driven MNIST trainer (`config.yaml`, `main.py`). Minimal CLI (`--config` only). Uses stdout hooks by default; optional W&B via YAML.

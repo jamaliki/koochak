@@ -516,7 +516,7 @@ training_loop(
 - `ctx` contains `device`, `rank/world_size`, `autocast`, `scaler`, `config_json`, and `train_cfg`.
 - The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `train.scheduler_step`), evaluation hooks, automatic DDP bootstrap/wrapping when `train.ddp` is true, and deterministic checkpointing.
 - Rank-0 prints a compact parameter count banner at startup to highlight model size changes.
-- Non-finite gradients are zeroed and skipped with a rank-0 warning instead of crashing the run.
+- L2 gradient clipping uses scaled reductions if the usual norm overflows. It logs `grad_norm`, `grad_clip_coefficient`, and `grad_clip_scaled_norm`; the ordinary path adds one scalar device-to-host synchronization. Clipping rejects NaN or infinity entries before the optimizer step. The optional `nonfinite_grad_check_every` check also raises rather than replacing invalid entries with zeros.
 - Atomically saves the terminal in-memory state before `on_train_end` and
   returns the same resume-ready checkpoint dictionary.
 
@@ -556,11 +556,10 @@ def step_fn(model, batch, ctx):
     explicit `PYTHONPATH`; the isolated runner checks that import during
     preflight. Install `koochak[scruffy]` only when the compatible client is
     available from the target environment.
-    By default all publications remain asynchronous and publisher failures warn
-    once without stopping training. For workflows that require a checkpoint to
-    be acknowledged before evacuation can proceed, pass
-    `artifact_ack_timeout_s=<seconds>` (or set
-    `KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS`). Only strict numbered
+    Checkpoint acknowledgement waits up to 300 seconds by default. Override with
+    `KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS` or pass
+    `artifact_ack_timeout_s=<seconds>` (the explicit argument takes precedence).
+    Only strict numbered
     `workload.artifact` checkpoint publications use `wait=True`; lifecycle and
     evacuation milestone events remain asynchronous. A rejected or conflicting
     strict checkpoint acknowledgement fails closed. An acknowledgement timeout

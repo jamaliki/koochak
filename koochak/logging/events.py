@@ -564,13 +564,14 @@ def make_scruffy_hooks(
 
     ``SCRUFFY_ROOT`` and ``SCRUFFY_JOB_ID`` must be set. The Scruffy client is
     imported and validated here, before model or training-loop execution can
-    begin. When ``artifact_ack_timeout_s`` is configured, strict checkpoint
+    begin. Strict checkpoint publication waits up to 300 seconds by default.
+    ``artifact_ack_timeout_s`` overrides the environment timeout. Strict checkpoint
     artifact events wait for Scruffy acknowledgement and fail closed if the
     acknowledgement is rejected or not received before the timeout.
     """
 
     if artifact_ack_timeout_s is None:
-        configured_timeout = os.environ.get(_ARTIFACT_ACK_TIMEOUT_ENV)
+        configured_timeout = os.environ.get(_ARTIFACT_ACK_TIMEOUT_ENV, "300")
         if configured_timeout is not None:
             artifact_ack_timeout_s = configured_timeout
     if artifact_ack_timeout_s is not None:
