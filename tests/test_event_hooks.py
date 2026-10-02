@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import types
 from unittest import mock
@@ -9,7 +10,13 @@ import torch
 
 from koochak.cli.train import _maybe_add_scruffy_hooks
 from koochak.core import hooks as hooks_lib
-from koochak.logging.events import make_event_hooks, make_scruffy_hooks
+from koochak.logging.events import (
+    CHECKPOINT_ACK_TIMEOUT_EXIT_CODE,
+    CheckpointArtifactAckConflict,
+    CheckpointArtifactAckTimeout,
+    make_event_hooks,
+    make_scruffy_hooks,
+)
 
 
 def _call(hooks, name, *args):
@@ -373,6 +380,221 @@ def test_scruffy_checkpoint_ack_rejection_fails_closed(monkeypatch, tmp_path) ->
             checkpoint,
             {"step": 1},
         )
+
+
+def _strict_checkpoint(monkeypatch, tmp_path, module):
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    checkpoint_path = tmp_path / "step000000004.pt"
+    checkpoint = {"step": 4, "next_step": 4, "model": {}}
+    checkpoint_lib.save(checkpoint, str(checkpoint_path))
+    monkeypatch.setenv("SCRUFFY_ROOT", str(tmp_path / "queue"))
+    monkeypatch.setenv("SCRUFFY_JOB_ID", "job-123")
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    return checkpoint_path, checkpoint
+
+
+def test_strict_ack_delayed_acceptance_reconciles_without_republishing(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+    module = types.ModuleType("scruffy")
+
+    def publish(_root, **values):
+        calls.append(values)
+        raise TimeoutError("controller acknowledgement delayed")
+
+    def wait(_root, **values):
+        calls.append({"reconcile": values})
+        return True, "durable-event-identity"
+
+    module.publish_event = publish
+    module.wait_for_event_ack = wait
+    checkpoint_path, checkpoint = _strict_checkpoint(monkeypatch, tmp_path, module)
+
+    _call(
+        make_scruffy_hooks(artifact_ack_timeout_s=0.01),
+        "on_checkpoint",
+        str(checkpoint_path),
+        checkpoint,
+        {"step": 4},
+    )
+
+    assert len([item for item in calls if "event_id" in item]) == 1
+    assert calls[-1]["reconcile"]["event_id"].startswith("koochak-checkpoint-")
+
+
+def test_strict_ack_controller_restart_uses_durable_job_evidence(
+    monkeypatch, tmp_path
+) -> None:
+    module = types.ModuleType("scruffy")
+
+    def publish(_root, **_values):
+        raise TimeoutError("controller restarted after spooling")
+
+    def wait(_root, **_values):
+        raise TimeoutError("receipt not visible yet")
+
+    def status(_root, _job_id):
+        return {
+            "artifact_evidence": [
+                {
+                    "producer_event_id": "koochak-checkpoint-expected",
+                    "publication": {},
+                }
+            ]
+        }
+
+    # Populate the event ID after constructing the strict hook's deterministic
+    # publication so this fixture exercises the actual evidence matcher.
+    module.publish_event = publish
+    module.wait_for_event_ack = wait
+    module.status = status
+    checkpoint_path, checkpoint = _strict_checkpoint(monkeypatch, tmp_path, module)
+    from koochak.storage import checkpoint as checkpoint_lib
+
+    publication = checkpoint_lib.publication(str(checkpoint_path))
+    event_id = "koochak-checkpoint-" + hashlib.sha256(
+        f"{publication['artifact_id']}\0{publication['sha256']}".encode()
+    ).hexdigest()
+    module.status = lambda _root, _job_id: {
+        "artifact_evidence": [
+            {"producer_event_id": event_id, "publication": publication}
+        ]
+    }
+
+    _call(
+        make_scruffy_hooks(artifact_ack_timeout_s=0.01),
+        "on_checkpoint",
+        str(checkpoint_path),
+        checkpoint,
+        {"step": 4},
+    )
+
+
+def test_strict_ack_does_not_scan_large_telemetry_backlog(monkeypatch, tmp_path) -> None:
+    module = types.ModuleType("scruffy")
+    module.publish_event = lambda _root, **_values: (_ for _ in ()).throw(
+        TimeoutError("telemetry backlog")
+    )
+    module.wait_for_event_ack = lambda _root, **_values: (True, "receipt")
+    module.status = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("status should not scan the telemetry backlog")
+    )
+    checkpoint_path, checkpoint = _strict_checkpoint(monkeypatch, tmp_path, module)
+
+    _call(
+        make_scruffy_hooks(artifact_ack_timeout_s=0.01),
+        "on_checkpoint",
+        str(checkpoint_path),
+        checkpoint,
+        {"step": 4},
+    )
+
+
+def test_strict_ack_conflict_is_explicit_and_not_retried(monkeypatch, tmp_path) -> None:
+    calls = []
+    module = types.ModuleType("scruffy")
+
+    class ReportConflict(RuntimeError):
+        pass
+
+    def publish(_root, **values):
+        calls.append(values)
+        raise ReportConflict("event ID already used for a different report")
+
+    module.publish_event = publish
+    checkpoint_path, checkpoint = _strict_checkpoint(monkeypatch, tmp_path, module)
+
+    with pytest.raises(CheckpointArtifactAckConflict) as raised:
+        _call(
+            make_scruffy_hooks(artifact_ack_timeout_s=0.01),
+            "on_checkpoint",
+            str(checkpoint_path),
+            checkpoint,
+            {"step": 4},
+        )
+    assert raised.value.reason == "checkpoint_ack_conflict"
+    assert len(calls) == 1
+
+
+def test_strict_ack_reconstructs_receipt_after_publish_return_is_lost(
+    monkeypatch, tmp_path
+) -> None:
+    module = types.ModuleType("scruffy")
+    module.__path__ = []
+    module.publish_event = lambda _root, **_values: (_ for _ in ()).throw(
+        TimeoutError("lost response")
+    )
+    storage = types.ModuleType("scruffy.storage")
+    storage.report_acknowledged = lambda _root, _job_id, _event_id: (
+        True,
+        "reconstructed-receipt",
+    )
+    monkeypatch.setitem(sys.modules, "scruffy.storage", storage)
+    checkpoint_path, checkpoint = _strict_checkpoint(monkeypatch, tmp_path, module)
+
+    _call(
+        make_scruffy_hooks(artifact_ack_timeout_s=0.01),
+        "on_checkpoint",
+        str(checkpoint_path),
+        checkpoint,
+        {"step": 4},
+    )
+
+
+def test_strict_ack_timeout_is_checkpoint_local_and_retryable(
+    monkeypatch, tmp_path
+) -> None:
+    module = types.ModuleType("scruffy")
+    module.publish_event = lambda _root, **_values: (_ for _ in ()).throw(
+        TimeoutError("ack deadline")
+    )
+    module.wait_for_event_ack = lambda _root, **_values: (_ for _ in ()).throw(
+        TimeoutError("still unresolved")
+    )
+    checkpoint_path, checkpoint = _strict_checkpoint(monkeypatch, tmp_path, module)
+
+    with pytest.raises(CheckpointArtifactAckTimeout) as raised:
+        _call(
+            make_scruffy_hooks(artifact_ack_timeout_s=0.01),
+            "on_checkpoint",
+            str(checkpoint_path),
+            checkpoint,
+            {"step": 4},
+        )
+    error = raised.value
+    assert error.reason == "checkpoint_ack_timeout"
+    assert error.retryable is True
+    assert error.exit_code == CHECKPOINT_ACK_TIMEOUT_EXIT_CODE
+    assert error.checkpoint_path == str(checkpoint_path)
+    from koochak.storage.checkpoint import highest_valid_published
+
+    assert highest_valid_published(str(tmp_path)) == str(checkpoint_path)
+
+
+def test_isolated_runner_preserves_checkpoint_timeout_exit_reason(
+    monkeypatch, capsys
+) -> None:
+    from koochak.jobs import isolated_exec
+
+    def fail(_script, run_name):
+        raise CheckpointArtifactAckTimeout(
+            "ack unresolved",
+            checkpoint_path="/runs/step000000004.pt",
+            event_id="event-4",
+            publication={"artifact_id": "checkpoint/step000000004.pt"},
+        )
+
+    monkeypatch.setattr(isolated_exec.runpy, "run_path", fail)
+    monkeypatch.setattr(
+        isolated_exec.sys,
+        "argv",
+        ["isolated_exec", "[]", "--", "/tmp/fixture.py"],
+    )
+
+    assert isolated_exec.main() == CHECKPOINT_ACK_TIMEOUT_EXIT_CODE
+    assert '"kind": "checkpoint_safe_retry"' in capsys.readouterr().err
 
 
 def test_setup_failure_publishes_failed_phase(monkeypatch, tmp_path) -> None:

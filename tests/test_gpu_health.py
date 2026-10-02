@@ -7,8 +7,11 @@ import pytest
 import torch
 
 import koochak.loop as loop_module
+import koochak.health.gpu as gpu_health_module
 from koochak.health.gpu import (
     PRIMARY_QUERY_FIELDS,
+    THERMAL_GRACE_SECONDS,
+    THERMAL_MAX_SAMPLE_GAP_SECONDS,
     GpuHealthSample,
     GpuHealthWatchdog,
     evaluate_sample,
@@ -123,7 +126,7 @@ def test_parse_nvidia_smi_csv_preserves_rank_node_and_uuid(monkeypatch: pytest.M
         step=30,
         rank=9,
         world_size=16,
-        hostname="gpu-8.eit-gbi.science",
+        hostname="gpu-8.example.org",
         slurm_node="gpu-8",
         cuda_device=2,
         gpu_query_id="2",
@@ -138,10 +141,12 @@ def test_parse_nvidia_smi_csv_preserves_rank_node_and_uuid(monkeypatch: pytest.M
     assert sample.max_sm_clock_mhz == 1980.0
 
 
-def test_watchdog_requires_two_consecutive_bad_samples(tmp_path: Path) -> None:
+def test_watchdog_requires_two_consecutive_nonthermal_bad_samples(tmp_path: Path) -> None:
     watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
     watchdog.enabled = True
-    watchdog._query_sample = lambda step: _sample(step=step)  # type: ignore[method-assign]
+    watchdog._query_sample = lambda step: _sample(  # type: ignore[method-assign]
+        step=step, gpu_temp_c=50., sw_thermal_slowdown=False,
+    )
 
     assert watchdog.should_check_step(19) is False
     assert watchdog.should_check_step(20) is True
@@ -151,7 +156,7 @@ def test_watchdog_requires_two_consecutive_bad_samples(tmp_path: Path) -> None:
 
     assert failure is not None
     assert failure.consecutive_failures == 2
-    assert "sw_thermal_slowdown" in failure.reasons
+    assert failure.reasons == ["sm_clock_low"]
 
 
 def test_good_sample_resets_consecutive_failure_counter(tmp_path: Path) -> None:
@@ -159,9 +164,9 @@ def test_good_sample_resets_consecutive_failure_counter(tmp_path: Path) -> None:
     watchdog.enabled = True
     samples = iter(
         [
-            _sample(step=20),
+            _sample(step=20, gpu_temp_c=50., sw_thermal_slowdown=False),
             _sample(step=30, gpu_temp_c=40.0, memory_temp_c=45.0, sm_clock_mhz=1980.0, sw_thermal_slowdown=False),
-            _sample(step=40),
+            _sample(step=40, gpu_temp_c=50., sw_thermal_slowdown=False),
         ]
     )
     watchdog._query_sample = lambda step: next(samples)  # type: ignore[method-assign]
@@ -169,6 +174,85 @@ def test_good_sample_resets_consecutive_failure_counter(tmp_path: Path) -> None:
     assert watchdog.check_local(20) is None
     assert watchdog.check_local(30) is None
     assert watchdog.check_local(40) is None
+
+
+@pytest.fixture
+def timed_watchdog(tmp_path, monkeypatch):
+    watchdog = GpuHealthWatchdog(device=torch.device("cuda", 0), out_dir=str(tmp_path), rank=0, world_size=1)
+    clock = [0.0]
+    monkeypatch.setattr(gpu_health_module.time, "monotonic", lambda: clock[0])
+
+    def check(seconds, sample):
+        clock[0] = seconds
+        watchdog._query_sample = lambda step: sample
+        return watchdog.check_local(20)
+
+    return check
+
+
+@pytest.mark.parametrize("overrides", [
+    {},  # Software throttling, high temperature and low clocks together.
+    {"gpu_temp_c": 73., "sm_clock_mhz": 1950.},  # Actual gpu-0 incident.
+    {"sw_thermal_slowdown": False},  # Temperature alone, as on gpu-5.
+    {"gpu_temp_c": 50., "sw_thermal_slowdown": False, "memory_temp_c": 95.},
+    {"hw_thermal_slowdown": True, "hw_slowdown": True},
+])
+def test_thermal_shutdown_requires_two_hours_not_two_samples(timed_watchdog, tmp_path, overrides):
+    assert THERMAL_GRACE_SECONDS == 7200
+    sample = _sample(**overrides)
+    for seconds in range(0, THERMAL_GRACE_SECONDS, 30):
+        assert timed_watchdog(seconds, sample) is None
+    assert timed_watchdog(THERMAL_GRACE_SECONDS - .001, sample) is None
+    failure = timed_watchdog(THERMAL_GRACE_SECONDS, sample)
+    assert failure is not None
+    assert failure.thermal_duration_seconds == THERMAL_GRACE_SECONDS
+    assert failure.consecutive_failures == 242
+    assert failure.to_dict()["thermal_duration_seconds"] == THERMAL_GRACE_SECONDS
+    rows = (tmp_path / "gpu_health/gpu_health_rank0.jsonl").read_text().splitlines()
+    assert json.loads(rows[-2])["thermal_duration_seconds"] < THERMAL_GRACE_SECONDS
+    assert json.loads(rows[-1])["thermal_grace_seconds"] == THERMAL_GRACE_SECONDS
+
+
+@pytest.mark.parametrize("interruption", ["healthy", "missing", "idle", "gap"])
+def test_thermal_grace_resets_without_continuing_evidence(timed_watchdog, interruption):
+    for seconds in range(0, THERMAL_GRACE_SECONDS, 30):
+        assert timed_watchdog(seconds, _sample()) is None
+    now = THERMAL_GRACE_SECONDS
+    if interruption == "gap":
+        now += THERMAL_MAX_SAMPLE_GAP_SECONDS + 1
+        assert timed_watchdog(now, _sample()) is None
+    else:
+        sample = {"healthy": _sample(gpu_temp_c=50., sm_clock_mhz=1980., sw_thermal_slowdown=False),
+                  "idle": _sample(gpu_util_pct=0.), "missing": None}[interruption]
+        assert timed_watchdog(now, sample) is None
+    assert timed_watchdog(now + 30, _sample()) is None
+
+
+@pytest.mark.parametrize("fault", ["hw_power_brake_slowdown", "hw_slowdown", "sm_clock_low"])
+def test_nonthermal_faults_do_not_borrow_thermal_sample_count(timed_watchdog, fault):
+    assert timed_watchdog(0, _sample()) is None
+    kwargs = {"gpu_temp_c": 50., "sm_clock_mhz": 1980., "sw_thermal_slowdown": False}
+    if fault == "sm_clock_low":
+        kwargs["sm_clock_mhz"] = 500.
+    else:
+        kwargs[fault] = True
+    bad = _sample(**kwargs)
+    assert timed_watchdog(30, bad) is None
+    failure = timed_watchdog(60, bad)
+    assert failure is not None and failure.reasons == [fault]
+    assert failure.consecutive_failures == 2
+
+
+def test_power_brake_remains_fast_even_during_thermal_grace(timed_watchdog):
+    bad = _sample(hw_power_brake_slowdown=True, hw_slowdown=True)
+    assert timed_watchdog(0, bad) is None
+    failure = timed_watchdog(30, bad)
+    assert failure is not None and failure.reasons == ["hw_power_brake_slowdown"]
+
+
+def test_wall_clock_jump_does_not_expire_thermal_grace(timed_watchdog):
+    assert timed_watchdog(0, _sample(timestamp_unix=0)) is None
+    assert timed_watchdog(30, _sample(timestamp_unix=100000)) is None
 
 
 def test_slurm_exit_is_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

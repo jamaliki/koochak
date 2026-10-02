@@ -19,9 +19,21 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import torch
 
 from ..core.hooks import rank0_only
+from ..interruption import (
+    CHECKPOINT_ACK_TIMEOUT_EXIT_CODE as _CHECKPOINT_ACK_TIMEOUT_EXIT_CODE,
+)
 from ..storage import checkpoint as checkpoint_lib
 
-__all__ = ["make_event_hooks", "make_scruffy_hooks"]
+__all__ = [
+    "CHECKPOINT_ACK_TIMEOUT_EXIT_CODE",
+    "CHECKPOINT_ACK_TIMEOUT_REASON",
+    "CheckpointArtifactAckError",
+    "CheckpointArtifactAckConflict",
+    "CheckpointArtifactAckRejected",
+    "CheckpointArtifactAckTimeout",
+    "make_event_hooks",
+    "make_scruffy_hooks",
+]
 
 
 Publish = Callable[[str, Dict[str, object]], object]
@@ -33,13 +45,61 @@ _MAX_PATH_CHARS = 1024
 _MAX_ERROR_CHARS = 512
 _MISSING = object()
 _ARTIFACT_ACK_TIMEOUT_ENV = "KOOCHAK_SCRUFFY_ARTIFACT_ACK_TIMEOUT_SECONDS"
+CHECKPOINT_ACK_TIMEOUT_REASON = "checkpoint_ack_timeout"
+CHECKPOINT_ACK_TIMEOUT_EXIT_CODE = _CHECKPOINT_ACK_TIMEOUT_EXIT_CODE
 
 
-def _scruffy_publisher() -> Publish:
+class CheckpointArtifactAckError(RuntimeError):
+    """A strict checkpoint artifact could not be durably acknowledged."""
+
+    reason = "checkpoint_ack_error"
+    retryable = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        checkpoint_path: str,
+        event_id: str,
+        publication: Mapping[str, object],
+    ) -> None:
+        super().__init__(message)
+        self.checkpoint_path = checkpoint_path
+        self.event_id = event_id
+        self.publication = dict(publication)
+
+
+class CheckpointArtifactAckRejected(CheckpointArtifactAckError):
+    """Scruffy durably rejected a strict checkpoint publication."""
+
+    reason = "checkpoint_ack_rejected"
+
+
+class CheckpointArtifactAckConflict(CheckpointArtifactAckError):
+    """Scruffy found a conflicting use of the deterministic event identity."""
+
+    reason = "checkpoint_ack_conflict"
+
+
+class CheckpointArtifactAckTimeout(CheckpointArtifactAckError):
+    """Acknowledgement remained uncertain after bounded reconciliation.
+
+    The checkpoint and its ready manifest already exist when this exception is
+    raised. A scheduler that understands ``exit_code`` and ``reason`` may
+    retry the immutable run with auto-resume; it must not treat this as a
+    scientific/application failure.
+    """
+
+    reason = CHECKPOINT_ACK_TIMEOUT_REASON
+    retryable = True
+    exit_code = CHECKPOINT_ACK_TIMEOUT_EXIT_CODE
+
+
+def _scruffy_client() -> tuple[Any, Publish]:
     """Import and validate the Scruffy client at hook-construction time."""
 
     try:
-        from scruffy import publish_event
+        import scruffy
     except ModuleNotFoundError as exc:
         if exc.name == "scruffy":
             raise RuntimeError(
@@ -51,9 +111,187 @@ def _scruffy_publisher() -> Publish:
         ) from exc
     except ImportError as exc:
         raise RuntimeError("the installed Scruffy client is incompatible") from exc
+    publish_event = getattr(scruffy, "publish_event", None)
     if not callable(publish_event):
         raise RuntimeError("the installed Scruffy client has no callable publish_event")
-    return publish_event
+    return scruffy, publish_event
+
+
+def _publication_matches(
+    candidate: object, expected: Mapping[str, object]
+) -> bool | None:
+    """Compare durable artifact evidence without accepting malformed records."""
+
+    if not isinstance(candidate, Mapping):
+        return None
+    identity = ("v", "artifact_id", "path", "size_bytes", "sha256", "manifest_path")
+    if any(candidate.get(key) != expected.get(key) for key in identity):
+        return False
+    return True
+
+
+def _durable_artifact_evidence(
+    job: object, *, event_id: str, publication: Mapping[str, object]
+) -> tuple[bool, bool]:
+    """Return ``(accepted, conflict)`` from one journal-derived job view."""
+
+    if not isinstance(job, Mapping):
+        return False, False
+    evidence: list[object] = []
+    raw_evidence = job.get("artifact_evidence")
+    if isinstance(raw_evidence, list):
+        evidence.extend(raw_evidence)
+    workload = job.get("workload")
+    if isinstance(workload, Mapping):
+        latest = workload.get("latest_artifacts")
+        if isinstance(latest, list):
+            evidence.extend(latest)
+    accepted = False
+    conflict = False
+    for item in evidence:
+        if not isinstance(item, Mapping):
+            continue
+        observed_event_id = item.get("producer_event_id", item.get("event_id"))
+        if observed_event_id != event_id:
+            continue
+        match = _publication_matches(item.get("publication"), publication)
+        if match is True:
+            accepted = True
+        elif match is False:
+            conflict = True
+    return accepted, conflict
+
+
+def _ack_result(
+    result: object,
+    *,
+    checkpoint_path: str,
+    event_id: str,
+    publication: Mapping[str, object],
+) -> object:
+    """Classify a Scruffy acknowledgement result without hiding conflicts."""
+
+    if not isinstance(result, Mapping):
+        return None
+    state = result.get("state")
+    acknowledged = result.get("acknowledged")
+    if state == "accepted" and acknowledged is True:
+        return result
+    if state == "rejected" or acknowledged is False:
+        raise CheckpointArtifactAckRejected(
+            "Scruffy did not acknowledge checkpoint artifact publication: "
+            f"rejected (state={state!r})",
+            checkpoint_path=checkpoint_path,
+            event_id=event_id,
+            publication=publication,
+        )
+    return None
+
+
+def _is_conflict(exc: BaseException) -> bool:
+    """Recognize Scruffy conflict errors without requiring a private class."""
+
+    return "conflict" in type(exc).__name__.lower() or "already used" in str(exc).lower()
+
+
+def _reconcile_checkpoint_ack(
+    scruffy: Any,
+    *,
+    root: Path,
+    job_id: str,
+    event_id: str,
+    checkpoint_path: str,
+    publication: Mapping[str, object],
+    timeout: float,
+) -> object:
+    """Reconcile one spooled artifact without emitting another artifact event."""
+
+    wait_for_event_ack = getattr(scruffy, "wait_for_event_ack", None)
+    if callable(wait_for_event_ack):
+        try:
+            receipt = wait_for_event_ack(
+                root,
+                job_id=job_id,
+                event_id=event_id,
+                timeout=timeout,
+            )
+        except TimeoutError:
+            receipt = None
+        if isinstance(receipt, Mapping):
+            if receipt.get("state") == "accepted" or receipt.get("acknowledged") is True:
+                return receipt
+            if receipt.get("state") == "rejected" or receipt.get("acknowledged") is False:
+                raise CheckpointArtifactAckRejected(
+                    "Scruffy did not acknowledge checkpoint artifact publication: "
+                    "durably rejected",
+                    checkpoint_path=checkpoint_path,
+                    event_id=event_id,
+                    publication=publication,
+                )
+        elif isinstance(receipt, tuple) and len(receipt) == 2 and receipt[0]:
+            if receipt[1] is not None:
+                return receipt
+            raise CheckpointArtifactAckRejected(
+                "Scruffy did not acknowledge checkpoint artifact publication: "
+                "durably rejected",
+                checkpoint_path=checkpoint_path,
+                event_id=event_id,
+                publication=publication,
+            )
+
+    try:
+        from scruffy.storage import report_acknowledged
+    except (ImportError, AttributeError):
+        report_acknowledged = None
+    if callable(report_acknowledged):
+        try:
+            acknowledged, identity = report_acknowledged(root, job_id, event_id)
+        except Exception as exc:
+            if _is_conflict(exc):
+                raise CheckpointArtifactAckConflict(
+                    "Scruffy receipt evidence conflicts with checkpoint publication",
+                    checkpoint_path=checkpoint_path,
+                    event_id=event_id,
+                    publication=publication,
+                ) from exc
+            acknowledged, identity = False, None
+        if acknowledged and identity is None:
+            raise CheckpointArtifactAckRejected(
+                "Scruffy did not acknowledge checkpoint artifact publication: "
+                "durably rejected",
+                checkpoint_path=checkpoint_path,
+                event_id=event_id,
+                publication=publication,
+            )
+        if acknowledged and identity is not None:
+            return (acknowledged, identity)
+
+    status = getattr(scruffy, "status", None)
+    if callable(status):
+        try:
+            job = status(root, job_id)
+        except (OSError, KeyError, RuntimeError, ValueError, TypeError):
+            job = None
+        accepted, conflict = _durable_artifact_evidence(
+            job, event_id=event_id, publication=publication
+        )
+        if conflict:
+            raise CheckpointArtifactAckConflict(
+                "Scruffy durable job evidence conflicts with checkpoint publication",
+                checkpoint_path=checkpoint_path,
+                event_id=event_id,
+                publication=publication,
+            )
+        if accepted:
+            return job
+
+    raise CheckpointArtifactAckTimeout(
+        "checkpoint artifact acknowledgement deadline expired; durable evidence "
+        "remains unresolved",
+        checkpoint_path=checkpoint_path,
+        event_id=event_id,
+        publication=publication,
+    )
 
 
 def _scalar(value: Any) -> object:
@@ -350,7 +588,7 @@ def make_scruffy_hooks(
 
     root = Path(os.environ["SCRUFFY_ROOT"])
     job_id = os.environ["SCRUFFY_JOB_ID"]
-    publish_event = _scruffy_publisher()
+    scruffy, publish_event = _scruffy_client()
     source = {"name": "koochak"}
     node = os.environ.get("SCRUFFY_NODE", "").strip()
     if node:
@@ -375,29 +613,59 @@ def make_scruffy_hooks(
             and kind == "workload.artifact"
             and isinstance(publication, Mapping)
         )
-        result = publish_event(
-            root,
-            job_id=job_id,
-            kind=kind,
-            data=data,
-            source=source,
-            **({"event_id": event_id} if event_id is not None else {}),
-            **(
-                {"wait": True, "timeout": artifact_ack_timeout_s}
-                if wait_for_ack
-                else {}
-            ),
-        )
-        if wait_for_ack and (
-            not isinstance(result, Mapping)
-            or result.get("state") != "accepted"
-            or result.get("acknowledged") is not True
-        ):
-            state = result.get("state") if isinstance(result, Mapping) else None
-            raise RuntimeError(
-                "Scruffy did not acknowledge checkpoint artifact publication"
-                + (f" (state={state!r})" if state is not None else "")
+        try:
+            result = publish_event(
+                root,
+                job_id=job_id,
+                kind=kind,
+                data=data,
+                source=source,
+                **({"event_id": event_id} if event_id is not None else {}),
+                **(
+                    {"wait": True, "timeout": artifact_ack_timeout_s}
+                    if wait_for_ack
+                    else {}
+                ),
             )
+        except TimeoutError:
+            if not wait_for_ack or event_id is None or not isinstance(publication, Mapping):
+                raise
+            return _reconcile_checkpoint_ack(
+                scruffy,
+                root=root,
+                job_id=job_id,
+                event_id=event_id,
+                checkpoint_path=str(data.get("location", "")),
+                publication=publication,
+                timeout=float(artifact_ack_timeout_s),
+            )
+        except Exception as exc:
+            if wait_for_ack and event_id is not None and isinstance(publication, Mapping):
+                if _is_conflict(exc):
+                    raise CheckpointArtifactAckConflict(
+                        "Scruffy rejected a conflicting checkpoint artifact event ID",
+                        checkpoint_path=str(data.get("location", "")),
+                        event_id=event_id,
+                        publication=publication,
+                    ) from exc
+            raise
+        if wait_for_ack and event_id is not None and isinstance(publication, Mapping):
+            acknowledged = _ack_result(
+                result,
+                checkpoint_path=str(data.get("location", "")),
+                event_id=event_id,
+                publication=publication,
+            )
+            if acknowledged is None:
+                return _reconcile_checkpoint_ack(
+                    scruffy,
+                    root=root,
+                    job_id=job_id,
+                    event_id=event_id,
+                    checkpoint_path=str(data.get("location", "")),
+                    publication=publication,
+                    timeout=float(artifact_ack_timeout_s),
+                )
         return result
 
     return make_event_hooks(
