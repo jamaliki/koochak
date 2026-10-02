@@ -397,6 +397,8 @@ continue.
 
 Ready-manifest and staging publication use no-overwrite hard links, stable
 `O_NOFOLLOW` descriptor reads, inode checks, and read-only regular targets.
+A stable read that overlaps a publisher unlinking its staging name re-reads the
+file; any other size, mtime, ctime, or mode change during a read fails closed.
 These checks defend against accidental concurrent writers and ordinary
 replacement races. They assume cooperative same-user shared storage: a process
 with permission to mutate files and directories continuously can always race a

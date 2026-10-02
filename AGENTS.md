@@ -140,6 +140,7 @@ This list guides ongoing work. All contributors (agents and humans) should updat
   - Immutable file/directory ready manifests with deterministic file ordering, byte size, SHA256, provenance, and counts.
   - Declared output validation/publication in a managed child process group; SIGUSR1 is never sent to the parent allocation, surviving descendants fail closed, and partial event retries use deterministic IDs.
   - Shared-storage race checks use no-follow descriptors and no-overwrite links but assume cooperative same-user writers; use isolation for hostile same-UID workloads.
+  - Stable reads re-read only when a publisher releases its staging hard link mid-read (link count drops, ctime moves, size/mtime/mode unchanged); every other change fails closed.
   - Final-pin gate: after Scruffy stabilizes, update the optional dependency to its reviewed commit and rerun both repositories' full suites before release or deployment.
   - `storage.checkpoint.resolve_auto_resume()` returns the validated loaded payload alongside its path so callers can construct datasets from `next_step` before entering `training_loop`; preloaded selection retains `auto_resume_selected` and artifact republishing.
 

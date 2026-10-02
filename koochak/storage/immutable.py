@@ -8,43 +8,67 @@ import tempfile
 from pathlib import Path
 
 
-def read_stable_regular_file(filename: str | os.PathLike[str]) -> bytes:
-    """Read one non-symlink regular file and reject replacement or mutation races."""
+def _released_staging_link(before: os.stat_result, after: os.stat_result) -> bool:
+    """Whether the only change is a publisher unlinking its staging hard link."""
 
-    target = os.fspath(filename)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(target, flags)
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError(f"not a regular file: {target}")
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-
-    try:
-        current = os.lstat(target)
-    except FileNotFoundError as exc:
-        raise ValueError(f"file was replaced while reading: {target}") from exc
-    stable_identity = (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino) == (
-        current.st_dev,
-        current.st_ino,
-    )
-    stable_content = (
+    return after.st_nlink < before.st_nlink and (
         before.st_size,
         before.st_mtime_ns,
-        before.st_ctime_ns,
+        before.st_mode,
     ) == (
         after.st_size,
         after.st_mtime_ns,
-        after.st_ctime_ns,
+        after.st_mode,
     )
-    if not stable_identity or not stable_content or not stat.S_ISREG(current.st_mode):
-        raise ValueError(f"file changed while reading: {target}")
-    return b"".join(chunks)
+
+
+def read_stable_regular_file(filename: str | os.PathLike[str]) -> bytes:
+    """Read one non-symlink regular file and reject replacement or mutation races.
+
+    ``write_immutable_file`` links a staging file into place before unlinking the
+    staging name, so a reader can overlap one link-count drop that also moves
+    ``st_ctime``. That transition is re-read; every other change fails closed.
+    """
+
+    target = os.fspath(filename)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for _attempt in range(3):
+        descriptor = os.open(target, flags)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"not a regular file: {target}")
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+        try:
+            current = os.lstat(target)
+        except FileNotFoundError as exc:
+            raise ValueError(f"file was replaced while reading: {target}") from exc
+        stable_identity = (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino) == (
+            current.st_dev,
+            current.st_ino,
+        )
+        if not stable_identity or not stat.S_ISREG(current.st_mode):
+            raise ValueError(f"file changed while reading: {target}")
+        stable_content = (
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) == (
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if stable_content:
+            return b"".join(chunks)
+        if not _released_staging_link(before, after):
+            raise ValueError(f"file changed while reading: {target}")
+    raise ValueError(f"file changed while reading: {target}")
 
 
 def write_immutable_file(
