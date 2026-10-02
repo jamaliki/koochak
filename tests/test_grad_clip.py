@@ -136,6 +136,28 @@ def test_loop_clips_before_adam_and_rejects_nonfinite(tmp_path, invalid, check_e
                    for value in state.values() if isinstance(value, torch.Tensor))
 
 
+def test_loop_accepts_a_torch_style_clip_replacement(tmp_path, monkeypatch):
+    import koochak.loop as loop
+
+    calls = []
+
+    def torch_clip(parameters, max_norm, *args, **kwargs):
+        calls.append(max_norm)
+        return torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+
+    monkeypatch.setattr(loop, "clip_grad_norm_", torch_clip)
+    model = torch.nn.Linear(4, 4, bias=False)
+    rows = []
+    checkpoint = training_loop(
+        model=model, dataset=[torch.ones(2, 4)], step_fn=lambda m, b, c: {"loss": m(b).sum()},
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+        train_cfg=dict(max_steps=1, device="cpu", out_dir=str(tmp_path), log_every=1, grad_clip_norm=1.0),
+        hooks={"on_log": [lambda row, ctx: rows.append(row.copy())]},
+    )
+    assert calls == [1.0] and checkpoint["next_step"] == 1
+    assert "grad_clip_coefficient" not in rows[0]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_cuda_large_gradients_match_float64():
     param = parameter(torch.linspace(-1.0, 1.0, 4096, device="cuda") * 3e38)

@@ -18,7 +18,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 from .core import dist as dist_lib
 from .core import hooks as hooks_lib
-from .optim.grad_clip import clip_grad_norm_
+from .optim.grad_clip import GradientClipStats, clip_grad_norm_
 from .core.precision import Scaler as make_scaler, autocast_context, prepare_compile_backend
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
@@ -1415,13 +1415,17 @@ class _TrainLoop:
         grad_clip_start = self._profile_start()
         if self.settings.grad_clip_norm is not None:
             clipping = clip_grad_norm_(self.model.parameters(), float(self.settings.grad_clip_norm))
-            if stats.out is None:
-                stats.out = {}
-            stats.out.update(
-                grad_norm=clipping.norm,
-                grad_clip_coefficient=clipping.coefficient,
-                grad_clip_scaled_norm=int(clipping.used_scaled_norm),
-            )
+            # Callers may substitute a torch-style ``clip_grad_norm_`` (e.g. a
+            # safe-update policy) that returns only the norm tensor; then there
+            # are no clipping statistics to log.
+            if isinstance(clipping, GradientClipStats):
+                if stats.out is None:
+                    stats.out = {}
+                stats.out.update(
+                    grad_norm=clipping.norm,
+                    grad_clip_coefficient=clipping.coefficient,
+                    grad_clip_scaled_norm=int(clipping.used_scaled_norm),
+                )
         self._profile_add(stats.profile_timing_totals, "profile_loop_grad_clip_time_s", grad_clip_start)
 
         ema_wait_start = self._profile_start()
