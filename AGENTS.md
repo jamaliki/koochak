@@ -9,6 +9,11 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Implemented so far
 
+- Lightweight launch imports
+  - Evacuation constants and controller construction do not import Torch.
+    Rank reconciliation imports Torch when training calls it. A subprocess test
+    checks that launch preparation and the runner import with Torch unavailable.
+
 - Core loop
   - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. The loop atomically saves its terminal in-memory state before completion hooks and returns the same resume-ready checkpoint dict.
   - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner. Clipping and the optional nonfinite-gradient check reject invalid entries before the optimizer step.
