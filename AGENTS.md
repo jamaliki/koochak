@@ -10,6 +10,7 @@ This doc tracks incremental design decisions and changes from the initial design
 ## Implemented so far
 
 - Lightweight launch imports
+  - The Pazuzu adapter reads `CommandResult.exit_code` and tests every staged artifact.
   - Evacuation constants and controller construction do not import Torch.
     Rank reconciliation imports Torch when training calls it. A subprocess test
     checks that launch preparation and the runner import with Torch unavailable.

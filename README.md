@@ -7,6 +7,7 @@ A tiny, hackable, function‑first training loop for PyTorch. Built to be easy t
 Launch preparation and the manifest runner do not import Torch unless a requested
 preflight needs it. CPU bootstrap jobs can use an environment with OmegaConf and
 no Torch; training imports Torch when it starts.
+The Pazuzu adapter checks its typed `exit_code` before submitting a staged run.
 
 Koochak prepares reproducible workloads; it deliberately does not own cluster
 connectivity or GPU scheduling. It integrates with two small, independent

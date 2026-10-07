@@ -81,7 +81,7 @@ async def _stage_artifact(client: Any, python: str, artifact: Artifact) -> None:
         stdin=artifact.content,
         timeout=60,
     )
-    if result.returncode:
+    if result.exit_code:
         raise RuntimeError(
             f"failed to stage {artifact.path}: {(result.stderr or result.stdout).strip()}"
         )

@@ -52,7 +52,7 @@ def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
 
         async def run(self, command, *, stdin, timeout):
             self.staged.append((command, stdin, timeout))
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
 
         async def submit_slurm(self, job):
             self.job = job
@@ -70,9 +70,9 @@ def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
     )
 
     assert result == "handle"
-    assert len(client.staged) == 1
-    assert client.staged[0][1] == prepared.artifacts[0].content
-    assert prepared.artifacts[0].content.decode() not in client.staged[0][0]
+    assert len(client.staged) == len(prepared.artifacts)
+    assert [row[1] for row in client.staged] == [artifact.content for artifact in prepared.artifacts]
+    assert prepared.artifacts[-1].content.decode() not in client.staged[-1][0]
     assert client.job.argv == prepared.runner_argv()
     assert client.job.environment == {}
     assert client.job.resources is resources
