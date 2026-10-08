@@ -12,6 +12,13 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Implemented so far
 
+- EMA device placement
+  - `offload_to_cpu=False` keeps shadows on each parameter's device without CPU
+    staging buffers. CPU offload retains its async CUDA snapshot path.
+  - Restore waits for pending offload work and copies checkpoint tensors to each
+    shadow's destination device. CPU and CUDA tests cover updates, resume, eval
+    swaps, and frozen-parameter exclusion.
+
 - Core loop
   - `koochak/loop.py` implements the function-first `training_loop(...)` with AMP, grad accumulation, grad clipping, auto DDP bootstrap/wrapping, eval hooks, EMA (single + dual) tracking, and deterministic checkpointing. The loop atomically saves its terminal in-memory state before completion hooks and returns the same resume-ready checkpoint dict.
   - Loop uses small, focused helpers for precision, config, device, RNG state (including per-rank gather/restore), sharding, and hooks dispatch, and emits a rank-0 parameter-count banner. Clipping and the optional nonfinite-gradient check reject invalid entries before the optimizer step.
