@@ -5,12 +5,11 @@ import torch
 
 class EMA:
     """
-    CPU-offloaded EMA of trainable params.
+    EMA of trainable parameters, with optional CPU offload.
 
-    - shadow weights live on CPU (fp32)
-    - per-param pinned CPU staging buffers receive nonblocking GPU->CPU copies
-    - CUDA snapshots use a side stream so the next forward/backward can overlap
-    - CPU shadow math runs in a single background worker when offloaded from CUDA
+    - shadows stay on each parameter's device unless CPU offload is enabled
+    - CPU offload uses staging buffers and a side stream for CUDA snapshots
+    - a background worker updates CPU shadows after each CUDA snapshot
     - `update_every` lets you thin updates to reduce overhead
     """
 
@@ -101,13 +100,12 @@ class EMA:
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            # shadow on CPU, fp32
-            self.shadow[name] = p.detach().to("cpu", dtype=self.dtype).clone()
-            # pinned staging buffer for async copies
-            if self.offload and p.is_cuda and self.pin_memory:
-                self.staging[name] = torch.empty_like(self.shadow[name], device="cpu", pin_memory=True)
-            else:
-                self.staging[name] = torch.empty_like(self.shadow[name], device="cpu")
+            device = torch.device("cpu") if self.offload else p.device
+            self.shadow[name] = p.detach().to(device=device, dtype=self.dtype).clone()
+            if self.offload:
+                self.staging[name] = torch.empty_like(
+                    self.shadow[name], device="cpu", pin_memory=p.is_cuda and self.pin_memory
+                )
             self.pending_event[name] = None
             self.pending_decay[name] = self.decay
             if self.offload and p.is_cuda and self._copy_device is None:
@@ -143,10 +141,9 @@ class EMA:
         for name, p in model.named_parameters():
             if not p.requires_grad or name not in self.shadow:
                 continue
-            # model on CPU or offload disabled: do EMA immediately on CPU
             dst = self.shadow[name]
-            src_cpu = p.detach().to("cpu", dtype=self.dtype)
-            dst.mul_(d).add_(src_cpu, alpha=(1.0 - d))
+            src = p.detach().to(device=dst.device, dtype=self.dtype)
+            dst.mul_(d).add_(src, alpha=(1.0 - d))
         self._last_update_step_counter = self._step_counter
 
     def wait_before_param_mutation(self) -> None:
@@ -178,7 +175,9 @@ class EMA:
             "dtype": str(self.dtype),
         }
 
+    @torch.no_grad()
     def load_state_dict(self, state: Dict[str, object]) -> None:
+        self.flush()
         decay = state.get("decay", self.decay)
         if isinstance(decay, (int, float)):
             self.decay = float(decay)
@@ -206,7 +205,8 @@ class EMA:
         if isinstance(shadow, dict):
             for k, v in shadow.items():
                 if k in self.shadow and isinstance(v, torch.Tensor):
-                    self.shadow[k].data.copy_(v.to(dtype=self.dtype, device="cpu"))
+                    dst = self.shadow[k]
+                    dst.copy_(v.to(dtype=self.dtype, device=dst.device))
 
     # ---- eval helpers ----
     @torch.no_grad()

@@ -35,7 +35,7 @@ def test_async_cuda_offload_matches_synchronous_ema_with_mutation_guard() -> Non
     async_shadow = ema_async.state_dict(clone=True)["shadow"]
     sync_shadow = ema_sync.state_dict(clone=True)["shadow"]
     for name, expected in sync_shadow.items():
-        torch.testing.assert_close(async_shadow[name], expected, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(async_shadow[name], expected.cpu(), atol=1e-7, rtol=1e-6)
 
 
 def test_wait_before_param_mutation_protects_async_snapshot() -> None:

@@ -9,6 +9,13 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Implemented so far
 
+- EMA device placement
+  - `offload_to_cpu=False` keeps shadows on each parameter's device without CPU
+    staging buffers. CPU offload retains its async CUDA snapshot path.
+  - Restore waits for pending offload work and copies checkpoint tensors to each
+    shadow's destination device. CPU and CUDA tests cover updates, resume, eval
+    swaps, and frozen-parameter exclusion.
+
 - Lightweight launch imports
   - EnvironmentProfile creates its package default with a factory before freezing
     it, so the dataclass also imports on Python 3.11.
