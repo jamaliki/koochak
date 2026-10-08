@@ -8,6 +8,14 @@ import pytest
 from koochak.jobs import EnvironmentProfile, load_environment_profile
 
 
+def test_default_packages_are_independent_and_immutable() -> None:
+    profiles = [EnvironmentProfile("empty", "/python", {"PATH": "/bin"}) for _ in range(2)]
+    assert dict(profiles[0].packages) == {}
+    assert profiles[0].packages is not profiles[1].packages
+    with pytest.raises(TypeError):
+        profiles[0].packages["torch"] = "*"
+
+
 def _profile_text(**replacements: str) -> str:
     values = {
         "python": sys.executable,

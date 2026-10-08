@@ -10,6 +10,8 @@ This doc tracks incremental design decisions and changes from the initial design
 ## Implemented so far
 
 - Lightweight launch imports
+  - EnvironmentProfile creates its package default with a factory before freezing
+    it, so the dataclass also imports on Python 3.11.
   - The Pazuzu adapter reads `CommandResult.exit_code` and tests every staged artifact.
   - Evacuation constants and controller construction do not import Torch.
     Rank reconciliation imports Torch when training calls it. A subprocess test
