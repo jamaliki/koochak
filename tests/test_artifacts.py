@@ -140,6 +140,35 @@ def test_descriptor_hash_rejects_file_mutation_during_read(
         build_artifact_manifest(output)
 
 
+@pytest.mark.parametrize("mutate", [False, True])
+def test_stable_read_rereads_only_a_released_staging_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate: bool
+) -> None:
+    staging = tmp_path / ".result.bin.ready.json.staging"
+    staging.write_bytes(b"manifest")
+    target = tmp_path / "result.bin.ready.json"
+    os.link(staging, target)
+    original_read = immutable_lib.os.read
+    released = False
+
+    def release_staging_link(descriptor: int, size: int) -> bytes:
+        nonlocal released
+        if not released:
+            released = True
+            staging.unlink()
+            if mutate:
+                with open(target, "ab") as stream:
+                    stream.write(b"!")
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(immutable_lib.os, "read", release_staging_link)
+    if mutate:
+        with pytest.raises(ValueError, match="changed while reading"):
+            immutable_lib.read_stable_regular_file(target)
+    else:
+        assert immutable_lib.read_stable_regular_file(target) == b"manifest"
+
+
 def test_directory_snapshot_rejects_mutation_during_traversal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
