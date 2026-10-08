@@ -138,12 +138,22 @@ class EMA:
             self._last_update_step_counter = self._step_counter
             return
 
+        groups = {}
         for name, p in model.named_parameters():
             if not p.requires_grad or name not in self.shadow:
                 continue
             dst = self.shadow[name]
             src = p.detach().to(device=dst.device, dtype=self.dtype)
-            dst.mul_(d).add_(src, alpha=(1.0 - d))
+            # Foreach scalar arithmetic rounds differently for reduced precision.
+            if dst.dtype not in (torch.float32, torch.float64):
+                dst.mul_(d).add_(src, alpha=(1.0 - d))
+                continue
+            destinations, sources = groups.setdefault((dst.device, dst.dtype), ([], []))
+            destinations.append(dst)
+            sources.append(src)
+        for destinations, sources in groups.values():
+            torch._foreach_mul_(destinations, d)
+            torch._foreach_add_(destinations, sources, alpha=(1.0 - d))
         self._last_update_step_counter = self._step_counter
 
     def wait_before_param_mutation(self) -> None:

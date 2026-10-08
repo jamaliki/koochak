@@ -131,6 +131,7 @@ This list guides ongoing work. All contributors (agents and humans) should updat
 - CSV and JSONL loggers [DONE]
 - Wire CSV/JSONL logging via YAML and attach hooks in example [DONE]
 - Stats utils: SmoothedMeter, Throughput, EMA [DONE]
+  - Resident FP32/FP64 EMA groups updates by device and dtype, using separate foreach multiply and add operations. Reduced-precision shadows keep per-tensor rounding; checkpoint fields and asynchronous CPU offload stay unchanged.
 - Config system overhaul (OmegaConf structured defaults + section-based loader) [DONE]
 - Refine stdout formatting to optionally include smoothed stats [TODO]
 - Extract remaining storage helpers (e.g., artifact naming) if needed [TODO]
