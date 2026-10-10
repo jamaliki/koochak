@@ -4,6 +4,9 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Important things to keep in mind
 
+- Execution profile package defaults use a factory so Python 3.11 can import
+  the dataclass. Keep this covered by the profile tests.
+
 - The philosophy is *functions first*
 - Do not catch exceptions unless necessary, fail *fast and loud* if an unexpected error occurs. If we are expected to have some errors, those should be caught explicitly and not silently.
 

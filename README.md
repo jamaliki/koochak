@@ -1,5 +1,8 @@
 # Koochak
 
+Execution profiles use a factory for immutable package defaults so imports
+work under Python 3.11 as well as newer Python versions.
+
 A tiny, hackable, function‑first training loop for PyTorch. Built to be easy to read, fork, and extend. It favors explicit functions and small modules over opaque classes or global state.
 
 ## Related Projects

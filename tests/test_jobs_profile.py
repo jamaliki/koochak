@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import MISSING, fields
 from pathlib import Path
 
 import pytest
 
 from koochak.jobs import EnvironmentProfile, load_environment_profile
+
+
+def test_profile_packages_uses_a_factory_for_python311():
+    packages = next(item for item in fields(EnvironmentProfile) if item.name == 'packages')
+    assert packages.default is MISSING
+    first = EnvironmentProfile('test', sys.executable, {'PATH': '/usr/bin'})
+    second = EnvironmentProfile('test', sys.executable, {'PATH': '/usr/bin'})
+    assert first.packages == second.packages == {}
+    assert first.packages is not second.packages
+    with pytest.raises(TypeError):
+        first.packages['torch'] = '*'
 
 
 def _profile_text(**replacements: str) -> str:

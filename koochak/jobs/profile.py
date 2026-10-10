@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from string import Formatter
 from types import MappingProxyType
@@ -145,7 +145,7 @@ class EnvironmentProfile:
     create_directories: tuple[str, ...] = ()
     executables: tuple[str, ...] = ()
     files: tuple[str, ...] = ()
-    packages: Mapping[str, str] = MappingProxyType({})
+    packages: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     preflight: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
