@@ -59,7 +59,7 @@ def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
 
         async def run(self, command, *, stdin, timeout):
             self.staged.append((command, stdin, timeout))
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
 
         async def submit_slurm(self, job):
             self.job = job
@@ -122,6 +122,23 @@ def test_pazuzu_adapter_stages_over_stdin_and_submits_runner(
     ]
     assert client.job.environment == {}
     assert client.job.resources is resources
+
+
+def test_pazuzu_staging_failure_does_not_submit(tmp_path, monkeypatch):
+    prepared = _prepared(tmp_path)
+    module = types.ModuleType("pazuzu")
+    module.SlurmJob = lambda **values: SimpleNamespace(**values)
+    monkeypatch.setitem(sys.modules, "pazuzu", module)
+
+    class Client:
+        async def run(self, command, *, stdin, timeout):
+            return SimpleNamespace(exit_code=1, stdout="", stderr="staging failed")
+
+        async def submit_slurm(self, job):
+            pytest.fail("A failed staging command must prevent submission")
+
+    with pytest.raises(RuntimeError, match="staging failed"):
+        asyncio.run(submit_pazuzu(Client(), prepared, resources=object(), log_dir="/logs"))
 
 
 def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(

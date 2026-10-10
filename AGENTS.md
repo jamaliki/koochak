@@ -81,6 +81,7 @@ This doc tracks incremental design decisions and changes from the initial design
 - Jobs
   - `koochak/jobs` compiles strict environment YAML and resolved training config into an immutable launch manifest.
   - One isolated runner verifies the environment and uses exact Python argv for both Pazuzu and Scruffy. Thin adapters retain each backend's native resource model.
+  - Pazuzu staging reads `CommandResult.exit_code`; failed staging prevents Slurm submission. Tests use the client's result fields, not subprocess fields.
   - Agent-authored experiment submission must live in a committed Python script using `prepare_run`, then `submit_pazuzu` or `submit_scruffy`. Do not assemble SSH, `sbatch`, or scheduler CLI submissions in tool calls.
   - `submit_scruffy(..., wait_for=[...])` declares intermediate artifact gates.
     Use the numbered checkpoint artifact ID and never `latest.pt`.

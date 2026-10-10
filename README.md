@@ -421,7 +421,8 @@ prepared = prepare_run(
 )
 ```
 
-For a standalone Slurm job, pass backend-native resources to Pazuzu:
+For a standalone Slurm job, pass backend-native resources to Pazuzu. The adapter
+checks each staging command's `CommandResult.exit_code` before submitting:
 
 ```python
 from pazuzu import PazuzuClient, SlurmResources
