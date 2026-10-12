@@ -505,6 +505,8 @@ class _TrainLoop:
         self.eval_fn = eval_fn
         self.prepare_batch_fn = prepare_batch_fn
         self.hooks = hooks
+        if self.settings.checkpoint_async and hooks and hooks.get("on_checkpoint_all_ranks"):
+            raise ValueError("All-rank checkpoint hooks require synchronous publication")
         self.checkpoint_dict = checkpoint_dict
         self.resume_mode = str(
             resume if resume is not None else config_lib.get(train_config, "resume", "none")
@@ -903,6 +905,8 @@ class _TrainLoop:
                 torch.distributed.all_gather_object(gathered, rng_record)
                 rng_record = {"per_rank": gathered}
         except RuntimeError:
+            if self._gather_checkpoint_rng:
+                raise
             rng_record = None
         ckpt: Dict[str, Any] = {
             "step": step,
@@ -960,6 +964,14 @@ class _TrainLoop:
         path, (ckpt, step, emit_hook) = finished
         if emit_hook:
             _emit(self.hooks, "on_checkpoint", path, ckpt, self._step_ctx(step))
+
+    def _checkpoint_all_ranks(self, path: str, ckpt: Dict[str, Any], step: int) -> None:
+        if not self.hooks or not self.hooks.get("on_checkpoint_all_ranks"):
+            return
+        dist_lib.barrier()
+        _emit(self.hooks, "on_checkpoint_all_ranks", path, ckpt, self._step_ctx(step),
+              suppress_exceptions=False)
+        dist_lib.barrier()
 
     def _poll_checkpoint(self) -> None:
         if self.checkpoint_publisher is not None:
@@ -1101,9 +1113,10 @@ class _TrainLoop:
 
     def _update_ema(self, step: int) -> None:
         settings = self.ema_settings
-        if self.ema is None and settings.enabled and self.is_rank0:
+        all_ranks = bool(self.hooks and self.hooks.get("on_checkpoint_all_ranks"))
+        if self.ema is None and settings.enabled and (self.is_rank0 or all_ranks):
             self.ema = settings.build(self._module_for_state())
-        if not self.ema_dual and settings.dual.enabled and self.is_rank0:
+        if not self.ema_dual and settings.dual.enabled and (self.is_rank0 or all_ranks):
             self.ema_dual = settings.build_dual(self._module_for_state())
         if self.ema is None:
             if not self.ema_dual:
@@ -1347,6 +1360,7 @@ class _TrainLoop:
                     self.final_ckpt,
                     self._step_ctx(next_step),
                 )
+            self._checkpoint_all_ranks(terminal_path, self.final_ckpt, next_step)
             if interrupted:
                 if self.is_rank0:
                     _emit(
@@ -1496,9 +1510,19 @@ class _TrainLoop:
             return True
 
         checkpoint_start = self._profile_start()
-        if step > 0 and (step % self.settings.ckpt_every == 0) and self.is_rank0:
-            _, ckpt = self._save_checkpoint(step, background=self.settings.checkpoint_async)
-            self.final_ckpt = ckpt
+        if step > 0 and (step % self.settings.ckpt_every == 0):
+            self._gather_checkpoint_rng = True
+            try:
+                if self.is_rank0:
+                    saved_path, ckpt = self._save_checkpoint(step, background=self.settings.checkpoint_async)
+                    self.final_ckpt = ckpt
+                else:
+                    ckpt = self._build_checkpoint(step)
+                    saved_path = checkpoint_lib.checkpoint_path(
+                        self.checkpoint_store, f"step{step:09d}.pt")
+            finally:
+                self._gather_checkpoint_rng = False
+            self._checkpoint_all_ranks(saved_path, ckpt, step)
         self._poll_checkpoint()
         self._profile_add(
             stats.profile_timing_totals,

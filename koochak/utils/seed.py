@@ -24,6 +24,8 @@ def get_rng_state() -> Dict[str, Any]:
 
 def set_rng_state(state: Dict[str, Any]) -> None:
     """Restore RNG state previously produced by get_rng_state()."""
+    if state.get("python") is not None:
+        random.setstate(state["python"])
     if np is not None and state.get("numpy") is not None:
         np.random.set_state(state["numpy"])  # type: ignore[arg-type]
     if state.get("torch_cpu") is not None:

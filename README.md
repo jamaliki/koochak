@@ -173,7 +173,12 @@ composed through functions and event hooks rather than subclasses, while the
 returned checkpoint captures everything required to resume the optimization
 state deterministically. With `train.checkpoint_async`, the loop keeps training
 while a background thread publishes the checkpoint; `on_checkpoint` fires once
-its manifest has committed, and the terminal save waits for any pending one.
+the ready manifest commits. `on_checkpoint_all_ranks(path, checkpoint, context)`
+instead runs on every rank between barriers after synchronous publication.
+Registering it rejects `checkpoint_async: true` and keeps an EMA on every rank.
+Its errors stop training. Use it for collective sampling audits that must pause
+all ranks. Each callback must preserve training parameters and RNG state.
+The terminal save waits for any pending background publication.
 
 ## Goals
 
@@ -947,7 +952,7 @@ optim:
 - `koochak.utils.seed.make_worker_init_fn(seed)` seeds DataLoader workers deterministically.
 - RNG state is stored in checkpoints (`get_rng_state()`), so resumed runs continue deterministically.
 - On resume, the training loop restores RNG state from the checkpoint (Python/NumPy/Torch CPU/CUDA) before resuming steps, so randomness inside `step_fn` (e.g., `torch.rand`) is reproducible across restarts.
-- In DDP, prefer per-rank seeding (e.g., `set_all_seeds(seed + rank)`) and rank-aware worker seeding (`make_worker_init_fn(seed, rank=rank)`) to avoid correlated randomness. Checkpoints saved on rank 0 include per-rank RNG states and are used on resume to restore each rank’s RNG deterministically.
+- In DDP, prefer per-rank seeding (e.g., `set_all_seeds(seed + rank)`) and rank-aware worker seeding (`make_worker_init_fn(seed, rank=rank)`) to avoid correlated randomness. Both periodic and terminal checkpoints gather every rank's RNG state before rank zero publishes them. Resume restores Python, NumPy and Torch CPU/CUDA state for the current rank. A failed gather stops publication.
 
 ## Contributing
 
