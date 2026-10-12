@@ -181,6 +181,7 @@ class _TrainSettings:
     eval_every: int
     eval_at_step_zero: bool
     ckpt_every: int
+    intervals_use_completed_steps: bool
     rank_timing_every: int
     rank_timing_extra_keys: tuple[str, ...]
     out_dir: str
@@ -242,6 +243,7 @@ class _TrainSettings:
             eval_every=int(get(train_cfg, "eval_every", 5_000)),
             eval_at_step_zero=bool(get(train_cfg, "eval_at_step_zero", True)),
             ckpt_every=int(get(train_cfg, "ckpt_every", 5_000)),
+            intervals_use_completed_steps=bool(get(train_cfg, "intervals_use_completed_steps", False)),
             rank_timing_every=int(get(train_cfg, "rank_timing_every", 0)),
             rank_timing_extra_keys=tuple(
                 str(k) for k in (get(train_cfg, "rank_timing_keys", ()) or ())
@@ -1268,9 +1270,10 @@ class _TrainLoop:
             return
         if self.settings.eval_every <= 0:
             return
-        if step == 0 and not self.settings.eval_at_step_zero:
+        interval_step = step + int(self.settings.intervals_use_completed_steps)
+        if interval_step == 0 and not self.settings.eval_at_step_zero:
             return
-        if (step % self.settings.eval_every) != 0:
+        if (interval_step % self.settings.eval_every) != 0:
             return
         if self.ema is not None and self.ema_settings.eval_with_ema:
             metrics = self._eval_with_ema(step)
@@ -1510,19 +1513,22 @@ class _TrainLoop:
             return True
 
         checkpoint_start = self._profile_start()
-        if step > 0 and (step % self.settings.ckpt_every == 0):
+        interval_step = step + int(self.settings.intervals_use_completed_steps)
+        terminal_due = self.settings.intervals_use_completed_steps and interval_step == self.settings.max_steps
+        if interval_step > 0 and interval_step % self.settings.ckpt_every == 0 and not terminal_due:
             self._gather_checkpoint_rng = True
             try:
                 if self.is_rank0:
-                    saved_path, ckpt = self._save_checkpoint(step, background=self.settings.checkpoint_async)
+                    saved_path, ckpt = self._save_checkpoint(interval_step, next_step=step + 1,
+                                                          background=self.settings.checkpoint_async)
                     self.final_ckpt = ckpt
                 else:
-                    ckpt = self._build_checkpoint(step)
+                    ckpt = self._build_checkpoint(interval_step, next_step=step + 1)
                     saved_path = checkpoint_lib.checkpoint_path(
-                        self.checkpoint_store, f"step{step:09d}.pt")
+                        self.checkpoint_store, f"step{interval_step:09d}.pt")
             finally:
                 self._gather_checkpoint_rng = False
-            self._checkpoint_all_ranks(saved_path, ckpt, step)
+            self._checkpoint_all_ranks(saved_path, ckpt, interval_step)
         self._poll_checkpoint()
         self._profile_add(
             stats.profile_timing_totals,

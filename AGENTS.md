@@ -10,6 +10,8 @@ This doc tracks incremental design decisions and changes from the initial design
   failures must stop publication. Restore Python, NumPy and Torch state on resume.
 - `on_checkpoint_all_ranks` runs between barriers after synchronous publication.
   It keeps an EMA on every rank, rejects async publication and propagates errors.
+- `intervals_use_completed_steps` aligns eval and checkpoint intervals with the
+  completed-update cursor; it avoids a periodic/terminal filename conflict on resume.
 
 - The philosophy is *functions first*
 - Do not catch exceptions unless necessary, fail *fast and loud* if an unexpected error occurs. If we are expected to have some errors, those should be caught explicitly and not silently.

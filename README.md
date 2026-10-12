@@ -179,6 +179,10 @@ Registering it rejects `checkpoint_async: true` and keeps an EMA on every rank.
 Its errors stop training. Use it for collective sampling audits that must pause
 all ranks. Each callback must preserve training parameters and RNG state.
 The terminal save waits for any pending background publication.
+Set `train.intervals_use_completed_steps: true` to count evaluation and checkpoint
+intervals in completed updates. Numbered periodic checkpoints then use the same
+cursor as terminal checkpoints. The terminal save replaces a periodic save due
+on the final update. The default keeps the historical zero-based intervals.
 
 ## Goals
 
