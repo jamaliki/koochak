@@ -12,6 +12,8 @@ This doc tracks incremental design decisions and changes from the initial design
   It keeps an EMA on every rank, rejects async publication and propagates errors.
 - `intervals_use_completed_steps` aligns eval and checkpoint intervals with the
   completed-update cursor; it avoids a periodic/terminal filename conflict on resume.
+- Keep submission imports free of Torch. Evacuation imports the distributed
+  runtime only when the controller reconciles a request.
 
 - The philosophy is *functions first*
 - Do not catch exceptions unless necessary, fail *fast and loud* if an unexpected error occurs. If we are expected to have some errors, those should be caught explicitly and not silently.

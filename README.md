@@ -186,6 +186,9 @@ on the final update. The default keeps the historical zero-based intervals.
 
 ## Goals
 
+Importing `koochak.jobs` does not load Torch. CPU submission hosts need only the
+config dependencies; compute workers load the training runtime when they use it.
+
 - Functional core: a single `training_loop(...)` with a clear, compact signature.
 - Hackable: pure-PyTorch, minimal magic, everything explicit via a small config mapping.
 - Iterable-first: data is any iterable (finite or infinite). No hidden epoch semantics.

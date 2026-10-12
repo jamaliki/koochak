@@ -5,10 +5,6 @@ from __future__ import annotations
 import signal
 import threading
 
-import torch
-
-from .core import dist as dist_lib
-
 __all__ = [
     "CHECKPOINT_ACK_TIMEOUT_EXIT_CODE",
     "EVACUATION_EXIT_CODE",
@@ -96,6 +92,9 @@ class EvacuationController:
 
     def reconcile(self) -> bool:
         """Reconcile local requests across DDP ranks using a MAX reduction."""
+
+        import torch
+        from .core import dist as dist_lib
 
         requested = bool(self._requested)
         if (
