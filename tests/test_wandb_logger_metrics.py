@@ -1,5 +1,7 @@
 import sys
 
+import pytest
+
 from koochak.logging.wandb_logger import make_wandb_hooks
 
 
@@ -93,3 +95,14 @@ def test_wandb_step_zero_log_commits_when_initial_eval_is_suppressed():
 
     assert fake.logged[0][1]["step"] == 0
     assert fake.logged[0][1]["commit"] is True
+
+
+@pytest.mark.parametrize("step,commit", [(0, True), (4998, True), (4999, False), (5000, True)])
+def test_wandb_commit_matches_completed_update_eval(step, commit, monkeypatch):
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    hooks = make_wandb_hooks({"name": "completed-steps"})
+    for callback in hooks["on_log"]:
+        callback({"loss": 1.}, {"step": step, "train_cfg": {
+            "eval_every": 5000, "intervals_use_completed_steps": True}})
+    assert fake.logged[0][1]["commit"] is commit

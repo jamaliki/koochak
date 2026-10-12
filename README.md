@@ -182,7 +182,9 @@ The terminal save waits for any pending background publication.
 Set `train.intervals_use_completed_steps: true` to count evaluation and checkpoint
 intervals in completed updates. Numbered periodic checkpoints then use the same
 cursor as terminal checkpoints. The terminal save replaces a periodic save due
-on the final update. The default keeps the historical zero-based intervals.
+on the final update. W&B uses the same evaluation cadence when it decides
+whether to commit training and validation metrics together. The default keeps
+the historical zero-based intervals.
 
 ## Goals
 

@@ -12,6 +12,7 @@ This doc tracks incremental design decisions and changes from the initial design
   It keeps an EMA on every rank, rejects async publication and propagates errors.
 - `intervals_use_completed_steps` aligns eval and checkpoint intervals with the
   completed-update cursor; it avoids a periodic/terminal filename conflict on resume.
+  W&B must use the same cadence when committing training and validation metrics.
 - Keep submission imports free of Torch. Evacuation imports the distributed
   runtime only when the controller reconciles a request.
 
