@@ -409,30 +409,33 @@ def _require_quiescent_group(process_group: int, *, cleanup_seconds: float = 1.0
 
 
 def _publish_outputs(outputs: tuple[DeclaredOutput, ...], environment: Mapping[str, str]) -> None:
-    """Validate all outputs before publishing any typed artifact event."""
+    """Validate outputs and publish events only for Scruffy workers."""
 
     manifests = [validate_artifact(output) for output in outputs]
-    try:
-        from scruffy import publish_event
-    except ModuleNotFoundError as exc:
-        if exc.name == "scruffy":
-            raise PreflightError("declared outputs require the Scruffy client") from exc
-        raise PreflightError("the installed Scruffy client is missing a dependency") from exc
-    except ImportError as exc:
-        raise PreflightError("the installed Scruffy client is incompatible") from exc
-
     root = environment.get("SCRUFFY_ROOT")
     job_id = environment.get("SCRUFFY_JOB_ID")
-    if not root or not job_id:
-        raise PreflightError(
-            "declared outputs require SCRUFFY_ROOT and SCRUFFY_JOB_ID runtime identity"
-        )
+    publish_event = None
+    if "SCRUFFY_ROOT" in environment or "SCRUFFY_JOB_ID" in environment:
+        if not root or not job_id:
+            raise PreflightError(
+                "declared outputs require both SCRUFFY_ROOT and SCRUFFY_JOB_ID for Scruffy workers"
+            )
+        try:
+            from scruffy import publish_event
+        except ModuleNotFoundError as exc:
+            if exc.name == "scruffy":
+                raise PreflightError("declared outputs require the Scruffy client") from exc
+            raise PreflightError("the installed Scruffy client is missing a dependency") from exc
+        except ImportError as exc:
+            raise PreflightError("the installed Scruffy client is incompatible") from exc
     for output, initial_manifest in zip(outputs, manifests):
         manifest = validate_artifact(output)
         if manifest != initial_manifest:
             raise PreflightError(
                 f"declared output changed during publication: {output.artifact_id}"
             )
+        if publish_event is None:
+            continue
         identity = hashlib.sha256(
             f"{job_id}\0{output.artifact_id}\0{manifest['sha256']}".encode()
         ).hexdigest()

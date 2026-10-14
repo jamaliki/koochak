@@ -402,7 +402,10 @@ integer `grace_seconds`.
 `DeclaredOutput` describes a file or directory that a consumer may wait for.
 The workload must create the output and atomically publish its
 `<output>.ready.json` manifest. After a successful child exit, Koochak validates
-all declared outputs before publishing typed `workload.artifact` events. A
+all declared outputs. Standalone Pazuzu runs validate the ready manifests twice
+without importing Scruffy or sending events. Scruffy workers require both
+`SCRUFFY_ROOT` and `SCRUFFY_JOB_ID`, then publish typed `workload.artifact` events.
+An incomplete or empty Scruffy identity fails the runner. A
 missing, corrupt, symlinked, or unpublishable output fails the runner. A
 SIGUSR1 request is forwarded only to that child process group and never to the
 parent Slurm allocation. If the leader exits while descendants remain, Koochak

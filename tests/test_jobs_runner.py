@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import signal
@@ -340,6 +341,113 @@ def test_managed_runner_publishes_declared_output_after_child_success(
     assert len(published) == 1
     assert published[0]["kind"] == "workload.artifact"
     assert published[0]["data"]["publication"]["artifact_id"] == "result"  # type: ignore[index]
+
+
+def test_standalone_runner_completes_two_published_outputs_without_scruffy(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    marker = tmp_path / "scruffy-imported"
+    (source / "scruffy.py").write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).touch(); raise AssertionError('unexpected Scruffy import')"
+    )
+    profile = EnvironmentProfile(profile_id="standalone-outputs", python=sys.executable,
+        variables={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+                   "PYTHONPATH": f"{source}:{Path(__file__).resolve().parents[1]}"})
+    folder = tmp_path / "run"
+    outputs = [DeclaredOutput(name, str(folder / f"{name}.txt")) for name in ("first", "second")]
+    code = "\n".join([
+        "from pathlib import Path", "from koochak.storage.artifact import DeclaredOutput, publish_artifact",
+        *[f"Path({output.path!r}).write_text({output.artifact_id!r}); "
+          f"publish_artifact(DeclaredOutput({output.artifact_id!r}, {output.path!r}))" for output in outputs],
+    ])
+    prepared = prepare_run(name="standalone-outputs", profile=profile,
+        python_args=["-I", "-c", code], cwd=str(tmp_path), run_dir=str(folder), declared_outputs=outputs)
+    stage_run(prepared)
+    result = subprocess.run(prepared.runner_argv(), capture_output=True, text=True,
+        env={"HOME": str(tmp_path), "SLURM_JOB_ID": "standalone-123"}, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    preflight = json.loads((folder / "preflight.json").read_text())
+    assert preflight["state"] == "completed" and preflight["outputs"] == ["first", "second"]
+
+
+def test_standalone_outputs_keep_two_validation_passes_without_importing_scruffy(tmp_path, monkeypatch):
+    outputs = []
+    for name in ("first", "second"):
+        file = tmp_path / (name + ".txt")
+        file.write_text(name)
+        output = DeclaredOutput(name, str(file))
+        publish_artifact(output)
+        outputs.append(output)
+    imported, validated = builtins.__import__, runner.validate_artifact
+    calls = []
+    def reject_scruffy(name, *args, **kwargs):
+        assert name != "scruffy", "Standalone outputs must not import Scruffy"
+        return imported(name, *args, **kwargs)
+    def validate(output):
+        calls.append(output.artifact_id)
+        return validated(output)
+    monkeypatch.setattr(builtins, "__import__", reject_scruffy)
+    monkeypatch.setattr(runner, "validate_artifact", validate)
+    runner._publish_outputs(tuple(outputs), {})
+    assert calls == ["first", "second", "first", "second"]
+
+
+def test_standalone_outputs_reject_changes_between_validation_passes(tmp_path, monkeypatch):
+    outputs = []
+    for name in ("first", "second"):
+        file = tmp_path / (name + ".txt")
+        file.write_text(name)
+        output = DeclaredOutput(name, str(file))
+        publish_artifact(output)
+        outputs.append(output)
+    validated = runner.validate_artifact
+    calls = []
+    def mutate(output):
+        manifest = validated(output)
+        calls.append(output.artifact_id)
+        if len(calls) == 2:
+            Path(outputs[0].path).write_text("changed")
+        return manifest
+    monkeypatch.setattr(runner, "validate_artifact", mutate)
+    with pytest.raises(ValueError, match="bytes differ"):
+        runner._publish_outputs(tuple(outputs), {})
+    assert calls == ["first", "second"]
+
+
+def test_standalone_output_requires_the_workload_ready_manifest(tmp_path):
+    file = tmp_path / "unpublished.txt"
+    file.write_text("complete payload without a ready manifest")
+    with pytest.raises(ValueError, match="ready manifest is unavailable"):
+        runner._publish_outputs((DeclaredOutput("unpublished", str(file)),), {})
+
+
+@pytest.mark.parametrize("environment", [
+    {"SCRUFFY_ROOT": "/queue"}, {"SCRUFFY_JOB_ID": "job"},
+    {"SCRUFFY_ROOT": "", "SCRUFFY_JOB_ID": ""}, {"SCRUFFY_ROOT": "/queue", "SCRUFFY_JOB_ID": ""},
+])
+def test_declared_outputs_reject_partial_or_empty_scruffy_identity(tmp_path, environment):
+    file = tmp_path / "result.txt"
+    file.write_text("result")
+    output = DeclaredOutput("result", str(file))
+    publish_artifact(output)
+    with pytest.raises(runner.PreflightError, match="require both SCRUFFY_ROOT and SCRUFFY_JOB_ID"):
+        runner._publish_outputs((output,), environment)
+
+
+def test_complete_scruffy_identity_still_requires_the_client(tmp_path, monkeypatch):
+    file = tmp_path / "result.txt"
+    file.write_text("result")
+    output = DeclaredOutput("result", str(file))
+    publish_artifact(output)
+    imported = builtins.__import__
+    def reject_scruffy(name, *args, **kwargs):
+        if name == "scruffy":
+            raise ModuleNotFoundError("No module named 'scruffy'", name="scruffy")
+        return imported(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", reject_scruffy)
+    with pytest.raises(runner.PreflightError, match="require the Scruffy client"):
+        runner._publish_outputs((output,), {"SCRUFFY_ROOT": "/queue", "SCRUFFY_JOB_ID": "job"})
 
 
 def test_managed_runner_preserves_nonzero_child_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
