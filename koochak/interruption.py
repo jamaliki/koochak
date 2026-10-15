@@ -93,10 +93,15 @@ class EvacuationController:
     def reconcile(self) -> bool:
         """Reconcile local requests across DDP ranks using a MAX reduction."""
 
+        return self.reconcile_requests()[0]
+
+    def reconcile_requests(self, *requests: bool) -> tuple[bool, ...]:
+        """Reconcile evacuation and other stop flags in the same reduction."""
+
         import torch
         from .core import dist as dist_lib
 
-        requested = bool(self._requested)
+        requested = [bool(self._requested), *(bool(value) for value in requests)]
         if (
             dist_lib.is_initialized()
             and torch.distributed.is_available()
@@ -106,14 +111,14 @@ class EvacuationController:
             backend = str(torch.distributed.get_backend()).lower()
             device = "cuda" if backend == "nccl" else "cpu"
             value = torch.tensor(
-                [int(requested)],
+                [int(value) for value in requested],
                 dtype=torch.int64,
                 device=device,
             )
             torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.MAX)
-            requested = bool(int(value.item()))
-        self._requested = requested
-        return requested
+            requested = [bool(item) for item in value.tolist()]
+        self._requested = requested[0]
+        return tuple(requested)
 
 
 def install_evacuation_handler(

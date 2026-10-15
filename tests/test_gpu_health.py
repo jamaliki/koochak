@@ -372,13 +372,16 @@ def test_training_loop_writes_emergency_checkpoint_and_failure_json(
         def __init__(self, *, device, out_dir, rank, world_size):
             self.out_dir = Path(out_dir)
 
-        def should_check_step(self, step):
-            return step == 0
+        def start(self):
+            pass
 
-        def check_local(self, step):
-            return None
+        def close(self):
+            pass
 
-        def gather_failures(self, local_failure):
+        def update_step(self, step):
+            pass
+
+        def failures(self):
             return [_sample(step=0).to_dict()]
 
         def bad_nodes_from_failures(self, failures):
@@ -403,7 +406,7 @@ def test_training_loop_writes_emergency_checkpoint_and_failure_json(
         def perform_slurm_recovery(self, failures):
             return []
 
-    monkeypatch.setattr(loop_module, "GpuHealthWatchdog", FakeWatchdog)
+    monkeypatch.setattr(loop_module, "BackgroundGpuHealth", FakeWatchdog)
 
     model = torch.nn.Linear(1, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
@@ -433,14 +436,14 @@ def test_training_loop_writes_emergency_checkpoint_and_failure_json(
         )
 
     assert exc.value.code == 42
-    checkpoint_path = tmp_path / "step000000000.pt"
-    failure_path = tmp_path / "gpu_health" / "gpu_health_failure_step000000000.json"
+    checkpoint_path = tmp_path / "step000000001.pt"
+    failure_path = tmp_path / "gpu_health" / "gpu_health_failure_step000000001.json"
     assert checkpoint_path.exists()
     assert failure_path.exists()
     assert (tmp_path / "latest.pt").exists()
 
     ckpt = checkpoint_lib.load(str(checkpoint_path))
-    assert ckpt["step"] == 0
+    assert ckpt["step"] == ckpt["next_step"] == 1
     assert ckpt["metrics"]["gpu_health"]["bad_nodes"] == ["gpu-8"]
     assert ckpt["metrics"]["gpu_health"]["failures"][0]["gpu_uuid"] == "GPU-694e5085-2dbd-d289-d02c-540a63b4f602"
 

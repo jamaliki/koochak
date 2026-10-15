@@ -21,6 +21,19 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Implemented so far
 
+- Background GPU health monitoring
+  - The trainer elects one leader per node at startup and resolves physical GPU
+    UUIDs on the main thread. One CPU-only thread queries all assigned GPUs
+    every 30 seconds and preserves the existing health thresholds and logs.
+  - Health-stop and evacuation flags share the existing per-update reduction.
+    Healthy updates add no collective or synchronous GPU query. Query failures,
+    dead or stale monitors and failed teardown stop training after an agreed
+    completed update; all ranks gather RNG before the full emergency checkpoint.
+  - Emergency health checkpoints skip all-rank sampling hooks. Cleanup kills
+    and reaps an active query and joins the monitor before completion hooks.
+  - CPU tests cover UUID mapping, malformed readings, query cancellation and
+    Gloo hardware/query/stale faults with matching update cursors and RNG state.
+
 - EMA device placement
   - `offload_to_cpu=False` keeps shadows on each parameter's device without CPU
     staging buffers. CPU offload retains its async CUDA snapshot path.

@@ -174,6 +174,8 @@ class GpuHealthSample:
     hw_power_brake_slowdown: bool
     sw_power_cap: bool
     timestamp_unix: float
+    poll_sequence: Optional[int] = None
+    poll_monotonic_seconds: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -315,6 +317,7 @@ class GpuHealthWatchdog:
         self.hostname = socket.gethostname()
         self.slurm_node = current_slurm_node()
         self.cuda_device = int(device.index) if device.type == "cuda" and device.index is not None else None
+        self.local_rank = current_local_rank()
         self.gpu_query_id = query_id_for_cuda_device(self.cuda_device)
         self.nvidia_smi = shutil.which("nvidia-smi")
         self.enabled = device.type == "cuda" and not _env_enabled("KOOCHAK_GPU_HEALTH_DISABLE")
@@ -340,6 +343,11 @@ class GpuHealthWatchdog:
             self._consecutive_failures = 0
             self._thermal_duration(False, time.monotonic())
             return None
+
+        return self.observe_sample(sample)
+
+    def observe_sample(self, sample: GpuHealthSample) -> Optional[GpuHealthFailure]:
+        """Log and assess a sample without querying the GPU."""
 
         reasons = evaluate_sample(sample)
         thermal = bool(THERMAL_REASONS.intersection(reasons))
@@ -571,6 +579,8 @@ class GpuHealthWatchdog:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, sort_keys=True) + "\n")
         except OSError as exc:
+            if getattr(self, "_strict_logging", False):
+                raise
             # Health logging must not crash training; record one notice and move on.
             if stem != "gpu_health_notices" and not self._notice_written:
                 self._notice_written = True

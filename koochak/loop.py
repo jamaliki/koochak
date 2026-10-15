@@ -6,7 +6,7 @@ import os
 import statistics
 import time
 import warnings
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional, Sequence
 
@@ -22,7 +22,8 @@ from .optim.grad_clip import GradientClipStats, clip_grad_norm_
 from .core.precision import Scaler as make_scaler, autocast_context, prepare_compile_backend
 from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
-from .health.gpu import GpuHealthWatchdog, summarize_failures_for_stdout
+from .health.background import BackgroundGpuHealth
+from .health.gpu import summarize_failures_for_stdout
 from .interruption import EVACUATION_EXIT_CODE, EvacuationController
 from .storage import checkpoint as checkpoint_lib
 from .utils import config as config_lib
@@ -568,7 +569,7 @@ class _TrainLoop:
         self.ema: Optional[EMA] = None
         self.ema_dual: list[EMA] = []
         self.final_ckpt: Optional[Dict[str, Any]] = checkpoint_dict
-        self.gpu_health = GpuHealthWatchdog(
+        self.gpu_health = BackgroundGpuHealth(
             device=self.device,
             out_dir=self.settings.out_dir,
             rank=self.rank,
@@ -1207,21 +1208,35 @@ class _TrainLoop:
     # ------------------------------------------------------------------ health
 
     def _handle_health_failure(self, step: int, failures: list[Dict[str, Any]]) -> None:
-        if self.is_rank0:
-            bad_nodes = self.gpu_health.bad_nodes_from_failures(failures)
-            health_metrics = {
-                "gpu_health": {
-                    "event": "gpu_health_shutdown",
-                    "failures": failures,
-                    "bad_nodes": bad_nodes,
-                    "slurm_action": self.gpu_health.slurm_action,
-                    "slurm_disabled": self.gpu_health.slurm_disabled,
-                }
+        self.gpu_health.close()
+        completed = step + 1
+        bad_nodes = self.gpu_health.bad_nodes_from_failures(failures)
+        health_metrics = {
+            "gpu_health": {
+                "event": "gpu_health_shutdown", "failures": failures,
+                "bad_nodes": bad_nodes, "slurm_action": self.gpu_health.slurm_action,
+                "slurm_disabled": self.gpu_health.slurm_disabled,
             }
-            saved_path, ckpt = self._save_checkpoint(step, metrics=health_metrics)
-            self.final_ckpt = ckpt
+        }
+        self._gather_checkpoint_rng = True
+        try:
+            if self.is_rank0:
+                saved_path, ckpt = self._save_checkpoint(
+                    completed, next_step=completed, metrics=health_metrics, emit_hook=False,
+                )
+            else:
+                ckpt = self._build_checkpoint(completed, next_step=completed, metrics=health_metrics)
+                saved_path = checkpoint_lib.checkpoint_path(
+                    self.checkpoint_store, f"step{completed:09d}.pt",
+                )
+        finally:
+            self._gather_checkpoint_rng = False
+        self.final_ckpt = ckpt
+        dist_lib.barrier()
+        if self.is_rank0:
+            _emit(self.hooks, "on_checkpoint", saved_path, ckpt, self._step_ctx(completed))
             summary_path = self.gpu_health.write_failure_summary(
-                step=step, failures=failures, checkpoint_path=saved_path
+                step=completed, failures=failures, checkpoint_path=saved_path
             )
             print(
                 f"[gpu-health] FAIL step={step} {summarize_failures_for_stdout(failures)}",
@@ -1234,8 +1249,7 @@ class _TrainLoop:
                 flush=True,
             )
 
-        if dist_lib.is_initialized():
-            dist_lib.barrier()
+        dist_lib.barrier()
 
         if self.is_rank0:
             slurm_results = self.gpu_health.perform_slurm_recovery(failures)
@@ -1255,12 +1269,18 @@ class _TrainLoop:
 
         raise SystemExit(self.gpu_health.exit_code)
 
-    def _maybe_run_health_check(self, step: int) -> None:
-        if not self.gpu_health.should_check_step(step):
-            return
-        local_failure = self.gpu_health.check_local(step)
-        failures = self.gpu_health.gather_failures(local_failure)
-        if failures:
+    def _reconcile_stop_requests(self, step: int) -> None:
+        self.gpu_health.update_step(step)
+        local_failures = self.gpu_health.failures()
+        evacuation, health = self.evacuation.reconcile_requests(bool(local_failures))
+        self.evacuation_requested = evacuation
+        self.ctx["evacuation_requested"] = evacuation
+        if health:
+            gathered = [local_failures]
+            if dist_lib.is_initialized():
+                gathered = [None] * self.world_size
+                torch.distributed.all_gather_object(gathered, local_failures)
+            failures = [item for rank_failures in gathered for item in rank_failures]
             self._handle_health_failure(step, failures)
 
     # ------------------------------------------------------------------ eval
@@ -1300,6 +1320,7 @@ class _TrainLoop:
         it: Iterator[Any] | None = None
         try:
             self.evacuation.install()
+            self.gpu_health.start()
             self._shard_datasets()
             resume_path = self._load_auto_resume()
             _emit(self.hooks, "on_train_start", self.ctx, suppress_exceptions=False)
@@ -1333,10 +1354,9 @@ class _TrainLoop:
                     interrupted = True
                     break
 
-            if not interrupted:
-                interrupted = self.evacuation.reconcile()
-                self.evacuation_requested = interrupted
-                self.ctx["evacuation_requested"] = interrupted
+            self.gpu_health.close()
+            self._reconcile_stop_requests(next_step - 1)
+            interrupted = interrupted or self.evacuation_requested
 
             # A terminal checkpoint is a completed-update cursor, unlike a
             # periodic checkpoint whose step is the zero-based update index.
@@ -1380,12 +1400,14 @@ class _TrainLoop:
             _emit(self.hooks, "on_exception", exc, self.ctx)
             raise
         finally:
-            self.evacuation.uninstall()
-            if self.checkpoint_publisher is not None:
-                self.checkpoint_publisher.close()
             close_iterator = getattr(it, "close", None) if it is not None else None
-            if callable(close_iterator):
-                close_iterator()
+            with ExitStack() as cleanup:
+                if callable(close_iterator):
+                    cleanup.callback(close_iterator)
+                if self.checkpoint_publisher is not None:
+                    cleanup.callback(self.checkpoint_publisher.close)
+                cleanup.callback(self.evacuation.uninstall)
+                cleanup.callback(self.gpu_health.close)
 
         assert self.final_ckpt is not None
         return self.final_ckpt
@@ -1496,19 +1518,16 @@ class _TrainLoop:
         _emit(self.hooks, "on_step_end", step_end_log, self._step_ctx(step))
         self._profile_add(stats.profile_timing_totals, "profile_loop_log_emit_time_s", log_emit_start)
 
-        # Always-on CUDA health watchdog. This is deliberately not a hook:
-        # hooks may suppress exceptions, while a confirmed GPU fault must
-        # save and stop/requeue the job deterministically.
+        # Query GPUs in the background. Reuse evacuation's reduction to agree
+        # a completed-update stop before any rank enters another backward.
         health_start = self._profile_start()
-        self._maybe_run_health_check(step)
+        self._reconcile_stop_requests(step)
         self._profile_add(stats.profile_timing_totals, "profile_loop_health_check_time_s", health_start)
 
         eval_start = self._profile_start()
         self._maybe_run_eval(step)
         self._profile_add(stats.profile_timing_totals, "profile_loop_eval_time_s", eval_start)
 
-        self.evacuation_requested = self.evacuation.reconcile()
-        self.ctx["evacuation_requested"] = self.evacuation_requested
         if self.evacuation_requested:
             return True
 

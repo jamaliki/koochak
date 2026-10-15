@@ -706,6 +706,33 @@ checkpoint, auto-resume starts from step zero, making the same immutable command
 safe on both a first attempt and a retry. `latest.pt` remains a convenience
 pointer and is not resume evidence.
 
+### Background GPU health monitoring
+
+CUDA training elects one monitor per node through one startup metadata gather.
+The main thread resolves each rank's physical GPU UUID; a CPU-only thread then
+queries all assigned GPUs together every 30 seconds. Per-rank JSONL files under
+`out_dir/gpu_health/` keep the latest completed update index, wall timestamp,
+poll sequence, temperatures, clocks and throttle flags. Startup samples use
+step `-1` until the first completed update.
+
+The monitor keeps the existing temperature, clock and utilization rules,
+including the two-hour thermal grace period and two consecutive samples for
+nonthermal faults. Missing or invalid query rows, query errors, a dead monitor,
+or samples older than 90 seconds request a safe stop. The loop reconciles that
+flag through the existing evacuation reduction after each completed update;
+normal updates add no health collective, GPU query or CUDA work from the
+monitor thread.
+
+All ranks stop at the same completed-update cursor, gather their RNG states,
+and synchronously publish a full checkpoint before exiting with code `42`.
+Emergency GPU-health checkpoints emit the rank-0 checkpoint hook but skip
+`on_checkpoint_all_ranks`, because those hooks can run sampling on a faulty GPU.
+Shutdown stops the monitor, kills and waits for an active query, and joins its
+thread before completion hooks read the logs. A failed teardown also requests
+a health stop. `KOOCHAK_GPU_HEALTH_DISABLE=1` disables monitoring; the existing
+Slurm action and Slurm-disable settings still apply. The synchronous
+`GpuHealthWatchdog` API remains available for explicit short probes.
+
 DDP compatibility:
 - The loop saves the underlying module weights when the model is wrapped in `DistributedDataParallel` (i.e., uses `model.module.state_dict()`), making checkpoints portable across single-GPU and DDP.
 - When loading manually, use the provided helpers if your loading target differs in wrapping:
