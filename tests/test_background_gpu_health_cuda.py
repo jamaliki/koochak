@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import signal
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 import torch
 
 from koochak.health import background
+from koochak.interruption import EvacuationController
 from koochak.loop import training_loop
 from koochak.storage import checkpoint
 
@@ -27,9 +29,22 @@ def _cuda_worker(rank, init_file, out_dir, queue, mode):
     )
     original_init = background.BackgroundGpuHealth.__init__
     original_query = background.query_node_samples
+    original_reduce = torch.distributed.all_reduce
     instances = []
     audits = []
     completed = []
+    controller = EvacuationController(True)
+    injected = False
+
+    def reduce(value, *args, **kwargs):
+        nonlocal injected
+        result = original_reduce(value, *args, **kwargs)
+        if mode == "signal" and rank == 0 and not injected and value.dtype == torch.int64 and value.numel() == 2:
+            injected = True
+            os.kill(os.getpid(), signal.SIGUSR1)
+        return result
+
+    torch.distributed.all_reduce = reduce
 
     def monitor_init(self, **kwargs):
         original_init(self, **kwargs)
@@ -81,7 +96,7 @@ def _cuda_worker(rank, init_file, out_dir, queue, mode):
                     "max_steps": 120, "ckpt_every": 1000, "log_every": 1000,
                     "out_dir": out_dir,
                     "ema": {"enabled": True, "decay": .999, "offload_to_cpu": False},
-                }, hooks={"on_step_end": [record_step],
+                }, evacuation=controller, hooks={"on_step_end": [record_step],
                           "on_checkpoint_all_ranks": [sampling_audit]},
             )
         except SystemExit as exc:
@@ -98,7 +113,7 @@ def _cuda_worker(rank, init_file, out_dir, queue, mode):
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 8,
                     reason="Requires one node with eight CUDA GPUs")
-@pytest.mark.parametrize("mode", ["healthy", "hardware", "query", "stale"])
+@pytest.mark.parametrize("mode", ["healthy", "hardware", "query", "stale", "signal"])
 def test_eight_gpu_background_monitor_and_checkpoint(tmp_path, mode):
     context = mp.get_context("spawn")
     queue = context.Queue()
@@ -122,7 +137,7 @@ def test_eight_gpu_background_monitor_and_checkpoint(tmp_path, mode):
                 process.join()
     assert all(item["completed"] == results[0]["completed"] for item in results)
     assert all(not item["thread_alive"] for item in results)
-    assert [item["exit"] for item in results] == [None if mode == "healthy" else 42] * 8
+    assert [item["exit"] for item in results] == [None if mode == "healthy" else 75 if mode == "signal" else 42] * 8
     assert [item["audits"] for item in results] == [1 if mode == "healthy" else 0] * 8
     cursor = results[0]["completed"][-1] + 1
     saved = checkpoint.load(str(out_dir / f"step{cursor:09d}.pt"))
@@ -139,6 +154,9 @@ def test_eight_gpu_background_monitor_and_checkpoint(tmp_path, mode):
     assert len({item["uuid"] for item in results}) == 8
     if mode == "healthy":
         assert cursor == 120
+        assert "gpu_health" not in saved["metrics"]
+    elif mode == "signal":
+        assert cursor == 2
         assert "gpu_health" not in saved["metrics"]
     else:
         assert cursor < 120

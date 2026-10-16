@@ -86,6 +86,21 @@ def test_controller_handler_only_sets_flag_and_rejects_other_signals() -> None:
         EvacuationController(True, exit_code=1)
 
 
+def test_request_during_reduction_survives_until_all_ranks_agree(monkeypatch):
+    from koochak.core import dist
+    controller = EvacuationController(True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda: "gloo")
+    def reduce(value, **kwargs):
+        controller._handle_signal(signal.SIGUSR1, None)
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
+    assert controller.reconcile_requests(False) == (False, False)
+    assert controller.requested
+    assert controller.reconcile_requests(False) == (True, False)
+
+
 def test_signal_saves_terminal_checkpoint_before_reserved_exit(tmp_path: Path) -> None:
     model = torch.nn.Linear(1, 1, bias=False)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)

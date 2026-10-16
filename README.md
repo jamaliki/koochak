@@ -1,5 +1,8 @@
 # Koochak
 
+Evacuation keeps a request received during an in-flight reduction for the next
+update boundary. All ranks agree before saving the full checkpoint and exiting.
+
 Execution profiles use a factory for immutable package defaults so imports
 work under Python 3.11 as well as newer Python versions.
 

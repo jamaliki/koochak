@@ -15,6 +15,9 @@ This doc tracks incremental design decisions and changes from the initial design
   W&B must use the same cadence when committing training and validation metrics.
 - Keep submission imports free of Torch. Evacuation imports the distributed
   runtime only when the controller reconciles a request.
+- Keep local evacuation requests set until every rank agrees. A signal received
+  during a reduction must survive for the next reduction; never stop one rank
+  before that agreement. Test this race with a signal inside an NCCL reduction.
 
 - The philosophy is *functions first*
 - Do not catch exceptions unless necessary, fail *fast and loud* if an unexpected error occurs. If we are expected to have some errors, those should be caught explicitly and not silently.

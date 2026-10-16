@@ -117,7 +117,10 @@ class EvacuationController:
             )
             torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.MAX)
             requested = [bool(item) for item in value.tolist()]
-        self._requested = requested[0]
+        # A signal can arrive after the reduction reads the local flag. Keep
+        # that request for the next reduction without stopping this rank early.
+        if requested[0]:
+            self._requested = True
         return tuple(requested)
 
 
