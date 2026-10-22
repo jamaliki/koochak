@@ -58,7 +58,7 @@ def eval_fn(model: nn.Module, iterable: Iterable, ctx: Mapping[str, Any]) -> Dic
     device = ctx.get("device")
     total, n = 0.0, 0
     ac = ctx.get("autocast")
-    cm = ac if ac is not None else contextlib.nullcontext()
+    cm = ac() if ac is not None else contextlib.nullcontext()
     with cm:
         for batch in iterable:
             x = batch["x"].to(device, non_blocking=True)
