@@ -24,6 +24,15 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Implemented so far
 
+- Collector freeze after warm-up
+  - After each process's second update, and after any later update in which
+    Dynamo compiled, the loop collects and freezes the cyclic collector
+    (`koochak/utils/collector.py`). Rank-local full collections of about 1 s
+    otherwise stall every DDP rank. Nothing unfreezes; CPython 3.12 starts with
+    objects already frozen, so the loop cannot tell which ones it froze.
+  - CPU tests cover the freeze order, refreezing after a compile and the real
+    collector.
+
 - Background GPU health monitoring
   - The trainer elects one leader per node at startup and resolves physical GPU
     UUIDs on the main thread. One CPU-only thread queries all assigned GPUs

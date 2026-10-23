@@ -189,6 +189,15 @@ on the final update. W&B uses the same evaluation cadence when it decides
 whether to commit training and validation metrics together. The default keeps
 the historical zero-based intervals.
 
+After each process's second update, the loop runs `gc.collect()` and
+`gc.freeze()` (`koochak/utils/collector.py`). It freezes again after any later
+update in which Dynamo compiled a graph. A full cyclic collection otherwise
+traverses the million or so objects that compilation leaves behind. In an
+eight-H100 Kaveh gate, each full collection paused one rank for 0.7–1.0 s, and
+DDP made the other ranks wait. Freezing removed those pauses. Frozen objects are still freed by
+reference counting, and they stay frozen after the loop returns. The freeze
+runs after the update is timed and logged.
+
 ## Goals
 
 Importing `koochak.jobs` does not load Torch. CPU submission hosts need only the

@@ -29,6 +29,7 @@ from .storage import checkpoint as checkpoint_lib
 from .utils import config as config_lib
 from .utils import flags as flags_lib
 from .utils.device import ensure_process_device, get_device, get_lr
+from .utils.collector import WarmFreeze
 from .utils.ema import EMA
 from .utils.paths import canonical_dir
 from .utils.seed import get_rng_state, set_rng_state
@@ -531,6 +532,7 @@ class _TrainLoop:
         else:
             self.evacuation = evacuation
         self.evacuation_requested = False
+        self.collector = WarmFreeze()
         self._gather_checkpoint_rng = False
 
         self.device = ensure_process_device(get_device(train_config))
@@ -1517,6 +1519,9 @@ class _TrainLoop:
             _emit(self.hooks, "on_log", full_log, self._step_ctx(step))
         _emit(self.hooks, "on_step_end", step_end_log, self._step_ctx(step))
         self._profile_add(stats.profile_timing_totals, "profile_loop_log_emit_time_s", log_emit_start)
+
+        # After the update is timed, so a freeze lengthens no logged step.
+        self.collector.update()
 
         # Query GPUs in the background. Reuse evacuation's reduction to agree
         # a completed-update stop before any rank enters another backward.
