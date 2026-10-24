@@ -23,6 +23,33 @@ def physical_gpu_uuid(value: Any) -> str:
     return "GPU-" + str(uuid.UUID(text.removeprefix("GPU-")))
 
 
+def device_uuid(device: torch.device) -> Any:
+    properties = torch.cuda.get_device_properties(device)
+    try:
+        return properties.uuid
+    except AttributeError:
+        pass
+    # Older Torch: CUDA is already initialized; resolve its visible ordinal.
+    import ctypes
+
+    driver = ctypes.CDLL("libcuda.so.1")
+    index = torch.cuda.current_device() if device.index is None else device.index
+    handle = ctypes.c_int()
+    value = (ctypes.c_ubyte * 16)()
+    for name, argtypes, args in (
+        ("cuDeviceGet", [ctypes.POINTER(ctypes.c_int), ctypes.c_int],
+         (ctypes.byref(handle), index)),
+        ("cuDeviceGetUuid_v2", [ctypes.POINTER(type(value)), ctypes.c_int],
+         (ctypes.byref(value), handle)),
+    ):
+        function = getattr(driver, name)
+        function.argtypes, function.restype = argtypes, ctypes.c_int
+        result = function(*args)
+        if result != 0:
+            raise RuntimeError(f"{name} failed with CUDA driver error {result}")
+    return str(uuid.UUID(bytes=bytes(value)))
+
+
 class BackgroundGpuHealth(GpuHealthWatchdog):
     """Keep GPU queries off training threads and publish local fault details."""
 
@@ -47,7 +74,7 @@ class BackgroundGpuHealth(GpuHealthWatchdog):
         mapping_error = None
         if self.enabled:
             try:
-                self.gpu_query_id = physical_gpu_uuid(torch.cuda.get_device_properties(self.device).uuid)
+                self.gpu_query_id = physical_gpu_uuid(device_uuid(self.device))
             except Exception as exc:
                 mapping_error = f"{type(exc).__name__}: {exc}"
         return {
