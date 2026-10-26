@@ -584,7 +584,7 @@ class _TrainLoop:
         return autocast_context(self.settings.amp_mode, self.device)
 
     def _step_ctx(self, step: int) -> Dict[str, Any]:
-        return {**self.ctx, "step": step}
+        return {**self.ctx, "step": step, "optimizer": self.optimizer, "ema": self.ema}
 
     def _module_for_state(self) -> nn.Module:
         return getattr(self.model, "module", self.model)
@@ -1515,6 +1515,7 @@ class _TrainLoop:
             step_end_log["profile_loop_log_build_time_s"] = log_build_elapsed
 
         log_emit_start = self._profile_start()
+        _emit(self.hooks, "on_update_end", step_end_log, self._step_ctx(step))
         if full_log is not None:
             _emit(self.hooks, "on_log", full_log, self._step_ctx(step))
         _emit(self.hooks, "on_step_end", step_end_log, self._step_ctx(step))

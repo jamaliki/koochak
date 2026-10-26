@@ -25,6 +25,8 @@ def test_loop_profile_metrics_reach_rank_timing_fallback():
     loop.ctx = {}
     loop.device = torch.device("cpu")
     loop.model = model
+    loop.optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    loop.ema = None
     loop.scaler = torch.amp.GradScaler("cpu", enabled=False)
 
     def step_fn(module, batch, _ctx):

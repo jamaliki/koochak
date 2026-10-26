@@ -24,6 +24,19 @@ This doc tracks incremental design decisions and changes from the initial design
 
 ## Implemented so far
 
+- All-rank update observation
+  - `on_update_end(log, ctx)` runs after optimizer, EMA and scheduler updates,
+    before the existing `on_log` then `on_step_end` sequence. Logging updates
+    share their log dictionary, so added metrics reach the same update's log.
+  - Step contexts expose current optimizer and EMA handles without copying
+    state. EMA remains `None` on ranks that do not own a shadow. The event
+    adds no collective, barrier, shadow allocation or implicit device sync.
+  - Keep observation costs outside the existing `step_time_s` semantics;
+    throughput gates must include their wall time. Hook failures retain the
+    normal opt-in `_koochak_fail_closed` behavior.
+  - CPU tests cover ordering, same-update additions, live fresh/resumed EMA,
+    error handling, and all-rank Gloo invocation.
+
 - Collector freeze after warm-up
   - After each process's second update, and after any later update in which
     Dynamo compiled, the loop collects and freezes the cyclic collector
@@ -155,6 +168,7 @@ This doc tracks incremental design decisions and changes from the initial design
 
 This list guides ongoing work. All contributors (agents and humans) should update it as tasks are added/completed.
 
+- Add all-rank `on_update_end` metrics with current optimizer/EMA context [DONE]
 - Split storage helpers into `storage.atomic`, `storage.pruning`, and `storage.fs` [DONE]
 - Add `utils/timeit.py` scoped timers [DONE]
 - Rank-0 gating helper and apply to built-in hooks [DONE]

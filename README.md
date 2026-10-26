@@ -548,7 +548,9 @@ training_loop(
 ```
 
 - `step_fn(model, batch, ctx)` returns `{"loss": Tensor, ...}`; any additional scalar values are logged.
-- `ctx` contains `device`, `rank/world_size`, `autocast`, `scaler`, `config_json`, and `train_cfg`.
+- Step and update hook contexts contain `device`, `rank/world_size`, `autocast`,
+  `scaler`, `config_json`, `train_cfg`, and current `optimizer` and `ema`
+  handles. `ema` is `None` when disabled or absent on that rank.
 - The loop handles gradient accumulation, AMP, optional grad clipping, scheduler stepping (per `train.scheduler_step`), evaluation hooks, automatic DDP bootstrap/wrapping when `train.ddp` is true, and deterministic checkpointing.
 - Rank-0 prints a compact parameter count banner at startup to highlight model size changes.
 - L2 gradient clipping uses scaled reductions if the usual norm overflows. It logs `grad_norm`, `grad_clip_coefficient`, and `grad_clip_scaled_norm`; the ordinary path adds one scalar device-to-host synchronization. Clipping rejects NaN or infinity entries before the optimizer step. The optional `nonfinite_grad_check_every` check also raises rather than replacing invalid entries with zeros.
@@ -569,7 +571,19 @@ def step_fn(model, batch, ctx):
 ## Hooks and Logging
 
 - Create hooks by event name: `{"on_log": [fn], "on_eval_end": [fn]}`.
-- Hook events emitted by the loop include `on_train_start`, `on_step_end`, `on_log`, `on_eval_end`, `on_checkpoint`, `on_train_end`, and `on_exception`.
+- Hook events emitted by the loop include `on_train_start`, `on_update_end`,
+  `on_step_end`, `on_log`, `on_eval_end`, `on_checkpoint`, `on_train_end`, and
+  `on_exception`.
+- `on_update_end(log, ctx)` runs on every rank after optimizer, EMA and
+  scheduler updates, before `on_log` and `on_step_end`. On logging updates,
+  its `log` is the same dictionary that the loggers receive, so callbacks
+  can add same-update metrics. Other updates provide the minimal step log.
+  The event does not add a barrier or create EMA shadows on more ranks.
+  Callbacks may use collectives only when every rank follows the same
+  cadence. Mark a callback with `_koochak_fail_closed = True` to propagate
+  its errors; normal hook error handling stays unchanged.
+- `step_time_s` still ends before observation hooks. Measure end-to-end wall
+  time to include diagnostics and logger overhead in throughput comparisons.
 - Built-in hooks:
   - `koochak.logging.stdout.make_stdout_hooks()` – TSV prints; rank-0 only.
   - `koochak.logging.csv.make_csv_hooks(path)` – append metrics to CSV; rank-0 only.
