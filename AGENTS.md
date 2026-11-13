@@ -278,7 +278,7 @@ Done recently
 - When auto-resume selects a checkpoint, the typed checkpoint artifact event is retried once through the configured event hook so transient Scruffy journal loss can heal without making ordinary progress telemetry fatal. Restartable W&B jobs must provide a stable `name` or `id` and set `resume: allow`; this is enforced only on attempts that actually resume.
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
 - Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
-- Tests: OOM skip with data/scheduler alignment, consecutive escalation to checkpoint-and-exit across a restart, fetch-phase OOM, DDP record-and-exit, gloo two-rank replay of recorded skips, and a CUDA-only real-OOM memory release check (`tests/test_oom_recovery.py`).
+- Tests: OOM skip with data/scheduler alignment, consecutive escalation to checkpoint-and-exit across a restart, fetch-phase OOM, DDP record-and-exit, gloo two-rank replay of recorded skips, and a CUDA-only real-OOM memory release check (`tests/test_oom_recovery.py`). `tests/test_oom_recovery_gpu.py` drives `tests/oom_gpu_trainer.py` in fresh processes with real allocator OOMs that hold the GPU (forward fill and native backward), the exit-77 restart, and two-GPU NCCL runs under `torch.distributed.run` (teardown time, the launcher's reported exit codes, resume, `--max-restarts`). `KOOCHAK_OOM_TEST_DEVICE=cpu` runs the same flows with simulated OOMs and Gloo.
 
 Open TODOs (authoritative)
 - Storage abstraction (`specs/storage-abstraction.md`)
