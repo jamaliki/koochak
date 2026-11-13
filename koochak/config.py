@@ -10,6 +10,7 @@ from .core import dist as dist_lib
 __all__ = [
     "TrainEMADualConfig",
     "TrainEMAConfig",
+    "TrainOomRecoveryConfig",
     "TrainConfig",
     "DataConfig",
     "OptimizerConfig",
@@ -58,6 +59,13 @@ class TrainEMAConfig:
 
 
 @dataclass
+class TrainOomRecoveryConfig:
+    enabled: bool = False
+    max_consecutive: int = 3
+    max_skipped_steps: Optional[int] = None
+
+
+@dataclass
 class TrainConfig:
     max_steps: int = 100_000
     log_every: int = 100
@@ -101,6 +109,7 @@ class TrainConfig:
     resume: str = "none"
     evacuation_enabled: bool = False
     evacuation_signal: str = "USR1"
+    oom_recovery: TrainOomRecoveryConfig = field(default_factory=TrainOomRecoveryConfig)
     ema: TrainEMAConfig = field(default_factory=TrainEMAConfig)
     # Legacy flat EMA keys (kept for compatibility)
     ema_enabled: Optional[bool] = None

@@ -523,6 +523,22 @@ def make_event_hooks(
             pass
         send("workload.milestone", data)
 
+    def on_oom(record: Mapping[str, Any], ctx: Mapping[str, Any]) -> None:
+        current_step = remember_step(ctx)
+        data: Dict[str, object] = {
+            "name": f"oom_{_short_text(record.get('action'), 32)}",
+            "phase": "training",
+            "message": _short_text(record.get("message", ""), _MAX_ERROR_CHARS),
+            "oom_phase": _short_text(record.get("phase"), 32),
+        }
+        for key in ("consecutive", "skipped_total"):
+            value = _scalar(record.get(key))
+            if value is not _MISSING:
+                data["oom_" + key] = value
+        if current_step is not None:
+            data["step"] = current_step
+        send("workload.milestone", data)
+
     def on_exception(exc: Exception, ctx: Mapping[str, Any]) -> None:
         current_step = remember_step(ctx)
         data: Dict[str, object] = {
@@ -551,6 +567,7 @@ def make_event_hooks(
         "on_resume_checkpoint": [rank0_only(on_resume_checkpoint)],
         "on_train_end": [rank0_only(on_train_end)],
         "on_evacuation": [rank0_only(on_evacuation)],
+        "on_oom": [rank0_only(on_oom)],
         "on_exception": [rank0_only(on_exception)],
     }
 

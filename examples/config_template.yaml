@@ -36,6 +36,10 @@ train:
   resume: none              # none | auto
   evacuation_enabled: false # opt in to SIGUSR1 checkpoint-and-exit
   evacuation_signal: USR1
+  oom_recovery:             # opt in to skipping CUDA OOM steps (see README)
+    enabled: false
+    max_consecutive: 3      # OOM steps in a row before checkpoint-and-restart
+    max_skipped_steps: null # optional cap on OOM-skipped steps per run
 
   ema:
     enabled: null
