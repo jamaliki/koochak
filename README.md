@@ -572,8 +572,8 @@ def step_fn(model, batch, ctx):
 
 - Create hooks by event name: `{"on_log": [fn], "on_eval_end": [fn]}`.
 - Hook events emitted by the loop include `on_train_start`, `on_update_end`,
-  `on_step_end`, `on_log`, `on_eval_end`, `on_checkpoint`, `on_train_end`, and
-  `on_exception`.
+  `on_step_end`, `on_log`, `on_eval_end`, `on_checkpoint`, `on_train_end`,
+  `on_oom`, and `on_exception`.
 - `on_update_end(log, ctx)` runs on every rank after optimizer, EMA and
   scheduler updates, before `on_log` and `on_step_end`. On logging updates,
   its `log` is the same dictionary that the loggers receive, so callbacks
@@ -731,6 +731,67 @@ load only the highest valid published numbered checkpoint. With no valid
 checkpoint, auto-resume starts from step zero, making the same immutable command
 safe on both a first attempt and a retry. `latest.pt` remains a convenience
 pointer and is not resume evidence.
+
+### CUDA out-of-memory recovery
+
+OOM recovery is opt-in:
+
+```yaml
+train:
+  resume: auto
+  oom_recovery:
+    enabled: true
+    max_consecutive: 3       # OOM steps in a row before checkpoint-and-restart
+    max_skipped_steps: null  # optional cap on OOM-skipped steps per run
+```
+
+Koochak handles only `torch.cuda.OutOfMemoryError` raised while a step fetches
+its micro-batches, runs `step_fn`, or runs backward. Up to that point no
+parameter, optimizer, scaler, EMA, or scheduler state has changed, so the
+in-memory state is still exactly the end of the previous update. The failed
+step is **skipped, not retried**: retrying the same batch usually runs out of
+memory again. A skipped step makes no update and emits no `on_step_end`, but it
+still consumes all `grad_accum` micro-batches and advances the scheduler, so
+data and learning rate stay aligned with the step cursor. Eval, stop checks,
+and periodic checkpoints still run at its boundary. OOMs anywhere else (eval,
+clipping, the optimizer step, hooks) and `CUDA error: out of memory` raised
+outside the caching allocator still fail loudly.
+
+Each handled OOM is written create-only to the checkpoint store as
+`oom/step<N>-rank<R>.json`, with the phase, micro-step, allocator statistics,
+and `torch.cuda.memory_summary()`. The record is written before any other
+recovery work. On startup, rank 0 reads these records and broadcasts the
+steps, and every rank skips those steps without running them. A restarted
+attempt therefore never replays an OOM it already recorded, even if the
+failing process never exited cleanly. Checkpoints list
+`oom_skipped_steps` for provenance.
+
+- **Single process.** The step is skipped in place: gradients are dropped, then
+  `gc.collect()` and `torch.cuda.empty_cache()` run after the `except` block has
+  released the traceback that pins the failed step's activations. The
+  `max_consecutive`-th OOM step in a row instead publishes a numbered checkpoint
+  (`next_step` past the skipped step, all RNG state) and exits with reserved
+  code `77`, so a resubmit gets a fresh CUDA allocator. An OOM inside the data
+  iterator always takes this path, because the iterator may be unusable
+  afterwards.
+- **DDP.** When one rank runs out of memory, the others are already blocked in
+  that step's gradient all-reduce, so no rank can checkpoint or resynchronise.
+  The failing rank records the step and exits with code `77`. Your launcher
+  tears down the remaining ranks (`torchrun` does this; with `srun`, use
+  `--kill-on-bad-exit=1`). Resubmitting the same command with `resume: auto`
+  resumes from the last published checkpoint and skips the recorded step.
+  Progress since that checkpoint is lost, so frequent `checkpoint_async`
+  checkpoints keep the cost small. `torchrun` reports its own exit code rather
+  than the worker's `77`, but the record does not depend on the exit code.
+
+One OOM step beyond `max_consecutive` in a row, counted across restarts, fails
+loudly with the original error. So does exceeding `max_skipped_steps`. Every
+handled OOM prints an `[oom]` line and emits `on_oom(record, ctx)`, which the
+event hooks publish as an `oom_skip` or `oom_restart` milestone.
+
+Recovery treats the symptom. Fragmentation-driven OOMs usually disappear with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` in the job profile's
+`environment.set`. For data-driven OOMs, cap tokens or atoms per batch.
 
 ### Background GPU health monitoring
 

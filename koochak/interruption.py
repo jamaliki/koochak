@@ -9,12 +9,15 @@ __all__ = [
     "CHECKPOINT_ACK_TIMEOUT_EXIT_CODE",
     "EVACUATION_EXIT_CODE",
     "EvacuationController",
+    "OOM_RESTART_EXIT_CODE",
     "install_evacuation_handler",
 ]
 
 
 EVACUATION_EXIT_CODE = 75
 CHECKPOINT_ACK_TIMEOUT_EXIT_CODE = 76
+# A CUDA out-of-memory step was recorded as skipped; resubmit with resume=auto.
+OOM_RESTART_EXIT_CODE = 77
 
 
 def _signal_number(name: str | int) -> int:

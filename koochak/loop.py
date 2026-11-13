@@ -24,7 +24,8 @@ from .data.iterable import prefetch, to_device
 from .data.sharding import shard_dataset, warn_if_unsharded
 from .health.background import BackgroundGpuHealth
 from .health.gpu import summarize_failures_for_stdout
-from .interruption import EVACUATION_EXIT_CODE, EvacuationController
+from .interruption import EVACUATION_EXIT_CODE, OOM_RESTART_EXIT_CODE, EvacuationController
+from . import oom as oom_lib
 from .storage import checkpoint as checkpoint_lib
 from .utils import config as config_lib
 from .utils import flags as flags_lib
@@ -532,6 +533,13 @@ class _TrainLoop:
         else:
             self.evacuation = evacuation
         self.evacuation_requested = False
+        self.oom_recovery = oom_lib.OomRecoverySettings.from_cfg(train_config)
+        # ``except ()`` matches nothing, so a disabled policy never sees an OOM.
+        self._oom_errors: tuple[type[BaseException], ...] = (
+            (oom_lib.OutOfMemoryError,) if self.oom_recovery.enabled else ()
+        )
+        self.oom_skipped_steps: set[int] = set()
+        self._micro_position: tuple[int, str] = (0, "fetch")
         self.collector = WarmFreeze()
         self._gather_checkpoint_rng = False
 
@@ -929,6 +937,9 @@ class _TrainLoop:
             ckpt["ema"] = self.ema.state_dict()
         if self.ema_dual:
             ckpt["ema_dual"] = [ema.state_dict() for ema in self.ema_dual]
+        oom_skipped = sorted(s for s in self.oom_skipped_steps if s < ckpt["next_step"])
+        if oom_skipped:
+            ckpt["oom_skipped_steps"] = oom_skipped
         return ckpt
 
     def _save_checkpoint(
@@ -1048,6 +1059,7 @@ class _TrainLoop:
                 else nullcontext()
             )
             with cm, ac:
+                self._micro_position = (micro, "fetch")
                 batch_wait_start = self._profile_start()
                 batch = next(it) if use_prefetch else to_device(next(it), self.device)
                 batch_wait_elapsed = self._profile_add(
@@ -1058,6 +1070,7 @@ class _TrainLoop:
                 stats.batch_wait_s += batch_wait_elapsed
                 for key, value in _batch_skip_count_totals(batch).items():
                     stats.skip_count_totals[key] = stats.skip_count_totals.get(key, 0.0) + float(value)
+                self._micro_position = (micro, "step_fn")
                 step_fn_start = self._profile_start()
                 out = self.step_fn(self.model, batch, self._step_ctx(step))
                 self._profile_add(
@@ -1081,6 +1094,7 @@ class _TrainLoop:
                 if not isinstance(loss_tensor, torch.Tensor):
                     raise RuntimeError("step_fn returned a 'loss' that is not a torch.Tensor")
                 loss = loss_tensor / self.settings.grad_accum
+            self._micro_position = (micro, "backward")
             backward_start = self._profile_start()
             self.scaler.scale(loss).backward()
             self._profile_add(
@@ -1285,6 +1299,136 @@ class _TrainLoop:
             failures = [item for rank_failures in gathered for item in rank_failures]
             self._handle_health_failure(step, failures)
 
+    # ------------------------------------------------------------------ out of memory
+
+    def _load_oom_records(self, start_step: int) -> None:
+        """Adopt steps that earlier attempts recorded as OOM-skipped.
+
+        Rank 0 reads the store and broadcasts, so every rank skips exactly the
+        same steps and their collectives stay matched.
+        """
+
+        steps = sorted(oom_lib.recorded_steps(self.checkpoint_store)) if self.is_rank0 else None
+        if self.world_size > 1 and dist_lib.is_initialized():
+            box = [steps]
+            torch.distributed.broadcast_object_list(box, src=0)
+            steps = box[0]
+        self.oom_skipped_steps = set(steps or ())
+        pending = [s for s in sorted(self.oom_skipped_steps) if start_step <= s < self.settings.max_steps]
+        if pending and self.is_rank0:
+            shown = ", ".join(str(s) for s in pending[:20]) + (", ..." if len(pending) > 20 else "")
+            print(
+                f"[oom] {len(pending)} step(s) recorded as OOM-skipped by earlier attempts "
+                f"will be skipped: {shown}",
+                flush=True,
+            )
+
+    def _oom_record(self, step: int, exc: BaseException) -> Dict[str, Any]:
+        """Describe an OOM and decide its handling, from inside the ``except`` block.
+
+        The record holds only plain values, never the exception or tensors, so
+        it does not keep the failed step's memory alive.
+        """
+
+        micro, phase = self._micro_position
+        decision = oom_lib.decide(
+            self.oom_recovery,
+            self.oom_skipped_steps,
+            step,
+            distributed=self.world_size > 1,
+            during_fetch=phase == "fetch",
+        )
+        memory, memory_summary = oom_lib.memory_report(self.device)
+        record: Dict[str, Any] = {
+            "v": 1,
+            "step": step,
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "phase": phase,
+            "micro_step": micro,
+            "grad_accum": self.settings.grad_accum,
+            "action": decision.action,
+            "reason": decision.reason,
+            "consecutive": decision.consecutive,
+            "max_consecutive": self.oom_recovery.max_consecutive,
+            "skipped_total": decision.skipped_total,
+            "error_type": type(exc).__name__,
+            "message": oom_lib.short_message(exc),
+            "memory": memory,
+            "memory_summary": memory_summary,
+            "wall_time": time.time(),
+        }
+        print(oom_lib.format_record(record), flush=True)
+        return record
+
+    def _recover_from_oom(self, step: int, it: Iterator[Any], record: Dict[str, Any]) -> bool:
+        """Skip an OOM step in place, or record it and exit for a restart."""
+
+        self.optimizer.zero_grad(set_to_none=True)
+        oom_lib.release_memory(self.device)
+        # Durable before anything that can fail or hang, so a restarted attempt
+        # skips this step even if this process never exits cleanly.
+        oom_lib.write_record(self.checkpoint_store, record)
+        self.oom_skipped_steps.add(step)
+        _emit(self.hooks, "on_oom", record, self._step_ctx(step))
+        if self.world_size > 1:
+            # Peers are already blocked in this step's collectives, so no rank
+            # can checkpoint or resynchronise.  The launcher tears them down
+            # when this rank exits; a resubmit resumes and skips the step.
+            print(
+                f"[oom] rank={self.rank} exiting with code {OOM_RESTART_EXIT_CODE}; "
+                "resubmit with resume=auto to continue from the last checkpoint",
+                flush=True,
+            )
+            raise SystemExit(OOM_RESTART_EXIT_CODE)
+        if record["phase"] != "fetch":
+            # Consume the rest of this step's micro-batches so the iterator stays
+            # aligned with the step cursor that resume uses to rebuild datasets.
+            fetched = int(record["micro_step"]) + 1
+            if not self._drain_micro_batches(it, self.settings.grad_accum - fetched):
+                return False
+        self._step_scheduler()
+        if record["action"] == oom_lib.RESTART:
+            self._checkpoint_and_exit_after_oom(step)
+        return self._finish_step(step, {})
+
+    def _replay_oom_skip(self, step: int, it: Iterator[Any]) -> bool:
+        """Skip a step that an earlier attempt recorded, without running it."""
+
+        if not self._drain_micro_batches(it, self.settings.grad_accum):
+            return False
+        self._step_scheduler()
+        if self.is_rank0:
+            print(f"[oom] step={step} skipped: recorded as OOM by an earlier attempt", flush=True)
+        return self._finish_step(step, {})
+
+    def _drain_micro_batches(self, it: Iterator[Any], count: int) -> bool:
+        for _ in range(count):
+            try:
+                next(it)
+            except StopIteration:
+                return False
+        return True
+
+    def _checkpoint_and_exit_after_oom(self, step: int) -> None:
+        completed = step + 1
+        self._gather_checkpoint_rng = True
+        try:
+            saved_path, self.final_ckpt = self._save_checkpoint(
+                completed, next_step=completed, emit_hook=False
+            )
+        finally:
+            self._gather_checkpoint_rng = False
+        # Like GPU-health stops, skip all-rank checkpoint hooks: they may sample
+        # on the GPU that just ran out of memory.
+        _emit(self.hooks, "on_checkpoint", saved_path, self.final_ckpt, self._step_ctx(completed))
+        print(
+            f"[oom] checkpoint={saved_path} next_step={completed}; exiting with code "
+            f"{OOM_RESTART_EXIT_CODE} so a resubmit starts with a fresh CUDA allocator",
+            flush=True,
+        )
+        raise SystemExit(OOM_RESTART_EXIT_CODE)
+
     # ------------------------------------------------------------------ eval
 
     def _maybe_run_eval(self, step: int) -> None:
@@ -1337,6 +1481,8 @@ class _TrainLoop:
                 )
 
             start_step = self._resume_from_checkpoint()
+            if self.oom_recovery.enabled:
+                self._load_oom_records(start_step)
             if resume_path is not None and self.is_rank0:
                 _emit(
                     self.hooks,
@@ -1416,6 +1562,8 @@ class _TrainLoop:
 
     def _run_step(self, step: int, it: Iterator[Any]) -> bool:
         """Execute a single training step. Returns False if dataset is exhausted."""
+        if step in self.oom_skipped_steps:
+            return self._replay_oom_skip(step, it)
         step_start = self._profile_start()
         profile_timing_totals: Dict[str, float] = {}
         setup_start = self._profile_start()
@@ -1433,10 +1581,19 @@ class _TrainLoop:
             and self.settings.rank_timing_every > 0
             and (step % self.settings.rank_timing_every == 0)
         )
+        oom: Optional[Dict[str, Any]] = None
         try:
             stats = self._run_micro_steps(step, it, collect_rank_timing=collect_rank_timing)
         except StopIteration:
             return False
+        except self._oom_errors as exc:
+            oom = self._oom_record(step, exc)
+            if oom["action"] == oom_lib.FAIL:
+                raise
+        if oom is not None:
+            # Recover only now that the handler has exited: its traceback pinned
+            # the failed step's frames and their activations.
+            return self._recover_from_oom(step, it, oom)
         for key, value in profile_timing_totals.items():
             stats.profile_timing_totals[key] = stats.profile_timing_totals.get(key, 0.0) + value
 
@@ -1523,16 +1680,19 @@ class _TrainLoop:
 
         # After the update is timed, so a freeze lengthens no logged step.
         self.collector.update()
+        return self._finish_step(step, stats.profile_timing_totals)
 
+    def _finish_step(self, step: int, profile_timing_totals: Dict[str, float]) -> bool:
+        """Stop checks, eval and periodic checkpoint that follow every step, skipped or not."""
         # Query GPUs in the background. Reuse evacuation's reduction to agree
         # a completed-update stop before any rank enters another backward.
         health_start = self._profile_start()
         self._reconcile_stop_requests(step)
-        self._profile_add(stats.profile_timing_totals, "profile_loop_health_check_time_s", health_start)
+        self._profile_add(profile_timing_totals, "profile_loop_health_check_time_s", health_start)
 
         eval_start = self._profile_start()
         self._maybe_run_eval(step)
-        self._profile_add(stats.profile_timing_totals, "profile_loop_eval_time_s", eval_start)
+        self._profile_add(profile_timing_totals, "profile_loop_eval_time_s", eval_start)
 
         if self.evacuation_requested:
             return True
@@ -1556,7 +1716,7 @@ class _TrainLoop:
             self._checkpoint_all_ranks(saved_path, ckpt, interval_step)
         self._poll_checkpoint()
         self._profile_add(
-            stats.profile_timing_totals,
+            profile_timing_totals,
             "profile_loop_checkpoint_time_s",
             checkpoint_start,
         )

@@ -133,6 +133,36 @@ def test_exception_is_bounded_and_publisher_failures_never_escape_hooks() -> Non
     assert len(attempts[-1][1]["error_type"]) == 128
 
 
+def test_oom_milestone_is_bounded_and_omits_memory_summary() -> None:
+    published = []
+    hooks = make_event_hooks(lambda kind, data: published.append((kind, data)))
+    record = {
+        "action": "skip",
+        "phase": "backward",
+        "consecutive": 1,
+        "skipped_total": 4,
+        "message": "CUDA out of memory. " + "x" * 1000,
+        "memory_summary": "large allocator table",
+    }
+
+    _call(hooks, "on_oom", record, {"rank": 0, "world_size": 1, "step": 12})
+
+    assert published == [
+        (
+            "workload.milestone",
+            {
+                "name": "oom_skip",
+                "phase": "training",
+                "message": record["message"][:509] + "...",
+                "oom_phase": "backward",
+                "oom_consecutive": 1,
+                "oom_skipped_total": 4,
+                "step": 12,
+            },
+        )
+    ]
+
+
 def test_hooks_are_rank_zero_only() -> None:
     published = []
     hooks = make_event_hooks(lambda kind, data: published.append((kind, data)))
