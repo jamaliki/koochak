@@ -193,10 +193,11 @@ def test_ddp_oom_on_one_rank_tears_down_then_resume_skips_the_step(tmp_path: Pat
     assert first.returncode != 0
     assert teardown_s < 120, f"peers took {teardown_s:.0f}s to tear down"
     assert _records(out_dir) == ["oom/step000000003-rank00001.json"]
+    # The step-2 checkpoint was published before rank 1 could reach step 3.
     selection = checkpoint.resolve_auto_resume(str(out_dir))
     assert selection is not None
     next_step = selection[1]["next_step"]
-    assert 0 < next_step <= 3
+    assert next_step == 3
 
     second, second_s, _ = _launch(out_dir, tmp_path / "second-{rank}.json", *args, nproc=2)
     assert second.returncode == 0, second.stderr[-4000:]

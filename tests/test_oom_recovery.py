@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import socket
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
@@ -282,8 +283,14 @@ def test_distributed_oom_records_and_exits_without_a_checkpoint(
     assert record["action"] == oom_lib.RESTART and record["world_size"] == 2
 
 
-def _ddp_replay_worker(rank: int, init_file: str, out_dir: str, queue: Any) -> None:
-    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _ddp_replay_worker(rank: int, init_method: str, out_dir: str, queue: Any) -> None:
+    torch.distributed.init_process_group("gloo", init_method=init_method, rank=rank, world_size=2)
     try:
         torch.manual_seed(0)
         model = torch.nn.Linear(1, 1, bias=False)
@@ -313,18 +320,24 @@ def test_ddp_ranks_agree_on_recorded_skips(tmp_path: Path) -> None:
     oom_lib.write_record(open_store(str(tmp_path / "out")), {"step": 1, "rank": 1})
     context = mp.get_context("spawn")
     queue = context.Queue()
+    # A TCP rendezvous: a file:// store on a shared filesystem can take minutes.
+    init_method = f"tcp://127.0.0.1:{_free_port()}"
     procs = [
         context.Process(
             target=_ddp_replay_worker,
-            args=(rank, str(tmp_path / "init"), str(tmp_path / "out"), queue),
+            args=(rank, init_method, str(tmp_path / "out"), queue),
         )
         for rank in range(2)
     ]
     for proc in procs:
         proc.start()
-    for proc in procs:
-        proc.join(timeout=120)
-        assert proc.exitcode == 0
+    try:
+        for proc in procs:
+            proc.join(timeout=120)
+            assert proc.exitcode == 0
+    finally:
+        for proc in procs:
+            proc.kill()
     results = sorted(queue.get(timeout=5) for _ in procs)
     for _rank, seen, _weight, skipped in results:
         assert seen == [0, 2, 3]

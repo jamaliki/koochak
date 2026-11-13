@@ -1713,6 +1713,11 @@ class _TrainLoop:
                         self.checkpoint_store, f"step{interval_step:09d}.pt")
             finally:
                 self._gather_checkpoint_rng = False
+            if not self.settings.checkpoint_async:
+                # Without this, the other ranks run into the next step while rank 0 is still
+                # publishing, and a rank that exits there (an OOM restart) gets rank 0 killed
+                # by the launcher before the checkpoint is published.
+                dist_lib.barrier()
             self._checkpoint_all_ranks(saved_path, ckpt, interval_step)
         self._poll_checkpoint()
         self._profile_add(

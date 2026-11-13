@@ -6,8 +6,8 @@ the step holds nearly all of the GPU's memory:
 
 * ``forward``: ``step_fn`` keeps allocating 1 GiB blocks until the caching
   allocator fails, so the failed frame pins the whole GPU.
-* ``backward``: ``step_fn`` fills the GPU with ballast that the autograd graph
-  saves, so a native backward kernel fails to allocate its output.
+* ``backward``: the first backward node fills the GPU and keeps the fill on the
+  graph, so the next native backward kernel fails to allocate its output.
 
 With ``--device cpu`` the same places raise ``torch.OutOfMemoryError``
 directly, so the harness and its exit codes can be checked without a GPU.
@@ -53,20 +53,24 @@ class _Indices:
             yield {"i": torch.tensor(index)}
 
 
-class _HoldUntilBackward(torch.autograd.Function):
-    """Identity on ``value`` whose graph node keeps ``ballast`` alive, like saved activations."""
+class _FillInBackward(torch.autograd.Function):
+    """Identity whose backward fills the GPU and keeps the fill alive on the graph.
+
+    The fill is a ``ctx`` attribute, not a saved tensor: autograd frees saved
+    tensors as soon as their node has run, which would release it before the
+    next kernel allocates.
+    """
 
     @staticmethod
-    def forward(ctx: Any, value: torch.Tensor, *ballast: torch.Tensor) -> torch.Tensor:
-        ctx.save_for_backward(*ballast)
+    def forward(ctx: Any, value: torch.Tensor) -> torch.Tensor:
         return value.clone()
 
     @staticmethod
-    def backward(ctx: Any, grad: torch.Tensor) -> Tuple[Optional[torch.Tensor], ...]:
-        saved = ctx.saved_tensors
-        if not saved:
+    def backward(ctx: Any, grad: torch.Tensor) -> torch.Tensor:
+        if grad.device.type != "cuda":
             raise torch.OutOfMemoryError("simulated backward OOM (CPU harness check)")
-        return (grad, *([None] * len(saved)))
+        ctx.ballast = _ballast(grad.device)
+        return grad
 
 
 def _oom_in_forward(device: torch.device) -> None:
@@ -80,8 +84,6 @@ def _oom_in_forward(device: torch.device) -> None:
 def _ballast(device: torch.device) -> List[torch.Tensor]:
     """Allocate until less than 4 MiB of the GPU is left; return what was allocated."""
 
-    if device.type != "cuda":
-        return []
     held: List[torch.Tensor] = []
     for size in _FILL_SIZES:
         while True:
@@ -164,7 +166,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         if phase == "forward":
             _oom_in_forward(device)
         elif phase == "backward":
-            loss = _HoldUntilBackward.apply(loss, *_ballast(device))
+            loss = _FillInBackward.apply(loss)
         return {"loss": loss}
 
     def on_oom(record: Mapping[str, Any], _ctx: Mapping[str, Any]) -> None:

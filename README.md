@@ -780,9 +780,13 @@ failing process never exited cleanly. Checkpoints list
   tears down the remaining ranks (`torchrun` does this; with `srun`, use
   `--kill-on-bad-exit=1`). Resubmitting the same command with `resume: auto`
   resumes from the last published checkpoint and skips the recorded step.
-  Progress since that checkpoint is lost, so frequent `checkpoint_async`
-  checkpoints keep the cost small. `torchrun` reports its own exit code rather
-  than the worker's `77`, but the record does not depend on the exit code.
+  Progress since that checkpoint is lost. All ranks wait at a barrier until rank
+  0 has published each synchronous periodic checkpoint, so an OOM in the next
+  step cannot kill the publication. A `checkpoint_async` publication still in
+  flight dies with rank 0, and the resubmit resumes from the one before it.
+  `torchrun` exits with `1` rather than the worker's `77`, but the record does
+  not depend on the exit code. `torchrun --max-restarts=N` restarts the workers
+  inside the same allocation instead of waiting for a resubmit.
 
 One OOM step beyond `max_consecutive` in a row, counted across restarts, fails
 loudly with the original error. So does exceeding `max_skipped_steps`. Every
