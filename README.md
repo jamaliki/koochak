@@ -1047,6 +1047,7 @@ Checkpoint dict fields include: `step`, `model`, `optimizer`, `scheduler` (optio
 - When `train.ddp: true`, the loop auto-initializes the process group (if needed), pins the model to the local device, and wraps it in `torch.nn.parallel.DistributedDataParallel`. Pass `train.find_unused_parameters: true` if you need the corresponding DDP flag.
 - Sharding is explicit: use `train.shard_dataset`/`train.shard_dataset_mode` (and the eval equivalents) or call `koochak.data.sharding.shard_dataset(...)` in custom code. If DDP is enabled and datasets are not marked as sharded, rank 0 emits a warning by default.
 - If you prefer manual control, initialize ahead of time via `koochak.core.dist.init_process_group(...)`; the loop will detect the existing group and skip auto-init.
+- Under `torchrun`, `koochak.core.dist.init_process_group` (and `koochak.core.launch.initialize`) connects to the agent's store under a `/koochak/attempt_<TORCHELASTIC_RESTART_COUNT>` prefix. `torchrun` keeps one store across `--max-restarts` restarts without such a prefix (at least through torch 2.15), so a restarted worker could otherwise read the last attempt's rendezvous keys and dial a dead peer: NCCL fails after about a minute, Gloo hangs. Code that calls `torch.distributed.init_process_group` directly does not get this; set `TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1` in the launcher's environment instead.
 - Launch with torchrun as usual:
 
 `torchrun --nproc_per_node=8 -m examples.mnist.ddp_main --config examples/mnist/config.yaml`
