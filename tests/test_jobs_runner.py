@@ -469,41 +469,32 @@ def test_managed_runner_preserves_nonzero_child_exit(tmp_path: Path, monkeypatch
     assert runner.execute_manifest(prepared.manifest_path, prepared.manifest_sha256) == 7
 
 
-_HANDLER_CHILD = """
-import os, signal, sys, time
+# The child keeps SIGUSR1's default action, so a signal from the runner would
+# kill it. It waits for the request file, marks itself evacuated, then exits
+# with the code given in argv, the way torchrun reports 1 for ranks' 75.
+_REQUEST_CHILD = """
+import os, sys, time
 from pathlib import Path
-requested = False
-def handle(_signum, _frame):
-    global requested
-    requested = True
-time.sleep(0.3)
-signal.signal(signal.SIGUSR1, handle)
-(Path(os.environ["KOOCHAK_EVACUATION_READY_DIR"]) / str(os.getpid())).touch()
+control = Path(os.environ["KOOCHAK_EVACUATION_DIR"])
 deadline = time.monotonic() + 10
-while not requested and time.monotonic() < deadline:
+while not (control / "requested").exists() and time.monotonic() < deadline:
     time.sleep(0.01)
-sys.exit(75 if requested else 3)
+if not (control / "requested").exists():
+    sys.exit(3)
+(control / "evacuated").touch()
+time.sleep(float(sys.argv[2]))
+sys.exit(int(sys.argv[1]))
 """
 
 
-def test_preemptible_runner_waits_for_the_workload_handler_before_forwarding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sent: list[tuple[int, int]] = []
-    real_kill = os.kill
-
-    def record_kill(pid: int, requested_signal: int) -> None:
-        sent.append((pid, requested_signal))
-        real_kill(pid, requested_signal)
-
+def _run_requested_child(exit_code: int, linger: float = 0.0) -> int:
     with runner._EvacuationRelay() as relay:  # noqa: SLF001 - contract-level test
-        monkeypatch.setattr(runner.os, "kill", record_kill)
-        # A real SIGUSR1 arrives after launch but before the child's handler.
-        timer = threading.Timer(0.05, real_kill, (os.getpid(), signal.SIGUSR1))
+        # A real SIGUSR1 reaches the runner after launch.
+        timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGUSR1))
         timer.start()
         try:
-            result = runner._run_managed_child(  # noqa: SLF001
-                [sys.executable, "-c", _HANDLER_CHILD],
+            return runner._run_managed_child(  # noqa: SLF001
+                [sys.executable, "-c", _REQUEST_CHILD, str(exit_code), str(linger)],
                 cwd="/tmp",
                 environment={"PATH": str(Path(sys.executable).parent)},
                 relay=relay,
@@ -511,24 +502,134 @@ def test_preemptible_runner_waits_for_the_workload_handler_before_forwarding(
             )
         finally:
             timer.join()
-    # The request predates the child's handler; it stayed pending instead of
-    # killing the child with the default action, then reached it exactly once.
-    assert result == 75
-    assert len(sent) == 1 and sent[0][1] == signal.SIGUSR1
+
+
+def test_preemptible_runner_requests_evacuation_without_signalling_the_workload(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # 128 + SIGUSR1 here would mean the runner killed the child.
+    assert _run_requested_child(75) == 75
+    assert '"kind": "evacuation_requested"' in capsys.readouterr().err
+
+
+def test_evacuated_workload_reports_evacuation_when_its_launcher_masks_the_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _run_requested_child(1) == 75
+    assert '"workload_returncode": 1' in capsys.readouterr().err
+
+
+def test_runner_stops_a_leader_that_outlives_its_evacuation(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(runner, "_EVACUATED_EXIT_GRACE_SECONDS", 0.2)
+    started = time.monotonic()
+    assert _run_requested_child(0, linger=30) == 75
+    assert time.monotonic() - started < 10
+    assert '"signal": "SIGTERM"' in capsys.readouterr().err
+
+
+_TERMINATED_WORKLOAD = """
+import os, sys, time
+from pathlib import Path
+mode, ready = sys.argv[1], Path(sys.argv[2])
+control = Path(os.environ["KOOCHAK_EVACUATION_DIR"])
+while not (control / "requested").exists():
+    time.sleep(0.01)
+if mode != "not-evacuated":
+    (control / "evacuated").touch()
+if mode == "returned":
+    sys.exit(1)
+ready.write_text(str(os.getpid()))
+time.sleep(60)
+"""
+
+_TERMINATED_RUNNER = """
+import os, signal, sys, threading, time
+from pathlib import Path
+from koochak.jobs import runner
+mode, ready, workload = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+with runner._EvacuationRelay() as relay:
+    threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGUSR1)).start()
+    code = runner._run_managed_child(
+        [sys.executable, "-c", workload, mode, str(ready)],
+        cwd="/tmp",
+        environment={"PATH": os.environ["PATH"]},
+        relay=relay,
+        preemptible=True,
+    )
+    # Stands in for the runner recording preflight.json after the workload.
+    ready.write_text("returned")
+    time.sleep(60)
+sys.exit(code)
+"""
+
+
+def _terminate_runner(tmp_path: Path, mode: str) -> tuple[int, str]:
+    """Run a managed workload in a runner process, then SIGTERM that runner."""
+
+    ready = tmp_path / "ready"
+    log = tmp_path / "runner.log"
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    # A file, not a pipe: a workload the runner leaves behind would hold a pipe open.
+    with log.open("w") as stderr:
+        process = subprocess.Popen(
+            [sys.executable, "-c", _TERMINATED_RUNNER, mode, str(ready), _TERMINATED_WORKLOAD],
+            env=environment,
+            stderr=stderr,
+        )
+    deadline = time.monotonic() + 30
+    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert ready.exists(), log.read_text()
+    time.sleep(0.05)
+    process.send_signal(signal.SIGTERM)
+    process.wait(timeout=10)
+    return process.returncode, ready.read_text()
+
+
+def _wait_gone(pid: int) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_terminated_runner_reports_an_evacuation_its_workload_completed(tmp_path: Path) -> None:
+    # srun --kill-on-bad-exit sends SIGTERM to every other node's runner once
+    # one exits 75, and would report the signal instead of the evacuation.
+    returncode, workload_pid = _terminate_runner(tmp_path, "running")
+    assert returncode == 75
+    assert _wait_gone(int(workload_pid))
+
+
+def test_runner_terminated_after_its_workload_evacuated_still_reports_75(tmp_path: Path) -> None:
+    returncode, state = _terminate_runner(tmp_path, "returned")
+    assert (returncode, state) == (75, "returned")
+
+
+def test_sigterm_keeps_its_default_action_when_the_workload_has_not_evacuated(
+    tmp_path: Path,
+) -> None:
+    returncode, workload_pid = _terminate_runner(tmp_path, "not-evacuated")
+    try:
+        assert returncode == -signal.SIGTERM
+    finally:
+        os.kill(int(workload_pid), signal.SIGKILL)
 
 
 def test_runner_ignores_evacuation_for_a_run_that_is_not_preemptible(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(
-        runner,
-        "_forward_to_leader",
-        lambda *_args: pytest.fail("non-preemptible runs must never be signalled"),
-    )
     with runner._EvacuationRelay() as relay:  # noqa: SLF001
         relay.requested = True
         result = runner._run_managed_child(  # noqa: SLF001
-            [sys.executable, "-c", "import time; time.sleep(.3)"],
+            [sys.executable, "-c", "import os, time; time.sleep(.3); assert 'KOOCHAK_EVACUATION_DIR' not in os.environ"],
             cwd="/tmp",
             environment={"PATH": str(Path(sys.executable).parent)},
             relay=relay,
@@ -539,13 +640,13 @@ def test_runner_ignores_evacuation_for_a_run_that_is_not_preemptible(
 
 
 @pytest.mark.parametrize("preemptible", [True, False])
-def test_only_preemptible_children_receive_the_ready_directory(
+def test_only_preemptible_children_receive_the_control_directory(
     tmp_path: Path, preemptible: bool
 ) -> None:
     seen = tmp_path / "seen"
     code = (
         "import os, pathlib, sys; "
-        "pathlib.Path(sys.argv[1]).write_text(os.environ.get('KOOCHAK_EVACUATION_READY_DIR', ''))"
+        "pathlib.Path(sys.argv[1]).write_text(os.environ.get('KOOCHAK_EVACUATION_DIR', ''))"
     )
     with runner._EvacuationRelay() as relay:  # noqa: SLF001
         assert (
@@ -558,10 +659,10 @@ def test_only_preemptible_children_receive_the_ready_directory(
             )
             == 0
         )
-    ready_dir = seen.read_text()
-    assert bool(ready_dir) is preemptible
+    control_dir = seen.read_text()
+    assert bool(control_dir) is preemptible
     if preemptible:
-        assert not Path(ready_dir).exists(), "the ready directory is private to one launch"
+        assert not Path(control_dir).exists(), "the control directory is private to one launch"
 
 
 def test_preemptible_run_records_evacuated_exit(
@@ -689,15 +790,12 @@ def test_pending_signal_before_launch_is_ignored_for_a_run_that_is_not_preemptib
         )
 
 
-def test_signal_just_after_spawn_is_forwarded_once(
+def test_signal_just_after_spawn_requests_evacuation_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Child:
         pid = 12345
         waits = 0
-
-        def poll(self):
-            return None
 
         def wait(self, timeout=None):
             self.waits += 1
@@ -705,18 +803,21 @@ def test_signal_just_after_spawn_is_forwarded_once(
                 raise subprocess.TimeoutExpired("child", timeout)
             return 0
 
-    def spawn(*_args, **_kwargs):
+    def spawn(*_args, env, **_kwargs):
+        seen.append(Path(env["KOOCHAK_EVACUATION_DIR"]))
         os.kill(os.getpid(), signal.SIGUSR1)
         return Child()
 
-    forwarded: list[int] = []
+    seen: list[Path] = []
+    notes: list[str] = []
     monkeypatch.setattr(runner.subprocess, "Popen", spawn)
+    monkeypatch.setattr(runner, "_note", lambda kind, **_fields: notes.append(kind))
     monkeypatch.setattr(
         runner,
-        "_forward_to_leader",
-        lambda _child, requested_signal, _ready: forwarded.append(requested_signal) or True,
+        "_require_quiescent_group",
+        lambda _group, **_kwargs: requests.append((seen[0] / "requested").exists()),
     )
-    monkeypatch.setattr(runner, "_require_quiescent_group", lambda _group: None)
+    requests: list[bool] = []
     with runner._EvacuationRelay() as relay:  # noqa: SLF001
         assert (
             runner._run_managed_child(  # noqa: SLF001
@@ -728,50 +829,36 @@ def test_signal_just_after_spawn_is_forwarded_once(
             )
             == 0
         )
-    assert forwarded == [signal.SIGUSR1]
+    # The workload never marked itself evacuated, so its own code stands.
+    assert requests == [True]
+    assert notes == ["evacuation_requested"]
 
 
-def test_stale_or_completed_process_group_is_never_signaled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_descendants_left_after_stopping_an_evacuated_group_are_cleaned(
+    tmp_path: Path,
 ) -> None:
-    class Child:
-        pid = 12345
-
-        def __init__(self, returncode):
-            self.returncode = returncode
-
-        def poll(self):
-            return self.returncode
-
-    ready_dir = tmp_path / "ready"
-    ready_dir.mkdir()
-    (ready_dir / "12345").touch()
-    sent: list[tuple[int, int]] = []
-    monkeypatch.setattr(runner.os, "kill", lambda *values: sent.append(values))
-    assert runner._forward_to_leader(Child(0), signal.SIGUSR1, ready_dir) is False  # noqa: SLF001
-    monkeypatch.setattr(runner.os, "getpgid", lambda _pid: 999)
-    with pytest.raises(runner.PreflightError, match="no longer owns"):
-        runner._forward_to_leader(Child(None), signal.SIGUSR1, ready_dir)  # noqa: SLF001
-    assert sent == []
-
-
-def test_leader_without_a_ready_handler_is_never_signaled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class Child:
-        pid = 12345
-
-        def poll(self):
-            return None
-
-    sent: list[tuple[int, int]] = []
-    monkeypatch.setattr(runner.os, "kill", lambda *values: sent.append(values))
-    monkeypatch.setattr(runner.os, "getpgid", lambda pid: pid)
-    (tmp_path / "999").touch()  # another process in the group is not the leader
-    assert runner._forward_to_leader(Child(), signal.SIGUSR1, tmp_path) is False  # noqa: SLF001
-    (tmp_path / "12345").touch()
-    assert runner._forward_to_leader(Child(), signal.SIGUSR1, tmp_path) is True  # noqa: SLF001
-    assert sent == [(12345, signal.SIGUSR1)]
+    marker = tmp_path / "descendant-started"
+    code = f"""
+import subprocess, sys, time
+from pathlib import Path
+subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal, time; from pathlib import Path; "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "Path({str(marker)!r}).write_text('yes'); time.sleep(30)",
+])
+time.sleep(30)
+"""
+    leader = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    deadline = time.monotonic() + 5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker.exists()
+    os.killpg(leader.pid, signal.SIGTERM)
+    leader.wait(timeout=5)
+    runner._require_quiescent_group(leader.pid, stopped=True)  # noqa: SLF001
+    assert not runner._group_exists(leader.pid)  # noqa: SLF001
 
 
 def test_background_descendant_is_killed_and_run_fails_closed(tmp_path: Path) -> None:

@@ -16,7 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..interruption import EVACUATION_EXIT_CODE, EVACUATION_READY_DIR_ENV
+from ..interruption import (
+    EVACUATED_FILE,
+    EVACUATION_DIR_ENV,
+    EVACUATION_EXIT_CODE,
+    EVACUATION_REQUEST_FILE,
+)
 from ..storage.artifact import (
     DeclaredOutput,
     artifact_publication,
@@ -310,16 +315,31 @@ def _declared_outputs(document: Mapping[str, Any]) -> tuple[DeclaredOutput, ...]
     return tuple(outputs)
 
 
+# A rank that crossed the final barrier marks the run evacuated within
+# milliseconds; a SIGTERM racing that mark waits this long for it.
+_TERMINATED_MARKER_WAIT_SECONDS = 0.5
+
+
 class _EvacuationRelay:
     """Record SIGUSR1 for the runner's whole life; never act inside the handler.
 
     Installing it before preflight keeps an early evacuation request from
     terminating the runner with the signal's default action.
+
+    Once a request reaches a preemptible workload, the relay also answers
+    SIGTERM. In a multi-node Slurm step, ``srun --kill-on-bad-exit`` terminates
+    every other node's runner as soon as the first exits 75, and srun reports a
+    signalled task ahead of any exit code. A runner whose workload has
+    evacuated therefore exits 75 instead of dying by the signal.
     """
 
     def __init__(self) -> None:
         self.requested = False
+        self.evacuated = False
         self._previous: Any = signal.SIG_DFL
+        self._previous_terminate: Any = None
+        self._control_dir: Path | None = None
+        self._process_group: int | None = None
 
     def _record(self, _signum: int, _frame: Any) -> None:
         self.requested = True
@@ -330,7 +350,55 @@ class _EvacuationRelay:
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        if self._previous_terminate is not None:
+            signal.signal(signal.SIGTERM, self._previous_terminate)
+            self._previous_terminate = None
         signal.signal(signal.SIGUSR1, self._previous)
+
+    def watch(self, control_dir: Path, process_group: int) -> None:
+        """Answer SIGTERM with the evacuation exit once the workload evacuates."""
+
+        self._control_dir = control_dir
+        self._process_group = process_group
+        if self._previous_terminate is None:
+            previous = signal.getsignal(signal.SIGTERM)
+            self._previous_terminate = signal.SIG_DFL if previous is None else previous
+            signal.signal(signal.SIGTERM, self._terminate)
+
+    def release(self, *, evacuated: bool) -> None:
+        """Forget the workload's group and control directory once it is gone."""
+
+        self.evacuated = self.evacuated or evacuated
+        self._control_dir = None
+        self._process_group = None
+
+    def _has_evacuated(self) -> bool:
+        return self.evacuated or (
+            self._control_dir is not None and (self._control_dir / EVACUATED_FILE).exists()
+        )
+
+    def _terminate(self, signum: int, frame: Any) -> None:
+        deadline = time.monotonic() + _TERMINATED_MARKER_WAIT_SECONDS
+        while not self._has_evacuated() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if self._has_evacuated():
+            # The terminal checkpoint is published and every rank has crossed
+            # the final barrier; nothing the workload still does is needed.
+            if self._process_group is not None:
+                try:
+                    os.killpg(self._process_group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            os.write(2, b'{"kind": "evacuated_runner_terminated"}\n')
+            os._exit(EVACUATION_EXIT_CODE)
+        # Not an evacuation: let SIGTERM have the effect it had before.
+        previous = self._previous_terminate
+        signal.signal(signal.SIGTERM, previous)
+        self._previous_terminate = None
+        if callable(previous):
+            previous(signum, frame)
+        elif previous == signal.SIG_DFL:
+            os.kill(os.getpid(), signum)
 
 
 def _note(kind: str, **fields: Any) -> None:
@@ -350,6 +418,13 @@ def _preemptible(document: Mapping[str, Any]) -> bool:
     return True
 
 
+# An evacuated workload's leader normally exits at once. A launcher such as
+# torchrun instead reports a failure and may restart the ranks, so a leader that
+# outlives the first grace period is stopped, and killed after the second.
+_EVACUATED_EXIT_GRACE_SECONDS = 10.0
+_EVACUATED_KILL_GRACE_SECONDS = 30.0
+
+
 def _run_managed_child(
     argv: list[str],
     *,
@@ -361,22 +436,27 @@ def _run_managed_child(
     runtime_path: str | None = None,
     runtime_sha256: str | None = None,
 ) -> int:
-    """Run one child process group and relay evacuation to a preemptible leader.
+    """Run one child process group and pass evacuation to a preemptible workload.
 
-    A request reaches the workload only when the run is preemptible and its
-    leader has announced an installed handler under ``EVACUATION_READY_DIR_ENV``.
-    Until then it stays pending, so a request during startup can never kill the
-    workload with the signal's default action.
+    The runner never signals its workload. For a preemptible run it names a
+    private directory in ``EVACUATION_DIR_ENV`` and creates ``requested`` there;
+    every process that inherits the variable, torchrun ranks included, sees the
+    request at its next safe boundary. Once the workload creates ``evacuated``,
+    its terminal checkpoint is published: the run reports the evacuation exit
+    code whatever its launcher returns, and a leader that lingers is stopped.
     """
 
     if relay.requested and preemptible:
         return EVACUATION_EXIT_CODE
-    with tempfile.TemporaryDirectory(prefix="koochak-evacuation-") as ready_dir:
+    with tempfile.TemporaryDirectory(prefix="koochak-evacuation-") as control:
+        control_dir = Path(control)
         child_environment = dict(environment)
         if preemptible:
-            child_environment[EVACUATION_READY_DIR_ENV] = ready_dir
-        forwarded = False
+            child_environment[EVACUATION_DIR_ENV] = control
+        requested = False
         noted = False
+        evacuated_at: float | None = None
+        stops: list[tuple[float, signal.Signals]] = []
         try:
             child = subprocess.Popen(
                 _isolated_python_argv(
@@ -394,45 +474,47 @@ def _run_managed_child(
                     returncode = child.wait(timeout=0.1)
                     break
                 except subprocess.TimeoutExpired:
-                    if not relay.requested or forwarded:
-                        continue
-                    if not preemptible:
-                        if not noted:
-                            _note("evacuation_ignored", reason="run_not_preemptible")
-                            noted = True
-                        continue
-                    forwarded = _forward_to_leader(child, signal.SIGUSR1, Path(ready_dir))
-                    if not forwarded and not noted:
-                        _note("evacuation_pending", reason="workload_has_no_handler_yet")
+                    pass
+                if relay.requested and not requested:
+                    if preemptible:
+                        relay.watch(control_dir, child.pid)
+                        (control_dir / EVACUATION_REQUEST_FILE).touch()
+                        _note("evacuation_requested")
+                        requested = True
+                    elif not noted:
+                        _note("evacuation_ignored", reason="run_not_preemptible")
                         noted = True
-            _require_quiescent_group(child.pid)
+                if not preemptible:
+                    continue
+                if evacuated_at is None and (control_dir / EVACUATED_FILE).exists():
+                    evacuated_at = time.monotonic()
+                    stops = [
+                        (_EVACUATED_EXIT_GRACE_SECONDS, signal.SIGTERM),
+                        (
+                            _EVACUATED_EXIT_GRACE_SECONDS + _EVACUATED_KILL_GRACE_SECONDS,
+                            signal.SIGKILL,
+                        ),
+                    ]
+                if stops and time.monotonic() - evacuated_at >= stops[0][0]:
+                    _, stop_signal = stops.pop(0)
+                    _note("evacuated_leader_stopped", signal=stop_signal.name)
+                    try:
+                        os.killpg(child.pid, stop_signal)
+                    except ProcessLookupError:
+                        pass
+            evacuated = preemptible and (control_dir / EVACUATED_FILE).exists()
+            _require_quiescent_group(child.pid, stopped=evacuated_at is not None and len(stops) < 2)
         except OSError as exc:
             raise PreflightError(f"managed workload could not run: {exc}") from exc
+        finally:
+            relay.release(evacuated=preemptible and (control_dir / EVACUATED_FILE).exists())
     # subprocess uses negative values for signal termination; shell-compatible
     # status keeps the child's nonzero outcome visible to the scheduler.
-    return 128 + abs(returncode) if returncode < 0 else returncode
-
-
-def _forward_to_leader(
-    child: subprocess.Popen[Any], requested_signal: int, ready_dir: Path
-) -> bool:
-    """Signal a live leader of Koochak's own group once its handler is ready.
-
-    Only the leader is signalled: helper processes such as spawned data
-    loader or compiler workers keep the default action and would be killed.
-    """
-
-    if child.poll() is not None:
-        return False
-    try:
-        if os.getpgid(child.pid) != child.pid:
-            raise PreflightError("managed workload no longer owns its process group")
-        if not (ready_dir / str(child.pid)).exists():
-            return False
-        os.kill(child.pid, requested_signal)
-    except ProcessLookupError:
-        return False
-    return True
+    status = 128 + abs(returncode) if returncode < 0 else returncode
+    if evacuated and status != EVACUATION_EXIT_CODE:
+        _note("evacuation_completed", workload_returncode=status)
+        return EVACUATION_EXIT_CODE
+    return status
 
 
 def _group_exists(process_group: int) -> bool:
@@ -445,8 +527,14 @@ def _group_exists(process_group: int) -> bool:
     return True
 
 
-def _require_quiescent_group(process_group: int, *, cleanup_seconds: float = 1.0) -> None:
-    """Reject and clean a process group whose leader exited before descendants."""
+def _require_quiescent_group(
+    process_group: int, *, cleanup_seconds: float = 1.0, stopped: bool = False
+) -> None:
+    """Reject and clean a process group whose leader exited before descendants.
+
+    ``stopped`` means the runner signalled the group itself after the workload
+    evacuated; descendants it left behind are then cleaned without failing.
+    """
 
     if not _group_exists(process_group):
         return
@@ -462,6 +550,8 @@ def _require_quiescent_group(process_group: int, *, cleanup_seconds: float = 1.0
             break
     if _group_exists(process_group):
         raise PreflightError("managed workload process group could not be quiesced")
+    if stopped:
+        return
     raise PreflightError("managed workload left background descendants")
 
 

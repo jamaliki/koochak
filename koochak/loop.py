@@ -1466,6 +1466,11 @@ class _TrainLoop:
         it: Iterator[Any] | None = None
         try:
             self.evacuation.install()
+            if self.evacuation.already_evacuated:
+                # A launcher restarted this rank after the managed run had
+                # evacuated (torchrun --max-restarts). Leave before any update.
+                print("[evacuation] run already evacuated; exiting before training", flush=True)
+                raise SystemExit(EVACUATION_EXIT_CODE)
             self.gpu_health.start()
             self._shard_datasets()
             resume_path = self._load_auto_resume()
@@ -1542,6 +1547,12 @@ class _TrainLoop:
                         self._step_ctx(next_step),
                     )
                 _emit(self.hooks, "on_train_end", self.ctx)
+                # Leave together, after rank 0 has reported the checkpoint.
+                # srun --kill-on-bad-exit tears the step down at the first
+                # nonzero exit, which would otherwise cut that report short.
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    dist_lib.barrier()
+                self.evacuation.mark_evacuated()
                 raise SystemExit(EVACUATION_EXIT_CODE)
             _emit(self.hooks, "on_train_end", self.ctx)
         except Exception as exc:

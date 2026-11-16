@@ -6,6 +6,7 @@ import json
 import multiprocessing as mp
 import os
 import signal
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -13,8 +14,10 @@ import pytest
 import torch
 
 from koochak.interruption import (
+    EVACUATED_FILE,
+    EVACUATION_DIR_ENV,
     EVACUATION_EXIT_CODE,
-    EVACUATION_READY_DIR_ENV,
+    EVACUATION_REQUEST_FILE,
     EvacuationController,
 )
 from koochak.loop import training_loop
@@ -105,32 +108,77 @@ def test_request_during_reduction_survives_until_all_ranks_agree(monkeypatch):
     assert controller.reconcile_requests(False) == (True, False)
 
 
-def test_controller_announces_readiness_only_while_its_handler_is_installed(
+def test_controller_sees_the_runner_request_file_at_reconciliation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(EVACUATION_READY_DIR_ENV, str(tmp_path))
-    ready = tmp_path / str(os.getpid())
-    previous = signal.getsignal(signal.SIGUSR1)
+    monkeypatch.setenv(EVACUATION_DIR_ENV, str(tmp_path))
     controller = EvacuationController(True).install()
     try:
-        assert ready.is_file()
-        assert signal.getsignal(signal.SIGUSR1) == controller._handle_signal
+        assert controller.reconcile() is False
+        (tmp_path / EVACUATION_REQUEST_FILE).touch()
+        assert controller.reconcile() is True
+        assert not controller.already_evacuated
+        controller.mark_evacuated()
+        assert (tmp_path / EVACUATED_FILE).is_file()
+        assert controller.already_evacuated
     finally:
         controller.uninstall()
-    assert not ready.exists()
-    assert signal.getsignal(signal.SIGUSR1) == previous
-
-    EvacuationController(False).install()
-    assert not ready.exists(), "a disabled controller must never claim readiness"
 
 
-def test_controller_without_a_runner_writes_no_readiness(
+def test_disabled_controller_or_unmanaged_run_ignores_the_control_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv(EVACUATION_READY_DIR_ENV, raising=False)
-    controller = EvacuationController(True).install()
-    controller.uninstall()
-    assert list(tmp_path.iterdir()) == []
+    (tmp_path / EVACUATION_REQUEST_FILE).touch()
+    monkeypatch.setenv(EVACUATION_DIR_ENV, str(tmp_path))
+    disabled = EvacuationController(False).install()
+    assert disabled.reconcile() is False
+    disabled.mark_evacuated()
+    assert not (tmp_path / EVACUATED_FILE).exists()
+
+    monkeypatch.delenv(EVACUATION_DIR_ENV)
+    unmanaged = EvacuationController(True).install()
+    try:
+        assert unmanaged.reconcile() is False
+        unmanaged.mark_evacuated()
+    finally:
+        unmanaged.uninstall()
+    assert not (tmp_path / EVACUATED_FILE).exists()
+
+
+def test_request_file_evacuates_and_a_restarted_rank_never_trains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / EVACUATION_REQUEST_FILE).touch()
+    monkeypatch.setenv(EVACUATION_DIR_ENV, str(control))
+    steps: list[int] = []
+
+    def train():
+        model = torch.nn.Linear(1, 1, bias=False)
+        with pytest.raises(SystemExit) as raised:
+            training_loop(
+                model=model,
+                dataset=_dataset(),
+                step_fn=_step_fn,
+                optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+                train_cfg={**_train_cfg(tmp_path / "run"), "resume": "auto"},
+                hooks={"on_step_end": [lambda _logs, ctx: steps.append(int(ctx["step"]))]},
+            )
+        return raised.value.code
+
+    # The request predates training, so the first completed update is the
+    # safe boundary: one update, a terminal checkpoint, then the marker.
+    assert train() == EVACUATION_EXIT_CODE
+    assert steps == [0]
+    assert (control / EVACUATED_FILE).is_file()
+    published = sorted(path.name for path in (tmp_path / "run").glob("step*.pt"))
+    assert published == ["step000000001.pt"]
+
+    # A launcher restart in the same managed run leaves before any update.
+    assert train() == EVACUATION_EXIT_CODE
+    assert steps == [0]
+    assert sorted(path.name for path in (tmp_path / "run").glob("step*.pt")) == published
 
 
 def test_signal_saves_terminal_checkpoint_before_reserved_exit(tmp_path: Path) -> None:
@@ -419,6 +467,69 @@ def test_auto_resume_retries_typed_artifact_publication(tmp_path: Path) -> None:
     )
     artifacts = [data for kind, data in healed if kind == "workload.artifact"]
     assert artifacts[0]["location"].endswith("step000000001.pt")
+
+
+def _ddp_exit_order_worker(
+    rank: int, init_file: str, out_dir: str, control: str, result_queue: Any
+) -> None:
+    os.environ["KOOCHAK_EVACUATION_DIR"] = control
+    torch.distributed.init_process_group(
+        "gloo", init_method=f"file://{init_file}", rank=rank, world_size=2
+    )
+    try:
+        model = torch.nn.Linear(1, 1, bias=False)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+        def slow_report(*_args: Any) -> None:
+            # Stands in for rank 0 waiting on Scruffy's acknowledgement.
+            time.sleep(1.0)
+            result_queue.put((rank, "reported", time.time()))
+
+        try:
+            training_loop(
+                model=model,
+                dataset=_dataset(),
+                step_fn=_step_fn,
+                optimizer=optimizer,
+                train_cfg={**_train_cfg(Path(out_dir), max_steps=3), "ddp": True},
+                hooks={"on_evacuation": [slow_report]},
+            )
+        except SystemExit as exc:
+            result_queue.put((rank, "exit", time.time(), exc.code))
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_ddp_ranks_leave_only_after_rank0_reports_the_evacuation(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / EVACUATION_REQUEST_FILE).touch()
+    context = mp.get_context("spawn")
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_ddp_exit_order_worker,
+            args=(rank, str(tmp_path / "dist-init"), str(tmp_path / "run"), str(control), result_queue),
+        )
+        for rank in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=60)
+        assert process.exitcode == 0
+
+    results = [result_queue.get(timeout=5) for _ in range(3)]
+    reported = [item[2] for item in results if item[1] == "reported"]
+    exits = {item[0]: item for item in results if item[1] == "exit"}
+    assert len(reported) == 1
+    assert {rank: item[3] for rank, item in exits.items()} == {
+        0: EVACUATION_EXIT_CODE,
+        1: EVACUATION_EXIT_CODE,
+    }
+    # Under srun --kill-on-bad-exit, rank 1 leaving first would cut rank 0 off.
+    assert exits[1][2] >= reported[0]
+    assert (control / EVACUATED_FILE).is_file()
 
 
 def test_ddp_ranks_reconcile_evacuation_and_publish_per_rank_rng(tmp_path: Path) -> None:

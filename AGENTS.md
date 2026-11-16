@@ -18,6 +18,12 @@ This doc tracks incremental design decisions and changes from the initial design
 - Keep local evacuation requests set until every rank agrees. A signal received
   during a reduction must survive for the next reduction; never stop one rank
   before that agreement. Test this race with a signal inside an NCCL reduction.
+- Every evacuating rank crosses a final barrier after `on_train_end` and only
+  then exits 75. Scruffy's `srun --kill-on-bad-exit=1` tears the step down at
+  the first nonzero exit, which would otherwise cut rank 0's report short.
+  That kill sends SIGTERM to the other nodes' runners, and srun reports a
+  signalled task ahead of any exit code. After the workload evacuates, the
+  runner's relay answers SIGTERM with exit 75.
 
 - The philosophy is *functions first*
 - Do not catch exceptions unless necessary, fail *fast and loud* if an unexpected error occurs. If we are expected to have some errors, those should be caught explicitly and not silently.
@@ -147,10 +153,15 @@ This doc tracks incremental design decisions and changes from the initial design
     `train.resume: auto`, records the Scruffy recovery policy in the manifest,
     and `submit_scruffy`/`PreparedTask` derive `recovery` from it. Do not
     hand-write a recovery policy that retries `evacuated`.
-  - The runner relays SIGUSR1 only to a preemptible run's leader process, and
-    only after `$KOOCHAK_EVACUATION_READY_DIR/<pid>` exists, which
-    `EvacuationController.install()` creates once its handler is in place;
-    earlier requests stay pending. Other runs ignore the signal and never see
+  - The runner never signals its workload. For a preemptible run it sets
+    `$KOOCHAK_EVACUATION_DIR` to a private directory and turns SIGUSR1 into
+    `<dir>/requested`, which every rank (`torchrun` ranks included) reads when
+    it reconciles stop requests. Each rank creates `<dir>/evacuated` after the
+    final barrier and exits 75. The runner reports 75 whenever that marker
+    exists, because `torchrun` exits 1. It sends SIGTERM to a leader still
+    running 10 s later and SIGKILL 30 s after that. A runner sent SIGTERM after
+    its workload evacuated exits 75. Ranks that are restarted after the marker
+    exists exit 75 before training. Other runs ignore the signal and never see
     the variable.
   - Profiles contain no secret values. They name required secrets, inherit only Koochak's fixed runtime identity, and cannot override it. All ordinary values, including compiler and NCCL settings, belong under `environment.set`.
 
@@ -289,7 +300,7 @@ Done recently
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
 - Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
 - Tests: OOM skip with data/scheduler alignment, consecutive escalation to checkpoint-and-exit across a restart, fetch-phase OOM, DDP record-and-exit, gloo two-rank replay of recorded skips, and a CUDA-only real-OOM memory release check (`tests/test_oom_recovery.py`). `tests/test_oom_recovery_gpu.py` drives `tests/oom_gpu_trainer.py` in fresh processes with real allocator OOMs that hold the GPU (a forward fill, and a native backward kernel after a fill kept on the graph as a `ctx` attribute, since autograd frees saved tensors as soon as their node runs), the exit-77 restart, and two-GPU NCCL runs under `torch.distributed.run` (teardown time, the launcher's reported exit codes, resume, `--max-restarts`). `KOOCHAK_OOM_TEST_DEVICE=cpu` runs the same flows with simulated OOMs and Gloo.
-- Preemptible jobs: one `preemptible` flag on `prepare_run` keeps the training config, launch manifest, and Scruffy recovery policy consistent; the runner never lets an evacuation request kill a workload that has not installed its handler.
+- Preemptible jobs: one `preemptible` flag on `prepare_run` keeps the training config, launch manifest, and Scruffy recovery policy consistent; the runner turns SIGUSR1 into a request file, so the request never kills a process, and single-process, `torchrun`, and multi-node runs all evacuate the same way.
 
 Open TODOs (authoritative)
 - Storage abstraction (`specs/storage-abstraction.md`)
@@ -315,6 +326,6 @@ Open TODOs (authoritative)
 - Preemption follow-ups [TODO]
   - Scruffy: `preempt --job A --for B` that reserves A's GPUs for B, skips the allocation-wide drain, keeps A's queue position for its next attempt, and does not count preemptions against `max_attempts`.
   - Bump the optional `scruffy` pin (currently `cb633a6`, which predates evacuation and `submit_job(recovery=...)`) through the final-pin gate.
-  - `torchrun` launches cannot be evacuated: the agent leader never announces SIGUSR1 readiness.
+  - Evacuate `torchrun` and multi-node runs on a real Scruffy Slurm allocation. So far only local `torchrun` with Gloo and two-rank Gloo tests cover them. They rely on cgroup.conf's default `SignalChildrenProcesses=no`, so `scancel --signal=USR1` reaches only the runner.
 - Documentation [TODO]
   - Add a short README for `examples/mnist` and a troubleshooting section for DDP (env vars, CUDA device binding).

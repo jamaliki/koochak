@@ -422,10 +422,11 @@ without importing Scruffy or sending events. Scruffy workers require both
 `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID`, then publish typed `workload.artifact` events.
 An incomplete or empty Scruffy identity fails the runner. A
 missing, corrupt, symlinked, or unpublishable output fails the runner. A
-SIGUSR1 request is forwarded only to the leader of that child process group,
-only for a preemptible run, and never to the parent Slurm allocation. If the
-leader exits while descendants remain, Koochak terminates only that owned group
-and fails closed before output validation.
+The runner never forwards SIGUSR1. A preemptible run receives the request
+through a file (see [Preemptible runs](#preemptible-runs)), and the parent
+Slurm allocation is never signalled. If the leader exits while descendants
+remain, Koochak terminates only that owned group and fails closed before output
+validation.
 Every output is revalidated immediately before its event. Event IDs include the
 job, artifact ID, and content digest, so retrying after a partial spool is
 idempotent: an already accepted first event deduplicates while later outputs
@@ -574,26 +575,50 @@ checkpoint, and exits `75`; Scruffy queues the next attempt, which resumes
 from that checkpoint once resources free up. Scruffy does not yet reserve the
 freed GPUs for a particular job.
 
-The runner records SIGUSR1 from the moment it starts and relays it only to a
-preemptible run's leader process, and only once that process says its handler
-is installed. For preemptible runs the runner sets
-`KOOCHAK_EVACUATION_READY_DIR` to a private directory; Koochak's
-`EvacuationController` creates `<dir>/<pid>` right after it installs its
-handler and removes it before uninstalling. A request during preflight or
-model startup therefore waits instead of killing the workload, and one that
-arrives before launch exits `75` without starting it. Helper processes such as
-spawned data-loader or compiler workers are never signalled. A run that is not
-preemptible ignores the request and logs `evacuation_ignored`; Scruffy then
-reports a timeout and never kills it. `preflight.json` records
-`state: evacuated` for an exit `75`.
+The runner records SIGUSR1 from the moment it starts and never signals the
+workload. For a preemptible run it sets `KOOCHAK_EVACUATION_DIR` to a private
+directory, and a SIGUSR1 creates `<dir>/requested`:
+
+1. Every process that inherits the variable, each `torchrun` rank included,
+   reads the request after its next completed update. All DDP ranks agree
+   through the existing stop-request reduction.
+2. Rank 0 publishes the numbered checkpoint, and all ranks finish their hooks
+   and cross a final barrier. Each rank then creates `<dir>/evacuated` and
+   exits `75`.
+3. The runner reports `75` whenever that marker exists, even when the launcher
+   reports something else (`torchrun` exits `1`). Ranks that a launcher
+   restarts afterwards (`--max-restarts`) exit `75` before training. If the
+   leader is still running 10 seconds after the marker appears, the runner
+   sends SIGTERM to its process group, then SIGKILL 30 seconds later.
+4. A runner that receives SIGTERM after its workload evacuated stops the
+   workload and exits `75`. In a multi-node Slurm step, the first node to exit
+   `75` makes `srun --kill-on-bad-exit` send SIGTERM to every other node's
+   runner. srun puts a task killed by a signal ahead of any exit code, so
+   without this the step would report `143` instead of an evacuation.
+
+A request that arrives before launch exits `75` without starting the workload.
+One that arrives during preflight or model startup takes effect after the
+first update, so it never kills a process. A run that is not preemptible
+ignores the request and logs `evacuation_ignored`; Scruffy then reports a
+timeout and never kills it. `preflight.json` records `state: evacuated` for an
+exit `75`.
+
+This works the same way for one process, for `torchrun` with one rank per GPU,
+and for multi-node runs, where Scruffy signals the runner on every node.
+Koochak does not start ranks itself. A multi-node run without `torchrun` needs
+an `init_method` or `MASTER_ADDR`/`MASTER_PORT`, which Scruffy does not set.
+Under Slurm, `scancel --signal=USR1` reaches only the runner under cgroup.conf's
+default `SignalChildrenProcesses=no`. With `yes`, it would also reach
+`torchrun` and data-loader workers, and SIGUSR1's default action ends them.
 
 Use `Preemptible(config_section=None)` when the entrypoint is not configured
-through a Koochak `train` section; it must then enable evacuation and
-`resume="auto"` itself. `install_evacuation_handler()` announces readiness for
-you; a hand-written SIGUSR1 handler must create
-`$KOOCHAK_EVACUATION_READY_DIR/<pid>` after installing itself. A launcher whose
-leader process never announces readiness, such as `torchrun`, is never
-signalled, so its evacuation times out.
+through a Koochak `train` section. It must then enable evacuation and
+`resume="auto"` itself. An `EvacuationController` from
+`install_evacuation_handler()` sees the request in `reconcile()`. Exit `75`
+before training when its `already_evacuated` is true. Otherwise call
+`mark_evacuated()` once the checkpoint is published, then exit `75`. Code
+without the controller checks for `$KOOCHAK_EVACUATION_DIR/requested` and
+creates `$KOOCHAK_EVACUATION_DIR/evacuated` itself.
 
 The runner starts under `python -I`, reconstructs the environment from a small
 allowlist, restores scheduler-owned `SLURM_*`, `SCRUFFY_*`, and GPU identity,
@@ -804,9 +829,12 @@ the `training_loop(..., evacuation=...)` API. Koochak installs a minimal
 `SIGUSR1` handler that only records an in-memory request. At the end of a
 completed optimizer update, all DDP ranks reconcile that request; rank 0 then
 atomically publishes a numbered terminal checkpoint with `next_step` set to the
-first unexecuted update, emits the artifact and evacuation milestone events,
-finishes hooks, and exits with reserved code `75`. The handler performs no I/O
-or distributed operations.
+first unexecuted update and emits the artifact and evacuation milestone events.
+Every rank finishes its hooks, crosses a final barrier, and exits with reserved
+code `75`. The barrier is there because `srun --kill-on-bad-exit` would end
+rank 0's reporting at the first nonzero exit. The handler performs no I/O or
+distributed operations. Under the managed runner, a preemptible run also reads
+the request from `$KOOCHAK_EVACUATION_DIR/requested`.
 
 Use `training_loop(..., resume="auto")` or the CLI's default `--resume auto` to
 load only the highest valid published numbered checkpoint. With no valid
