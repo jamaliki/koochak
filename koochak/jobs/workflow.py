@@ -135,7 +135,24 @@ class PreparedTask:
         object.__setattr__(self, "resources", freeze_json(dict(resources), "resources"))
         object.__setattr__(self, "needs", _validate_needs(self.needs))
         object.__setattr__(self, "wait_for", _validate_wait_for(self.wait_for))
-        object.__setattr__(self, "recovery", _validate_recovery(self.recovery))
+        recovery = self.recovery
+        if self.run.preemption is not None:
+            if recovery is not None:
+                raise ValueError(
+                    "a preemptible run derives its recovery policy; do not also pass recovery"
+                )
+            recovery = self.run.preemption.recovery()
+        recovery = _validate_recovery(recovery)
+        if (
+            self.run.preemption is None
+            and recovery is not None
+            and "evacuated" in recovery["retry_on"]
+        ):
+            raise ValueError(
+                "retry_on 'evacuated' requires a run prepared with preemptible=True; "
+                "the runner never forwards evacuation to other runs"
+            )
+        object.__setattr__(self, "recovery", recovery)
 
     def to_scruffy_spec(self, *, request_id: str, workflow_id: str, project_id: str) -> dict[str, Any]:
         spec: dict[str, Any] = {

@@ -17,6 +17,7 @@ import pytest
 
 from koochak.jobs import (
     EnvironmentProfile,
+    Preemptible,
     prepare_run,
     runner,
     submit_pazuzu,
@@ -178,6 +179,7 @@ def test_scruffy_adapter_stages_locally_and_uses_only_the_python_api(
     assert seen["argv"] == prepared.runner_argv()
     assert seen["environment"] == {}
     assert seen["request"] is resources
+    assert "recovery" not in seen
     assert seen["wait_for"] == [
         {
             "kind": "artifact",
@@ -257,4 +259,108 @@ def test_scruffy_adapter_never_drops_unsupported_artifact_conditions(
         )
 
     assert not called
+    assert not Path(prepared.manifest_path).exists()
+
+
+def _preemptible(tmp_path: Path):
+    config = tmp_path / "base.yaml"
+    config.write_text("train:\n  max_steps: 10\n")
+    return prepare_run(
+        name="backend-preemptible",
+        profile=EnvironmentProfile(
+            profile_id="backend-test",
+            python=sys.executable,
+            variables={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"},
+        ),
+        python_args=["-m", "koochak.cli.train", "--config", "{config}"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / "run"),
+        base_config=config,
+        preemptible=Preemptible(grace_seconds=300),
+    )
+
+
+def test_scruffy_adapter_submits_the_preemptible_recovery_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _preemptible(tmp_path)
+    seen = {}
+
+    def fake_submit(root, **values):
+        seen.update(values)
+        return {"job_id": "job-1"}
+
+    module = types.ModuleType("scruffy")
+    module.submit_job = fake_submit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+
+    submit_scruffy(
+        prepared,
+        root=tmp_path / "queue",
+        resources=object(),
+        request_id="campaign/train/attempt-1",
+        project_id="project",
+        workflow_id="campaign",
+        task_id="train",
+    )
+    assert seen["recovery"] == {
+        "max_attempts": 10,
+        "retry_on": ["allocation_replaced", "allocation_incarnation_changed", "evacuated"],
+        "evacuation": {"signal": "USR1", "grace_seconds": 300},
+    }
+
+
+def test_preemptible_scruffy_job_needs_a_workflow_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _preemptible(tmp_path)
+    module = types.ModuleType("scruffy")
+    module.submit_job = lambda *_args, **_kwargs: pytest.fail("must not submit")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    with pytest.raises(ValueError, match="workflow_id and task_id"):
+        submit_scruffy(
+            prepared,
+            root=tmp_path / "queue",
+            resources=object(),
+            request_id="campaign/train/attempt-1",
+            project_id="project",
+        )
+    assert not Path(prepared.manifest_path).exists()
+
+
+def test_preemptible_scruffy_job_needs_a_recovery_capable_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = _preemptible(tmp_path)
+
+    def old_submit(
+        root,
+        *,
+        argv,
+        name,
+        cwd,
+        environment,
+        request,
+        request_id,
+        project_id,
+        workflow_id=None,
+        task_id=None,
+        needs=None,
+        wait_for=None,
+    ):
+        pytest.fail("must not submit")
+
+    module = types.ModuleType("scruffy")
+    module.submit_job = old_submit  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scruffy", module)
+    with pytest.raises(RuntimeError, match=r"recovery policies.*upgrade"):
+        submit_scruffy(
+            prepared,
+            root=tmp_path / "queue",
+            resources=object(),
+            request_id="campaign/train/attempt-1",
+            project_id="project",
+            workflow_id="campaign",
+            task_id="train",
+        )
     assert not Path(prepared.manifest_path).exists()

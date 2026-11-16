@@ -126,8 +126,20 @@ def submit_scruffy(
     needs: list[dict[str, str]] | None = None,
     wait_for: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Stage and enqueue a prepared run through Scruffy's Python API."""
+    """Stage and enqueue a prepared run through Scruffy's Python API.
 
+    A preemptible run carries its recovery policy, which Scruffy honors only
+    for workflow tasks, so it requires ``workflow_id`` and ``task_id``.
+    """
+
+    recovery = None
+    if prepared.preemption is not None:
+        if workflow_id is None or task_id is None:
+            raise ValueError(
+                "preemptible Scruffy jobs need workflow_id and task_id so Scruffy "
+                "can queue their next attempt"
+            )
+        recovery = prepared.preemption.recovery()
     try:
         from scruffy import submit_job
     except ModuleNotFoundError as exc:
@@ -155,6 +167,12 @@ def submit_scruffy(
             "the installed scruffy-gpu client does not support artifact conditions; "
             "upgrade with 'pip install --upgrade koochak[scruffy]'"
         )
+    if recovery is not None and "recovery" not in parameters and not accepts_keywords:
+        raise RuntimeError(
+            "the installed scruffy-gpu client does not support recovery policies; "
+            "upgrade with 'pip install --upgrade koochak[scruffy]'"
+        )
+    extra = {"recovery": recovery} if recovery is not None else {}
 
     stage_run(prepared)
     return submit_job(
@@ -170,6 +188,7 @@ def submit_scruffy(
         task_id=task_id,
         needs=needs,
         wait_for=wait_for,
+        **extra,
     )
 
 

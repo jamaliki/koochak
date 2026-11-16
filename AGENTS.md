@@ -142,6 +142,16 @@ This doc tracks incremental design decisions and changes from the initial design
   - Agent-authored experiment submission must live in a committed Python script using `prepare_run`, then `submit_pazuzu` or `submit_scruffy`. Do not assemble SSH, `sbatch`, or scheduler CLI submissions in tool calls.
   - `submit_scruffy(..., wait_for=[...])` declares intermediate artifact gates.
     Use the numbered checkpoint artifact ID and never `latest.pt`.
+  - `prepare_run(..., preemptible=True | Preemptible(...))` is the only way to
+    make a run evacuable: it enables `train.evacuation_enabled` and
+    `train.resume: auto`, records the Scruffy recovery policy in the manifest,
+    and `submit_scruffy`/`PreparedTask` derive `recovery` from it. Do not
+    hand-write a recovery policy that retries `evacuated`.
+  - The runner relays SIGUSR1 only to a preemptible run's leader process, and
+    only after `$KOOCHAK_EVACUATION_READY_DIR/<pid>` exists, which
+    `EvacuationController.install()` creates once its handler is in place;
+    earlier requests stay pending. Other runs ignore the signal and never see
+    the variable.
   - Profiles contain no secret values. They name required secrets, inherit only Koochak's fixed runtime identity, and cannot override it. All ordinary values, including compiler and NCCL settings, belong under `environment.set`.
 
 - Optim
@@ -279,6 +289,7 @@ Done recently
 - Tests: sharding, precision, checkpoint prefix adapt, checkpoint prune/save, checkpoint round‑trip, config validation, RNG restore.
 - Tests: opt-in SIGUSR1 evacuation, terminal checkpoint publication ordering, strict numbered-checkpoint validation, and first-run-safe auto-resume.
 - Tests: OOM skip with data/scheduler alignment, consecutive escalation to checkpoint-and-exit across a restart, fetch-phase OOM, DDP record-and-exit, gloo two-rank replay of recorded skips, and a CUDA-only real-OOM memory release check (`tests/test_oom_recovery.py`). `tests/test_oom_recovery_gpu.py` drives `tests/oom_gpu_trainer.py` in fresh processes with real allocator OOMs that hold the GPU (a forward fill, and a native backward kernel after a fill kept on the graph as a `ctx` attribute, since autograd frees saved tensors as soon as their node runs), the exit-77 restart, and two-GPU NCCL runs under `torch.distributed.run` (teardown time, the launcher's reported exit codes, resume, `--max-restarts`). `KOOCHAK_OOM_TEST_DEVICE=cpu` runs the same flows with simulated OOMs and Gloo.
+- Preemptible jobs: one `preemptible` flag on `prepare_run` keeps the training config, launch manifest, and Scruffy recovery policy consistent; the runner never lets an evacuation request kill a workload that has not installed its handler.
 
 Open TODOs (authoritative)
 - Storage abstraction (`specs/storage-abstraction.md`)
@@ -301,5 +312,9 @@ Open TODOs (authoritative)
   - Added storage naming helpers (`koochak/storage/naming.py`) and improved W&B artifact integration: stable per-run artifact name with `latest`, `step-<n>`, and `best` aliases.
 - More tests [TODO]
   - Resume determinism across partial runs (single/DDR), scheduler-on-eval policy, grad-accum equivalence.
+- Preemption follow-ups [TODO]
+  - Scruffy: `preempt --job A --for B` that reserves A's GPUs for B, skips the allocation-wide drain, keeps A's queue position for its next attempt, and does not count preemptions against `max_attempts`.
+  - Bump the optional `scruffy` pin (currently `cb633a6`, which predates evacuation and `submit_job(recovery=...)`) through the final-pin gate.
+  - `torchrun` launches cannot be evacuated: the agent leader never announces SIGUSR1 readiness.
 - Documentation [TODO]
   - Add a short README for `examples/mnist` and a troubleshooting section for DDP (env vars, CUDA device binding).

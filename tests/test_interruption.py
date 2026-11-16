@@ -12,7 +12,11 @@ from typing import Any, Mapping
 import pytest
 import torch
 
-from koochak.interruption import EVACUATION_EXIT_CODE, EvacuationController
+from koochak.interruption import (
+    EVACUATION_EXIT_CODE,
+    EVACUATION_READY_DIR_ENV,
+    EvacuationController,
+)
 from koochak.loop import training_loop
 from koochak.logging.events import make_event_hooks
 from koochak.storage import checkpoint
@@ -99,6 +103,34 @@ def test_request_during_reduction_survives_until_all_ranks_agree(monkeypatch):
     assert controller.reconcile_requests(False) == (False, False)
     assert controller.requested
     assert controller.reconcile_requests(False) == (True, False)
+
+
+def test_controller_announces_readiness_only_while_its_handler_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(EVACUATION_READY_DIR_ENV, str(tmp_path))
+    ready = tmp_path / str(os.getpid())
+    previous = signal.getsignal(signal.SIGUSR1)
+    controller = EvacuationController(True).install()
+    try:
+        assert ready.is_file()
+        assert signal.getsignal(signal.SIGUSR1) == controller._handle_signal
+    finally:
+        controller.uninstall()
+    assert not ready.exists()
+    assert signal.getsignal(signal.SIGUSR1) == previous
+
+    EvacuationController(False).install()
+    assert not ready.exists(), "a disabled controller must never claim readiness"
+
+
+def test_controller_without_a_runner_writes_no_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(EVACUATION_READY_DIR_ENV, raising=False)
+    controller = EvacuationController(True).install()
+    controller.uninstall()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_signal_saves_terminal_checkpoint_before_reserved_exit(tmp_path: Path) -> None:

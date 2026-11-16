@@ -17,6 +17,7 @@ import pytest
 from koochak.jobs import (
     DeclaredOutput,
     EnvironmentProfile,
+    Preemptible,
     PreparedTask,
     PreparedWorkflow,
     prepare_run,
@@ -279,6 +280,8 @@ def test_atomic_workflow_survives_local_evacuation_and_matches_reference(
         python_args=[str(workspace / "trainer.py"), str(train_dir), str(pause_marker)],
         cwd=str(Path(__file__).resolve().parents[1]),
         run_dir=str(workspace / "runs" / "train"),
+        # The trainer enables evacuation and auto-resume in code.
+        preemptible=Preemptible(grace_seconds=5, max_attempts=2, config_section=None),
     )
     (workspace / "trainer.py").parent.mkdir(parents=True, exist_ok=True)
     (workspace / "trainer.py").write_text(TRAINER)
@@ -286,16 +289,7 @@ def test_atomic_workflow_survives_local_evacuation_and_matches_reference(
     sample = _artifact_task(workspace, "sample", ("train", TRAIN_ARTIFACT_ID))
     fold = _artifact_task(workspace, "fold", ("sample", "sample/result.txt"))
     analysis = _artifact_task(workspace, "analysis", ("fold", "fold/result.txt"))
-    train = PreparedTask(
-        "train",
-        trainer,
-        _resources(),
-        recovery={
-            "max_attempts": 2,
-            "retry_on": ["evacuated"],
-            "evacuation": {"signal": "USR1", "grace_seconds": 5},
-        },
-    )
+    train = PreparedTask("train", trainer, _resources())
     workflow = PreparedWorkflow(
         request_id="koochak-acceptance-request",
         workflow_id=WORKFLOW_ID,

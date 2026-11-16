@@ -12,6 +12,7 @@ import pytest
 from koochak.jobs import (
     DeclaredOutput,
     EnvironmentProfile,
+    Preemptible,
     PreparedTask,
     PreparedWorkflow,
     prepare_run,
@@ -32,6 +33,25 @@ def _run(tmp_path: Path, name: str):
         python_args=["-c", "print('ok')"],
         cwd=str(tmp_path),
         run_dir=str(tmp_path / name),
+    )
+
+
+def _preemptible_run(tmp_path: Path, name: str, policy: Preemptible | bool = True):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config = tmp_path / f"{name}.yaml"
+    config.write_text("train:\n  max_steps: 10\n")
+    return prepare_run(
+        name=name,
+        profile=EnvironmentProfile(
+            profile_id="workflow-test",
+            python=sys.executable,
+            variables={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"},
+        ),
+        python_args=["-m", "koochak.cli.train", "--config", "{config}"],
+        cwd=str(tmp_path),
+        run_dir=str(tmp_path / name),
+        base_config=config,
+        preemptible=policy,
     )
 
 
@@ -145,7 +165,7 @@ def test_workflow_is_immutable_and_recovery_is_preserved_for_strict_client() -> 
         _resources(),
         recovery={
             "max_attempts": 2,
-            "retry_on": ["evacuated"],
+            "retry_on": ["allocation_replaced"],
             "evacuation": {"signal": "USR1", "grace_seconds": 0},
         },
     )
@@ -246,7 +266,12 @@ def test_emitted_workflow_passes_exact_local_scruffy_validator(tmp_path: Path) -
             "evacuation": {"signal": "USR1", "grace_seconds": 0},
         },
     )
-    workflow = PreparedWorkflow("request/strict", "workflow-1", "project", (task,))
+    preemptible = PreparedTask(
+        "preemptible", _preemptible_run(tmp_path, "validator-preemptible"), _resources()
+    )
+    workflow = PreparedWorkflow(
+        "request/strict", "workflow-1", "project", (task, preemptible)
+    )
     script = """
 import json, sys
 from pathlib import Path
@@ -296,4 +321,43 @@ def test_wait_for_artifact_id_matches_scruffy_limits(
             wait_for=(
                 {"kind": "artifact", "task_id": "task", "artifact_id": artifact_id},
             ),
+        )
+
+
+def test_preemptible_task_derives_its_recovery_policy(tmp_path: Path) -> None:
+    run = _preemptible_run(tmp_path, "preemptible", Preemptible(grace_seconds=900))
+    task = PreparedTask("train", run, _resources())
+    spec = PreparedWorkflow("request/1", "workflow-1", "project", (task,)).scruffy_tasks()[0]
+    assert spec["recovery"] == {
+        "max_attempts": 10,
+        "retry_on": ["allocation_replaced", "allocation_incarnation_changed", "evacuated"],
+        "evacuation": {"signal": "USR1", "grace_seconds": 900},
+    }
+
+
+def test_preemptible_task_rejects_a_second_recovery_policy(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="derives its recovery policy"):
+        PreparedTask(
+            "train",
+            _preemptible_run(tmp_path, "preemptible"),
+            _resources(),
+            recovery={
+                "max_attempts": 2,
+                "retry_on": ["evacuated"],
+                "evacuation": {"signal": "USR1", "grace_seconds": 60},
+            },
+        )
+
+
+def test_evacuated_retry_requires_a_preemptible_run(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="preemptible=True"):
+        PreparedTask(
+            "train",
+            _run(tmp_path, "steady"),
+            _resources(),
+            recovery={
+                "max_attempts": 2,
+                "retry_on": ["evacuated"],
+                "evacuation": {"signal": "USR1", "grace_seconds": 60},
+            },
         )

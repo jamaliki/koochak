@@ -410,6 +410,9 @@ Recovery mappings use Scruffy's exact v1 wire contract: `max_attempts` is an
 integer from 1 through 10, `retry_on` is a duplicate-free array (which may be
 empty), and `evacuation` contains exactly `signal: USR1` plus a non-negative
 integer `grace_seconds`.
+Prefer `prepare_run(..., preemptible=...)`, which derives this mapping (see
+[Preemptible runs](#preemptible-runs)); a hand-written mapping that retries
+`evacuated` is rejected for a run that is not preemptible.
 
 `DeclaredOutput` describes a file or directory that a consumer may wait for.
 The workload must create the output and atomically publish its
@@ -419,9 +422,10 @@ without importing Scruffy or sending events. Scruffy workers require both
 `SCRUFFY_ROOT` and `SCRUFFY_JOB_ID`, then publish typed `workload.artifact` events.
 An incomplete or empty Scruffy identity fails the runner. A
 missing, corrupt, symlinked, or unpublishable output fails the runner. A
-SIGUSR1 request is forwarded only to that child process group and never to the
-parent Slurm allocation. If the leader exits while descendants remain, Koochak
-terminates only that owned group and fails closed before output validation.
+SIGUSR1 request is forwarded only to the leader of that child process group,
+only for a preemptible run, and never to the parent Slurm allocation. If the
+leader exits while descendants remain, Koochak terminates only that owned group
+and fails closed before output validation.
 Every output is revalidated immediately before its event. Event IDs include the
 job, artifact ID, and content digest, so retrying after a partial spool is
 idempotent: an already accepted first event deduplicates while later outputs
@@ -515,6 +519,81 @@ job = submit_scruffy(
     }],
 )
 ```
+
+### Preemptible runs
+
+Mark a run preemptible when another job may need its GPUs. Scruffy can then
+stop it, and a new attempt resumes from its newest numbered checkpoint:
+
+```python
+from koochak.jobs import Preemptible, prepare_run, submit_scruffy
+
+prepared = prepare_run(
+    name="train",
+    profile=profile,
+    python_args=["-m", "koochak.cli.train", "--config", "{config}"],
+    cwd="/shared/project/repo",
+    run_dir="/shared/project/runs/train",
+    base_config="configs/train.yaml",
+    preemptible=True,  # or Preemptible(grace_seconds=900, max_attempts=10)
+)
+job = submit_scruffy(
+    prepared,
+    root="/shared/queues/allocation",
+    resources=resources,
+    request_id="campaign/train/attempt-1",
+    project_id="project",
+    workflow_id="campaign-1",
+    task_id="train",
+)
+```
+
+That one flag:
+
+- writes `train.evacuation_enabled: true` and `train.resume: auto` into the
+  resolved config, overriding the base config; a patch that sets either to
+  something else is rejected;
+- records Scruffy's recovery policy in the launch manifest: retry on
+  `evacuated`, `allocation_replaced`, and `allocation_incarnation_changed`, up
+  to `max_attempts` (default 10, counting the first attempt and every
+  evacuation), with `grace_seconds` (default 600) to finish one optimizer
+  update and write a checkpoint;
+- makes `submit_scruffy` and `PreparedTask` send that policy. Scruffy keeps
+  recovery only for workflow tasks, so a preemptible `submit_scruffy` call
+  needs `workflow_id` and `task_id`, and a `PreparedTask` built from a
+  preemptible run rejects a hand-written `recovery`.
+
+To stop the job so another can use its GPUs:
+
+```bash
+scruffy --root /shared/queues/allocation evacuate --job JOB_ID --resume-after --wait
+```
+
+The training loop finishes its current update, publishes a numbered
+checkpoint, and exits `75`; Scruffy queues the next attempt, which resumes
+from that checkpoint once resources free up. Scruffy does not yet reserve the
+freed GPUs for a particular job.
+
+The runner records SIGUSR1 from the moment it starts and relays it only to a
+preemptible run's leader process, and only once that process says its handler
+is installed. For preemptible runs the runner sets
+`KOOCHAK_EVACUATION_READY_DIR` to a private directory; Koochak's
+`EvacuationController` creates `<dir>/<pid>` right after it installs its
+handler and removes it before uninstalling. A request during preflight or
+model startup therefore waits instead of killing the workload, and one that
+arrives before launch exits `75` without starting it. Helper processes such as
+spawned data-loader or compiler workers are never signalled. A run that is not
+preemptible ignores the request and logs `evacuation_ignored`; Scruffy then
+reports a timeout and never kills it. `preflight.json` records
+`state: evacuated` for an exit `75`.
+
+Use `Preemptible(config_section=None)` when the entrypoint is not configured
+through a Koochak `train` section; it must then enable evacuation and
+`resume="auto"` itself. `install_evacuation_handler()` announces readiness for
+you; a hand-written SIGUSR1 handler must create
+`$KOOCHAK_EVACUATION_READY_DIR/<pid>` after installing itself. A launcher whose
+leader process never announces readiness, such as `torchrun`, is never
+signalled, so its evacuation times out.
 
 The runner starts under `python -I`, reconstructs the environment from a small
 allowlist, restores scheduler-owned `SLURM_*`, `SCRUFFY_*`, and GPU identity,
@@ -716,7 +795,10 @@ Koochak enforces them only when a later attempt finds durable checkpoint state.
 
 ### Safe evacuation and resume
 
-Evacuation is opt-in. Set `train.evacuation_enabled: true` (and optionally
+Evacuation is opt-in. Prepared jobs enable it with
+`prepare_run(..., preemptible=True)` (see
+[Preemptible runs](#preemptible-runs)). Otherwise set
+`train.evacuation_enabled: true` (and optionally
 `train.evacuation_signal: USR1`) or pass an `EvacuationController`/`True` through
 the `training_loop(..., evacuation=...)` API. Koochak installs a minimal
 `SIGUSR1` handler that only records an in-memory request. At the end of a

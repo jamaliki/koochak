@@ -7,6 +7,7 @@ from importlib import import_module
 _MODULES = {
     "ConfigPatch": ".manifest",
     "EnvironmentProfile": ".profile",
+    "Preemptible": ".manifest",
     "PreparedRun": ".manifest",
     "PreparedTask": ".workflow",
     "PreparedWorkflow": ".workflow",
@@ -23,6 +24,7 @@ _MODULES = {
 __all__ = [
     "ConfigPatch",
     "EnvironmentProfile",
+    "Preemptible",
     "PreparedRun",
     "PreparedTask",
     "PreparedWorkflow",

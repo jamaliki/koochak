@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..interruption import EVACUATION_EXIT_CODE
+from ..interruption import EVACUATION_EXIT_CODE, EVACUATION_READY_DIR_ENV
 from ..storage.artifact import (
     DeclaredOutput,
     artifact_publication,
@@ -310,69 +310,126 @@ def _declared_outputs(document: Mapping[str, Any]) -> tuple[DeclaredOutput, ...]
     return tuple(outputs)
 
 
+class _EvacuationRelay:
+    """Record SIGUSR1 for the runner's whole life; never act inside the handler.
+
+    Installing it before preflight keeps an early evacuation request from
+    terminating the runner with the signal's default action.
+    """
+
+    def __init__(self) -> None:
+        self.requested = False
+        self._previous: Any = signal.SIG_DFL
+
+    def _record(self, _signum: int, _frame: Any) -> None:
+        self.requested = True
+
+    def __enter__(self) -> "_EvacuationRelay":
+        self._previous = signal.getsignal(signal.SIGUSR1)
+        signal.signal(signal.SIGUSR1, self._record)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        signal.signal(signal.SIGUSR1, self._previous)
+
+
+def _note(kind: str, **fields: Any) -> None:
+    print(json.dumps({"kind": kind, **fields}, sort_keys=True), file=sys.stderr, flush=True)
+
+
+def _preemptible(document: Mapping[str, Any]) -> bool:
+    policy = document.get("preemption")
+    if policy is None:
+        return False
+    if not isinstance(policy, Mapping) or set(policy) != {
+        "max_attempts",
+        "retry_on",
+        "evacuation",
+    }:
+        raise PreflightError("launch manifest preemption must be a recovery policy object")
+    return True
+
+
 def _run_managed_child(
     argv: list[str],
     *,
     cwd: str,
     environment: Mapping[str, str],
+    relay: _EvacuationRelay,
+    preemptible: bool,
     import_paths: tuple[str, ...] = (),
     runtime_path: str | None = None,
     runtime_sha256: str | None = None,
 ) -> int:
-    """Run one child process group and forward evacuation only to that group."""
+    """Run one child process group and relay evacuation to a preemptible leader.
 
-    requested = False
-    forwarded = False
-    previous_handler = signal.getsignal(signal.SIGUSR1)
+    A request reaches the workload only when the run is preemptible and its
+    leader has announced an installed handler under ``EVACUATION_READY_DIR_ENV``.
+    Until then it stays pending, so a request during startup can never kill the
+    workload with the signal's default action.
+    """
 
-    def _request(_signum: int, _frame: Any) -> None:
-        nonlocal requested
-        requested = True
-
-    signal.signal(signal.SIGUSR1, _request)
-    try:
-        if requested:
-            return EVACUATION_EXIT_CODE
-        child = subprocess.Popen(
-            _isolated_python_argv(
-                argv,
-                import_paths,
-                runtime_path=runtime_path,
-                runtime_sha256=runtime_sha256,
-            ),
-            cwd=cwd,
-            env=dict(environment),
-            start_new_session=True,
-        )
-        if requested:
-            _forward_to_owned_group(child, signal.SIGUSR1)
-            forwarded = True
-        while True:
-            try:
-                returncode = child.wait(timeout=0.1)
-                break
-            except subprocess.TimeoutExpired:
-                if requested and not forwarded:
-                    forwarded = _forward_to_owned_group(child, signal.SIGUSR1)
-        _require_quiescent_group(child.pid)
-    except OSError as exc:
-        raise PreflightError(f"managed workload could not run: {exc}") from exc
-    finally:
-        signal.signal(signal.SIGUSR1, previous_handler)
+    if relay.requested and preemptible:
+        return EVACUATION_EXIT_CODE
+    with tempfile.TemporaryDirectory(prefix="koochak-evacuation-") as ready_dir:
+        child_environment = dict(environment)
+        if preemptible:
+            child_environment[EVACUATION_READY_DIR_ENV] = ready_dir
+        forwarded = False
+        noted = False
+        try:
+            child = subprocess.Popen(
+                _isolated_python_argv(
+                    argv,
+                    import_paths,
+                    runtime_path=runtime_path,
+                    runtime_sha256=runtime_sha256,
+                ),
+                cwd=cwd,
+                env=child_environment,
+                start_new_session=True,
+            )
+            while True:
+                try:
+                    returncode = child.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if not relay.requested or forwarded:
+                        continue
+                    if not preemptible:
+                        if not noted:
+                            _note("evacuation_ignored", reason="run_not_preemptible")
+                            noted = True
+                        continue
+                    forwarded = _forward_to_leader(child, signal.SIGUSR1, Path(ready_dir))
+                    if not forwarded and not noted:
+                        _note("evacuation_pending", reason="workload_has_no_handler_yet")
+                        noted = True
+            _require_quiescent_group(child.pid)
+        except OSError as exc:
+            raise PreflightError(f"managed workload could not run: {exc}") from exc
     # subprocess uses negative values for signal termination; shell-compatible
     # status keeps the child's nonzero outcome visible to the scheduler.
     return 128 + abs(returncode) if returncode < 0 else returncode
 
 
-def _forward_to_owned_group(child: subprocess.Popen[Any], requested_signal: int) -> bool:
-    """Signal only a live leader whose process group is the one Koochak created."""
+def _forward_to_leader(
+    child: subprocess.Popen[Any], requested_signal: int, ready_dir: Path
+) -> bool:
+    """Signal a live leader of Koochak's own group once its handler is ready.
+
+    Only the leader is signalled: helper processes such as spawned data
+    loader or compiler workers keep the default action and would be killed.
+    """
 
     if child.poll() is not None:
         return False
     try:
         if os.getpgid(child.pid) != child.pid:
             raise PreflightError("managed workload no longer owns its process group")
-        os.killpg(child.pid, requested_signal)
+        if not (ready_dir / str(child.pid)).exists():
+            return False
+        os.kill(child.pid, requested_signal)
     except ProcessLookupError:
         return False
     return True
@@ -460,6 +517,13 @@ def _publish_outputs(outputs: tuple[DeclaredOutput, ...], environment: Mapping[s
 def execute_manifest(manifest_path: str, expected_sha256: str) -> int:
     """Run checks, then execute and account for the declared workload."""
 
+    with _EvacuationRelay() as relay:
+        return _execute_manifest(manifest_path, expected_sha256, relay)
+
+
+def _execute_manifest(
+    manifest_path: str, expected_sha256: str, relay: _EvacuationRelay
+) -> int:
     document = _load_manifest(manifest_path, expected_sha256)
     environment = document["environment"]
     secrets = set(environment["environment"]["secrets"])
@@ -472,6 +536,7 @@ def execute_manifest(manifest_path: str, expected_sha256: str) -> int:
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
+        preemptible = _preemptible(document)
         clean_environment = build_environment(environment, os.environ)
         os.environ.clear()
         os.environ.update(clean_environment)
@@ -503,12 +568,18 @@ def execute_manifest(manifest_path: str, expected_sha256: str) -> int:
         document["argv"],
         cwd=document["cwd"],
         environment=clean_environment,
+        relay=relay,
+        preemptible=preemptible,
         import_paths=_profile_import_paths(environment),
         runtime_path=document["runner_runtime"]["path"],
         runtime_sha256=document["runner_runtime"]["sha256"],
     )
     if child_returncode:
-        result.update(state="failed", child_returncode=child_returncode)
+        evacuated = preemptible and child_returncode == EVACUATION_EXIT_CODE
+        result.update(
+            state="evacuated" if evacuated else "failed",
+            child_returncode=child_returncode,
+        )
         _write_result(result_path, result)
         return child_returncode
     if outputs:

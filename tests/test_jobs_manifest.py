@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 from koochak.jobs import (
     ConfigPatch,
     EnvironmentProfile,
+    Preemptible,
     materialize_config,
     prepare_run,
     stage_run,
@@ -115,4 +116,116 @@ def test_config_placeholder_requires_a_materialized_config(tmp_path: Path) -> No
             python_args=["train.py", "--config", "{config}"],
             cwd=str(tmp_path),
             run_dir=str(tmp_path / "run"),
+        )
+
+
+def test_preemptible_run_enables_evacuation_and_auto_resume_and_records_policy(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "base.yaml"
+    source.write_text(
+        "train:\n  max_steps: 10\n  evacuation_enabled: false\n  resume: none\n"
+    )
+    prepared = prepare_run(
+        name="preemptible",
+        profile=_profile(),
+        python_args=["-m", "koochak.cli.train", "--config", "{config}"],
+        cwd="/shared/project",
+        run_dir="/shared/runs/preemptible",
+        base_config=source,
+        preemptible=Preemptible(grace_seconds=900, max_attempts=6),
+    )
+
+    artifacts = {artifact.path: artifact.content for artifact in prepared.artifacts}
+    config = OmegaConf.create(artifacts["/shared/runs/preemptible/config.yaml"].decode())
+    assert config.train.evacuation_enabled is True
+    assert config.train.resume == "auto"
+    manifest = json.loads(artifacts[prepared.manifest_path])
+    assert manifest["preemption"] == {
+        "max_attempts": 6,
+        "retry_on": ["allocation_replaced", "allocation_incarnation_changed", "evacuated"],
+        "evacuation": {"signal": "USR1", "grace_seconds": 900},
+    }
+    assert prepared.preemption == Preemptible(grace_seconds=900, max_attempts=6)
+
+
+def test_runs_are_not_preemptible_by_default(tmp_path: Path) -> None:
+    prepared = prepare_run(
+        name="steady",
+        profile=_profile(),
+        python_args=["-m", "project.train"],
+        cwd="/shared/project",
+        run_dir="/shared/runs/steady",
+        base_config=_config(tmp_path),
+    )
+    manifest = json.loads(prepared.artifacts[-1].content)
+    assert "preemption" not in manifest
+    assert prepared.preemption is None
+
+
+def test_preemptible_needs_a_config_unless_the_entrypoint_owns_evacuation(
+    tmp_path: Path,
+) -> None:
+    arguments = dict(
+        name="preemptible",
+        profile=_profile(),
+        python_args=["-m", "project.train"],
+        cwd="/shared/project",
+        run_dir="/shared/runs/preemptible",
+    )
+    with pytest.raises(ValueError, match="base_config"):
+        prepare_run(**arguments, preemptible=True)
+    prepared = prepare_run(**arguments, preemptible=Preemptible(config_section=None))
+    manifest = json.loads(prepared.artifacts[-1].content)
+    assert manifest["preemption"]["evacuation"] == {"signal": "USR1", "grace_seconds": 600}
+    assert "config" not in manifest
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        ConfigPatch("train.evacuation_enabled", False),
+        ConfigPatch("train.resume", "none"),
+    ],
+)
+def test_preemptible_rejects_a_conflicting_patch(tmp_path: Path, patch: ConfigPatch) -> None:
+    with pytest.raises(ValueError, match="conflicts with preemptible"):
+        prepare_run(
+            name="preemptible",
+            profile=_profile(),
+            python_args=["-m", "project.train"],
+            cwd="/shared/project",
+            run_dir="/shared/runs/preemptible",
+            base_config=_config(tmp_path),
+            patches=[patch],
+            preemptible=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"grace_seconds": 0},
+        {"grace_seconds": 1.5},
+        {"grace_seconds": True},
+        {"max_attempts": 1},
+        {"max_attempts": 11},
+        {"config_section": ""},
+    ],
+)
+def test_preemptible_policy_is_validated(values: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        Preemptible(**values)  # type: ignore[arg-type]
+
+
+def test_preemptible_flag_must_be_a_bool_or_policy(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="preemptible"):
+        prepare_run(
+            name="preemptible",
+            profile=_profile(),
+            python_args=["-m", "project.train"],
+            cwd="/shared/project",
+            run_dir="/shared/runs/preemptible",
+            base_config=_config(tmp_path),
+            preemptible="yes",  # type: ignore[arg-type]
         )

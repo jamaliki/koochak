@@ -60,3 +60,35 @@ def submit_to_allocation() -> dict[str, object]:
         request_id="example/training/attempt-1",
         project_id="example",
     )
+
+
+def submit_preemptible_to_allocation() -> dict[str, object]:
+    """Submit a run that ``scruffy evacuate`` can stop and Scruffy resumes later."""
+
+    from scruffy import ResourceRequest
+
+    from koochak.jobs import Preemptible, load_environment_profile, prepare_run, submit_scruffy
+
+    prepared = prepare_run(
+        name="example-preemptible-training",
+        profile=load_environment_profile("examples/jobs/environment.yaml"),
+        python_args=["-m", "examples.mnist.main", "--config", "{config}"],
+        cwd="/shared/project/repo",
+        run_dir="/shared/project/runs/example-preemptible-training",
+        base_config="examples/mnist/config.yaml",
+        preemptible=Preemptible(grace_seconds=600),
+    )
+    return submit_scruffy(
+        prepared,
+        root="/shared/queues/allocation",
+        resources=ResourceRequest(
+            nodes=1,
+            gpus_per_node=1,
+            cpus_per_node=14,
+            memory_gb_per_node=128,
+        ),
+        request_id="example/preemptible/attempt-1",
+        project_id="example",
+        workflow_id="example",
+        task_id="train",
+    )

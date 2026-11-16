@@ -88,6 +88,73 @@ class ConfigPatch:
             raise ValueError("patch path must be non-empty")
 
 
+PREEMPTIBLE_RETRY_ON = (
+    "allocation_replaced",
+    "allocation_incarnation_changed",
+    "evacuated",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Preemptible:
+    """Declare that a run may be evacuated and later resumed from its checkpoints.
+
+    ``grace_seconds`` must cover one optimizer update plus a numbered
+    checkpoint write. ``max_attempts`` counts the first attempt, and Scruffy
+    counts every evacuation against it. With ``config_section`` set, Koochak
+    writes ``<section>.evacuation_enabled: true`` and ``<section>.resume: auto``
+    into the resolved config; with ``None`` the entrypoint must do both itself.
+    """
+
+    grace_seconds: int = 600
+    max_attempts: int = 10
+    config_section: str | None = "train"
+
+    def __post_init__(self) -> None:
+        if type(self.grace_seconds) is not int or self.grace_seconds < 1:
+            raise ValueError("grace_seconds must be a positive integer")
+        if type(self.max_attempts) is not int or not 2 <= self.max_attempts <= 10:
+            raise ValueError("max_attempts must be an integer from 2 through 10")
+        if self.config_section is not None and (
+            not isinstance(self.config_section, str) or not self.config_section.strip()
+        ):
+            raise ValueError("config_section must be a non-empty string or None")
+
+    def recovery(self) -> dict[str, Any]:
+        """Return the exact Scruffy v1 recovery policy for this run."""
+
+        return {
+            "max_attempts": self.max_attempts,
+            "retry_on": list(PREEMPTIBLE_RETRY_ON),
+            "evacuation": {"signal": "USR1", "grace_seconds": self.grace_seconds},
+        }
+
+    def config_patches(self, patches: Sequence[ConfigPatch]) -> tuple[ConfigPatch, ...]:
+        """Return the patches that enable evacuation and auto-resume."""
+
+        if self.config_section is None:
+            return ()
+        required = {
+            f"{self.config_section}.evacuation_enabled": True,
+            f"{self.config_section}.resume": "auto",
+        }
+        for patch in patches:
+            if patch.path in required and patch.value != required[patch.path]:
+                raise ValueError(
+                    f"patch {patch.path}={patch.value!r} conflicts with preemptible; "
+                    f"preemptible runs require {required[patch.path]!r}"
+                )
+        return tuple(ConfigPatch(path, value) for path, value in required.items())
+
+
+def _preemption(value: bool | Preemptible) -> Preemptible | None:
+    if isinstance(value, Preemptible):
+        return value
+    if type(value) is bool:
+        return Preemptible() if value else None
+    raise TypeError("preemptible must be a bool or a Preemptible")
+
+
 @dataclass(frozen=True, slots=True)
 class Artifact:
     """One immutable file required by a prepared run."""
@@ -109,6 +176,7 @@ class PreparedRun:
     manifest_sha256: str
     artifacts: tuple[Artifact, ...]
     declared_outputs: tuple[DeclaredOutput, ...] = ()
+    preemption: Preemptible | None = None
 
     def runner_argv(self) -> list[str]:
         runtime_path = posixpath.join(self.run_dir, _RUNTIME_NAME)
@@ -178,11 +246,25 @@ def prepare_run(
     patches: Sequence[ConfigPatch] = (),
     out_dir_config_key: str | None = "train.out_dir",
     declared_outputs: Sequence[DeclaredOutput] = (),
+    preemptible: bool | Preemptible = False,
 ) -> PreparedRun:
-    """Create a deterministic launch manifest without performing I/O remotely."""
+    """Create a deterministic launch manifest without performing I/O remotely.
+
+    ``preemptible=True`` (or a ``Preemptible``) lets a scheduler evacuate the
+    run with SIGUSR1 and resubmit it to resume from its newest checkpoint.
+    """
 
     if not _JOB_NAME.fullmatch(name):
         raise ValueError("name must contain only letters, digits, '.', '_' or '-'")
+    preemption = _preemption(preemptible)
+    patches = tuple(patches)
+    if preemption is not None and preemption.config_section is not None:
+        if base_config is None:
+            raise ValueError(
+                "preemptible runs need base_config to enable evacuation and auto-resume; "
+                "use Preemptible(config_section=None) if the entrypoint enables both itself"
+            )
+        patches = (*patches, *preemption.config_patches(patches))
     cwd = _absolute(cwd, "cwd")
     run_dir = _absolute(run_dir, "run_dir").rstrip("/") or "/"
     manifest_path = posixpath.join(run_dir, "launch.json")
@@ -218,6 +300,8 @@ def prepare_run(
         "preflight_result_path": posixpath.join(run_dir, "preflight.json"),
         "outputs": [output.to_dict() for output in outputs],
     }
+    if preemption is not None:
+        document["preemption"] = preemption.recovery()
     artifacts = []
     if config_text is not None and config_path is not None:
         config_content = config_text.encode()
@@ -249,6 +333,7 @@ def prepare_run(
         manifest_sha256=manifest_sha256,
         artifacts=tuple(artifacts),
         declared_outputs=outputs,
+        preemption=preemption,
     )
 
 

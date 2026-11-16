@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import threading
+from pathlib import Path
 
 __all__ = [
     "CHECKPOINT_ACK_TIMEOUT_EXIT_CODE",
     "EVACUATION_EXIT_CODE",
+    "EVACUATION_READY_DIR_ENV",
     "EvacuationController",
     "OOM_RESTART_EXIT_CODE",
     "install_evacuation_handler",
@@ -18,6 +21,10 @@ EVACUATION_EXIT_CODE = 75
 CHECKPOINT_ACK_TIMEOUT_EXIT_CODE = 76
 # A CUDA out-of-memory step was recorded as skipped; resubmit with resume=auto.
 OOM_RESTART_EXIT_CODE = 77
+# Set by the managed job runner for preemptible runs only. While a process's
+# handler is installed, ``<dir>/<pid>`` exists; the runner forwards SIGUSR1 to
+# its workload leader only then, so the default action can never kill it.
+EVACUATION_READY_DIR_ENV = "KOOCHAK_EVACUATION_READY_DIR"
 
 
 def _signal_number(name: str | int) -> int:
@@ -58,6 +65,7 @@ class EvacuationController:
         self._requested = False
         self._previous_handler: object = signal.SIG_DFL
         self._installed = False
+        self._ready_path: Path | None = None
 
     @property
     def requested(self) -> bool:
@@ -84,11 +92,20 @@ class EvacuationController:
         self._previous_handler = signal.getsignal(self.signal_number)
         signal.signal(self.signal_number, self._handle_signal)
         self._installed = True
+        ready_dir = os.environ.get(EVACUATION_READY_DIR_ENV)
+        if ready_dir:
+            self._ready_path = Path(ready_dir) / str(os.getpid())
+            self._ready_path.touch()
         return self
 
     def uninstall(self) -> None:
         if not self._installed:
             return
+        # Withdraw readiness before the previous handler returns, so the runner
+        # never forwards to a process that would take the default action.
+        if self._ready_path is not None:
+            self._ready_path.unlink(missing_ok=True)
+            self._ready_path = None
         if threading.current_thread() is threading.main_thread():
             signal.signal(self.signal_number, self._previous_handler)
         self._installed = False
