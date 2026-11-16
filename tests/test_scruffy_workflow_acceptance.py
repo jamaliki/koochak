@@ -334,7 +334,13 @@ def test_atomic_workflow_survives_local_evacuation_and_matches_reference(
             description="numbered checkpoint publication",
             controller=controller,
         )
-        assert pause_marker.read_text() == "published\n"
+        # Strict checkpoint events wait for Scruffy's acknowledgement, so the
+        # evidence is visible before the trainer's hook returns and pauses.
+        _wait_until(
+            lambda: pause_marker.read_text() == "published\n",
+            description="trainer pause after the acknowledged checkpoint",
+            controller=controller,
+        )
         evacuation = request_evacuation(
             root,
             workflow_id=WORKFLOW_ID,
