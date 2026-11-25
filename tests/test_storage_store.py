@@ -505,3 +505,111 @@ def test_local_store_rejects_bad_permission_windows(tmp_path):
             LocalStore(tmp_path, permission_settle_seconds=bad)
     assert LocalStore(tmp_path).permission_settle_seconds == 0.0
     assert LocalStore(tmp_path, permission_settle_seconds=60).permission_settle_seconds == 60.0
+
+
+def _deny_listing(monkeypatch, directory, *, times: int | None, code: int = errno.EACCES):
+    """Make scanning ``directory`` fail ``times`` times (always when ``None``); returns the attempts."""
+
+    attempts: list[str] = []
+    wanted = os.fspath(directory)
+    real = os.scandir
+
+    def flaky(path=".", *args, **kwargs):
+        if os.fspath(path) == wanted:
+            attempts.append(wanted)
+            if times is None or len(attempts) <= times:
+                raise OSError(code, os.strerror(code), wanted)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib.os, "scandir", flaky)
+    return attempts
+
+
+def test_list_raises_instead_of_reporting_an_unreadable_directory_as_empty(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path)
+    local.put("step1.pt", b"x")
+    for code in (errno.EACCES, errno.EIO):
+        attempts = _deny_listing(monkeypatch, local.root, times=None, code=code)
+        with pytest.raises(OSError) as raised:
+            local.list()
+        assert raised.value.errno == code and len(attempts) == 1
+        monkeypatch.undo()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_list_raises_for_a_really_unreadable_directory(tmp_path):
+    local = LocalStore(tmp_path)
+    local.put("sub/a", b"x")
+    (tmp_path / "sub").chmod(0)
+    try:
+        # The directory still exists, so it is not "absent": os.walk alone would have listed nothing.
+        with pytest.raises(PermissionError):
+            local.list("sub/")
+        with pytest.raises(PermissionError):
+            local.list()
+    finally:
+        (tmp_path / "sub").chmod(0o755)
+    assert local.list() == ["sub/a"]
+
+
+def test_list_raises_for_an_unreadable_subdirectory_it_must_descend_into(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path)
+    local.put("a/one", b"x")
+    local.put("b/two", b"x")
+    # Only the directories the prefix can reach are scanned, so an unreadable unrelated one is fine.
+    _deny_listing(monkeypatch, tmp_path / "b", times=None)
+    assert local.list("a/") == ["a/one"]
+    with pytest.raises(PermissionError):
+        local.list()
+
+
+def test_list_keeps_a_missing_or_vanishing_directory_empty(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path / "root")
+    assert local.list() == [] and local.list("data/") == []
+    local.put("data/shard-0", b"x")
+    (tmp_path / "root" / "plain-file").write_bytes(b"x")
+    assert local.list("plain-file/") == []  # a file where a directory would be
+
+    # A directory that disappears between being listed and being scanned (a concurrent prune) is skipped.
+    attempts = _deny_listing(monkeypatch, tmp_path / "root" / "data", times=None, code=errno.ENOENT)
+    assert local.list() == ["plain-file"] and len(attempts) == 1
+
+
+def test_list_waits_out_a_denied_or_failing_directory_within_its_window(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path, read_settle_seconds=30.0, permission_settle_seconds=60.0)
+    local.put("step1.pt", b"x")
+    clock = _Clock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    attempts = _deny_listing(monkeypatch, local.root, times=2)
+    assert local.list() == ["step1.pt"] and len(attempts) == 3 and clock.now == 10.0
+    monkeypatch.undo()
+
+    monkeypatch.setattr(store_lib, "time", clock)
+    attempts = _deny_listing(monkeypatch, local.root, times=2, code=errno.EIO)
+    assert local.list() == ["step1.pt"] and len(attempts) == 3
+
+
+def test_list_gives_up_with_the_original_error_after_the_window(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path, read_settle_seconds=30.0, permission_settle_seconds=12.0)
+    local.put("step1.pt", b"x")
+    clock = _Clock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    attempts = _deny_listing(monkeypatch, local.root, times=None)
+    with pytest.raises(PermissionError) as raised:
+        local.list()
+    assert raised.value.errno == errno.EACCES and raised.value.filename == local.root
+    assert clock.now == 12.0 and len(attempts) == 4
+    monkeypatch.undo()
+
+    # Without the opt-in the read window does not cover EACCES; with it, EIO gets its own 30 s.
+    monkeypatch.setattr(store_lib, "time", _Clock())
+    attempts = _deny_listing(monkeypatch, local.root, times=None, code=errno.EIO)
+    with pytest.raises(OSError):
+        local.list()
+    assert len(attempts) > 4
+    monkeypatch.undo()
+    monkeypatch.setattr(store_lib, "time", _Clock())
+    attempts = _deny_listing(monkeypatch, local.root, times=None)
+    with pytest.raises(PermissionError):
+        LocalStore(tmp_path, read_settle_seconds=30.0).list()
+    assert len(attempts) == 1

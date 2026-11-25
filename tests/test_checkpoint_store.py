@@ -393,3 +393,117 @@ def test_training_loop_rides_out_a_permission_denied_on_a_checkpoint_manifest(
         "step000000003.pt",
     ]
     assert checkpoint.highest_valid_published("objects://runs/a") == str(published / "step000000003.pt")
+
+
+def _deny_listing(monkeypatch: pytest.MonkeyPatch, directory: Path, *, times: int | None, code: int = errno.EACCES):
+    attempts: list[str] = []
+    real = store_lib.os.scandir
+
+    def flaky(path=".", *args, **kwargs):
+        if str(path) == str(directory):
+            attempts.append(str(path))
+            if times is None or len(attempts) <= times:
+                raise OSError(code, "Permission denied", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib.os, "scandir", flaky)
+    return attempts
+
+
+def test_resume_raises_when_a_denied_listing_would_read_as_no_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalStore(tmp_path, publish="exclusive")
+    for step in (2, 4):
+        checkpoint.publish(store, f"step{step:09d}.pt", _payload(step))
+    attempts = _deny_listing(monkeypatch, Path(store.root), times=None)
+
+    # Before, the denied scan listed nothing, so resume saw no checkpoint and the run started over.
+    with pytest.raises(PermissionError):
+        checkpoint.resolve_auto_resume(store)
+    with pytest.raises(PermissionError):
+        checkpoint.highest_valid_published(store)
+    assert len(attempts) == 2
+    monkeypatch.undo()
+    assert checkpoint.resolve_auto_resume(store)[0] == str(tmp_path / "step000000004.pt")
+
+
+def test_resume_waits_out_a_denied_listing_when_the_store_opts_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    store = LocalStore(tmp_path, publish="exclusive", permission_settle_seconds=60)
+    checkpoint.publish(store, "step000000004.pt", _payload(4))
+    attempts = _deny_listing(monkeypatch, Path(store.root), times=2)
+
+    resolved = checkpoint.resolve_auto_resume(store)
+
+    assert resolved is not None and resolved[0] == str(tmp_path / "step000000004.pt")
+    assert len(attempts) == 3
+
+
+def test_resume_raises_instead_of_falling_back_when_the_newest_checkpoint_stat_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalStore(tmp_path, publish="exclusive")
+    for step in (2, 4):
+        checkpoint.publish(store, f"step{step:09d}.pt", _payload(step))
+    attempts = _deny_permission(monkeypatch, "stat", "step000000004.pt", times=None)
+
+    # Before, isfile() turned the denial into "not a file" and resume rolled back to step 2.
+    with pytest.raises(PermissionError) as raised:
+        checkpoint.resolve_auto_resume(store)
+
+    assert raised.value.errno == errno.EACCES and len(attempts) == 1
+    monkeypatch.undo()
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    patient = LocalStore(tmp_path, publish="exclusive", permission_settle_seconds=60)
+    attempts = _deny_permission(monkeypatch, "stat", "step000000004.pt", times=2)
+    resolved = checkpoint.resolve_auto_resume(patient)
+    assert resolved is not None and resolved[0] == str(tmp_path / "step000000004.pt") and len(attempts) >= 3
+
+
+def test_resume_still_skips_symlinked_and_directory_candidates(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path, publish="exclusive")
+    checkpoint.publish(store, "step000000002.pt", _payload(2))
+    target = tmp_path / "step000000002.pt"
+    # A symlinked pair and a directory named like a checkpoint are not evidence.
+    (tmp_path / "step000000007.pt").symlink_to(target)
+    (tmp_path / "step000000007.pt.ready.json").symlink_to(tmp_path / "step000000002.pt.ready.json")
+    (tmp_path / "step000000009.pt").mkdir()
+    (tmp_path / "step000000009.pt.ready.json").mkdir()
+
+    resolved = checkpoint.resolve_auto_resume(store)
+
+    assert resolved is not None and resolved[0] == str(target)
+    assert checkpoint.resolve_auto_resume(LocalStore(tmp_path / "empty", publish="exclusive")) is None
+
+
+def test_training_loop_does_not_start_over_when_the_checkpoint_listing_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bucket = tmp_path / "bucket"
+    stores = tmp_path / "stores.yaml"
+    stores.write_text(
+        "version: 1\nstores:\n  objects:\n    type: local\n"
+        f"    root: {bucket}\n    publish: exclusive\n    read_settle_seconds: 5\n"
+    )
+    monkeypatch.setenv("KOOCHAK_STORES", str(stores))
+    out_dir = tmp_path / "run"
+    _train(_train_cfg(out_dir, checkpoint_dir="objects://runs/a", resume="auto"))
+    published = bucket / "runs" / "a"
+    before = {p.name: p.read_bytes() for p in published.glob("step*")}
+
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    attempts = _deny_listing(monkeypatch, published, times=None)
+    steps: list[int] = []
+    with pytest.raises(PermissionError):
+        _train(
+            _train_cfg(out_dir, checkpoint_dir="objects://runs/a", resume="auto", max_steps=5),
+            hooks={"on_step_end": [lambda _logs, ctx: steps.append(int(ctx["step"]))]},
+        )
+
+    # The run stopped before training and replaced nothing; it did not restart from step 0.
+    monkeypatch.undo()  # Path.glob scans through the patched os.scandir too
+    assert steps == [] and attempts
+    assert {p.name: p.read_bytes() for p in published.glob("step*")} == before

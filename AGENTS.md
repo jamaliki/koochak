@@ -104,7 +104,8 @@ This doc tracks incremental design decisions and changes from the initial design
     (`publish="link"|"exclusive"`, optional fsync and read-back settling;
     `read_settle_seconds` reads also wait out a mount's dropped connection;
     `permission_settle_seconds` opts a store into retrying `EACCES` on
-    `open`/`get`/`stat`/`delete`, never `put`, off by default), and
+    `open`/`get`/`stat`/`delete`, never `put`, off by default; `list` raises
+    any error but a missing directory, after those windows), and
     `open_store`/`register_store` with `koochak.stores` entry points for
     private backends. Checkpoints are published through it (phase 5 of
     `specs/storage-abstraction.md`, without parts or replication yet).

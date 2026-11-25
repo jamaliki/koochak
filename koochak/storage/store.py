@@ -258,6 +258,17 @@ def transient_read_error(error: BaseException) -> bool:
     return isinstance(error, OSError) and error.errno in _SETTLING_ERRNOS
 
 
+def _walk_error(error: OSError) -> None:
+    """``os.walk`` hook: a path that is not there lists as empty; any other error is raised.
+
+    ``os.walk`` and ``os.path.isdir`` otherwise turn every ``OSError`` (a denied or failing
+    mount included) into "no such directory", which a caller cannot tell from an empty one.
+    """
+
+    if not isinstance(error, (FileNotFoundError, NotADirectoryError)):
+        raise error
+
+
 class LocalStore:
     """Store backed by a POSIX directory tree.
 
@@ -278,7 +289,9 @@ class LocalStore:
     mounts a file closed on another node stays unreadable for minutes while its
     upload commits, and the mount's client can drop its connection to the
     service for a few minutes. Other read errors, and these once the window has
-    passed, are raised. ``put`` is never retried.
+    passed, are raised. ``list`` is covered too (it used to report an unreadable
+    directory as empty): a missing directory lists as empty, any other error is
+    retried for its window and then raised. ``put`` is never retried.
 
     ``permission_settle_seconds`` (default 0: off) opts a store into waiting out a
     transient ``EACCES``, which a mount can return for a path its user owns while
@@ -496,10 +509,12 @@ class LocalStore:
         prefix = _validate_prefix(prefix)
         head = prefix.rpartition("/")[0]
         base = os.path.join(self.root, *head.split("/")) if head else self.root
-        if not os.path.isdir(base):
-            return []
+        # A listing is read-only, so a failed attempt is simply repeated from the start.
+        return self._settled(lambda: self._scan(base, prefix))
+
+    def _scan(self, base: str, prefix: str) -> List[str]:
         keys: List[str] = []
-        for directory, child_directories, filenames in os.walk(base):
+        for directory, child_directories, filenames in os.walk(base, onerror=_walk_error):
             relative = os.path.relpath(directory, self.root)
             parent = "" if relative == "." else relative.replace(os.sep, "/") + "/"
             child_directories[:] = [

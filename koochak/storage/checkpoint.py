@@ -7,6 +7,7 @@ import os
 import pickle
 import re
 import shutil
+import stat
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -184,14 +185,26 @@ def _numbered(store: Store) -> List[Tuple[int, str]]:
     return sorted(found)
 
 
+def _is_symlink(path: str) -> bool:
+    """Whether ``path`` is a symlink; a path that is not there is not one, any other error is raised."""
+
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _read_valid_published_numbered_checkpoint(
     store: Store, name: str
 ) -> Optional[AutoResumeSelection]:
     """Fail closed unless a numbered checkpoint and its exact manifest agree.
 
     Reads go through the store, so a mount configured with
-    ``read_settle_seconds`` waits out files that another node closed moments
-    ago instead of mistaking them for invalid ones.
+    ``read_settle_seconds`` (or ``permission_settle_seconds``) waits out files
+    that another node closed moments ago, or a brief permission fault, instead
+    of mistaking them for invalid ones. A candidate counts as absent only when
+    the store says it is missing or not a regular file; any other I/O error is
+    raised, so a denied ``stat`` cannot make the newest checkpoint look absent.
     """
 
     match = _NUMBERED.fullmatch(name)
@@ -200,8 +213,9 @@ def _read_valid_published_numbered_checkpoint(
     absolute = os.path.abspath(checkpoint_path(store, name))
     manifest_path = publication_path(absolute)
     try:
-        for path in (absolute, manifest_path):
-            if not os.path.isfile(path) or os.path.islink(path):
+        for key, path in ((name, absolute), (name + PUBLICATION_SUFFIX, manifest_path)):
+            # ``store.stat`` is None for a missing path and for a directory or other special file.
+            if store.stat(key) is None or _is_symlink(path):
                 return None
         record = json.loads(store.get(name + PUBLICATION_SUFFIX).decode("utf-8"))
         expected = {"v", "artifact_id", "path", "size_bytes", "sha256", "manifest_path"}

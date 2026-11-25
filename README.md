@@ -1075,9 +1075,13 @@ opening once per pack rather than once per file is several times faster.
   without this option rejects a stores file that names the key (unknown keys
   fail), so add it to a shared stores file only once every run and job that reads
   that file has this Koochak; until then give the new runs a copy through
-  `$KOOCHAK_STORES`. Not covered:
-  `LocalStore.list` and `os.path.isfile` in the resume checks swallow
-  permission errors rather than raising them (see `specs/storage-abstraction.md`).
+  `$KOOCHAK_STORES`. `LocalStore.list` follows the same windows (a missing
+  directory lists as empty; any other error, `EACCES` and `EIO` included, is
+  retried and then raised; it used to report an unreadable directory as empty,
+  so a denied listing at start-up read as "no checkpoints" and a resumed run
+  started over), and the resume check of a numbered checkpoint reads its
+  manifest and file through `stat` the same way, so a denied `stat` of the
+  newest checkpoint no longer makes resume fall back to an older one.
 - `StoreProfile` records a store's measured performance (per-request cost,
   cold bandwidth per stream, useful concurrency, whether byte ranges of one
   object scale, part size, whether listing is acceptable). `LocalStore(...,

@@ -311,10 +311,13 @@ missing file instead of falling back to an older checkpoint. The serialized
 bytes are held in memory during the upload, so no node-local disk is needed.
 `permission_settle_seconds` (opt-in per store) retries a transient `EACCES` from
 `stat`, `open`, `get` and `delete` inside `publish` and resume, then re-raises it;
-`put` is never retried, so a retry cannot publish a checkpoint twice. Known gap:
-`LocalStore.list` (via `os.walk`) and the `os.path.isfile` checks in
-`_read_valid_published_numbered_checkpoint` turn a permission error into "absent"
-instead of raising it, so a denied listing at start-up reads as no checkpoints.
+`put` is never retried, so a retry cannot publish a checkpoint twice. `list` and
+the resume check of each numbered checkpoint (`store.stat` of the file and its
+manifest, then an `lstat` for symlinks) report a path as absent only when it is
+missing, and raise any other error after the store's settle windows: a denied
+listing at start-up must not read as "no checkpoints" (the run would start over
+and its first save of an existing step would replace the good checkpoint), and a
+denied `stat` of the newest checkpoint must not roll training back to an older one.
 
 **Remaining:** a checkpoint becomes parts plus a manifest written last:
 
