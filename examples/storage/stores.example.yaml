@@ -25,6 +25,12 @@ stores:
     # Files closed on another node can fail with ETIME or EIO for minutes, and the mount
     # can drop its connection (ECONNABORTED and friends) for a few; reads wait out both.
     read_settle_seconds: 1200
+    # A mount whose credentials or client briefly fail can answer EACCES for a path you own.
+    # This opts the store into retrying that on open, get, stat and delete (never put) for up
+    # to this long, then re-raising the PermissionError. Omit it (0) on plain directories,
+    # where EACCES is a real answer. Older Koochak rejects this key (unknown keys fail), so
+    # add it to a file that older runs also read only once they have this option.
+    permission_settle_seconds: 600
     profile:
       request_seconds: 0.15
       stream_mb_s: 16

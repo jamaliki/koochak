@@ -309,6 +309,12 @@ terminal, evacuation, and GPU-health saves drain first. Resume reads through
 the store (so `read_settle_seconds` applies) and raises I/O errors other than a
 missing file instead of falling back to an older checkpoint. The serialized
 bytes are held in memory during the upload, so no node-local disk is needed.
+`permission_settle_seconds` (opt-in per store) retries a transient `EACCES` from
+`stat`, `open`, `get` and `delete` inside `publish` and resume, then re-raises it;
+`put` is never retried, so a retry cannot publish a checkpoint twice. Known gap:
+`LocalStore.list` (via `os.walk`) and the `os.path.isfile` checks in
+`_read_valid_published_numbered_checkpoint` turn a permission error into "absent"
+instead of raising it, so a denied listing at start-up reads as no checkpoints.
 
 **Remaining:** a checkpoint becomes parts plus a manifest written last:
 

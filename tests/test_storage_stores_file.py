@@ -160,3 +160,43 @@ def test_read_settle_seconds_reaches_the_store(tmp_path):
     bad = write(tmp_path, f"version: 1\nstores:\n  archive:\n    type: local\n    root: {tmp_path}/a\n    read_settle_seconds: soon\n")
     with pytest.raises(ValueError, match="read_settle_seconds"):
         stores_file.load_stores_file(bad)
+
+
+def test_permission_settle_seconds_reaches_the_store_and_defaults_to_off(tmp_path):
+    path = write(
+        tmp_path,
+        f"""
+version: 1
+stores:
+  archive:
+    type: local
+    root: {tmp_path}/a
+    read_settle_seconds: 1200
+    permission_settle_seconds: 600
+  plain:
+    type: local
+    root: {tmp_path}/p
+    read_settle_seconds: 1200
+""",
+    )
+    opened = open_store("archive://x", stores_file=path)
+    assert (opened.permission_settle_seconds, opened.read_settle_seconds) == (600.0, 1200.0)
+    # A store that does not name the key keeps today's behaviour, whatever its read window.
+    assert open_store("plain://x", stores_file=path).permission_settle_seconds == 0.0
+    assert stores_file.load_stores_file(path)["plain"].permission_settle_seconds == 0.0
+
+
+@pytest.mark.parametrize("value", ["soon", "true", ".nan", ".inf"])
+def test_permission_settle_seconds_must_be_a_finite_number(tmp_path, value):
+    bad = write(
+        tmp_path,
+        f"version: 1\nstores:\n  archive:\n    type: local\n    root: {tmp_path}/a\n    permission_settle_seconds: {value}\n",
+    )
+    with pytest.raises(ValueError, match="permission_settle_seconds"):
+        stores_file.load_stores_file(bad)
+    negative = write(
+        tmp_path,
+        f"version: 1\nstores:\n  archive:\n    type: local\n    root: {tmp_path}/a\n    permission_settle_seconds: -1\n",
+    )
+    with pytest.raises(ValueError, match="permission_settle_seconds"):
+        stores_file.load_stores_file(negative)

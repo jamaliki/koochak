@@ -1058,8 +1058,26 @@ opening once per pack rather than once per file is several times faster.
   `stat`) that fail with `ETIME` or `EIO`, which some object-storage mounts
   return for minutes after another node closed a file, or with a lost
   connection (`ECONNABORTED`, `ECONNRESET`, `ENOTCONN`) while the mount's
-  client is cut off from the service. Writes are never retried. The job
+  client is cut off from the service. `put` is never retried. The job
   runner's required-file preflight waits out the same errors for 15 minutes.
+  `permission_settle_seconds` (default 0, off) separately opts a store into
+  waiting out a transient `EACCES`, which a mount can return for a path its
+  user owns while its credentials or client briefly fail. It retries `open`,
+  `get`, `stat` and `delete` (removing a missing file already counts as done)
+  every 5 s for at most that window, then re-raises the last `PermissionError`,
+  so a real missing right still fails, only later. `put` is not retried: its data
+  may be a one-shot iterator and a half-created object cannot be told from
+  another writer's. `EPERM` and every other errno are never retried, and
+  `read_settle_seconds` alone does not cover `EACCES`. Enable it per store in the
+  stores file, on mounts only; start around 600 s, which is long enough to
+  outlast a credential refresh without parking every rank for the 20 minutes an
+  upload commit may need. A plain directory keeps failing at once. Koochak
+  without this option rejects a stores file that names the key (unknown keys
+  fail), so add it to a shared stores file only once every run and job that reads
+  that file has this Koochak; until then give the new runs a copy through
+  `$KOOCHAK_STORES`. Not covered:
+  `LocalStore.list` and `os.path.isfile` in the resume checks swallow
+  permission errors rather than raising them (see `specs/storage-abstraction.md`).
 - `StoreProfile` records a store's measured performance (per-request cost,
   cold bandwidth per stream, useful concurrency, whether byte ranges of one
   object scale, part size, whether listing is acceptable). `LocalStore(...,

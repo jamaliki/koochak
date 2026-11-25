@@ -246,6 +246,10 @@ def _file_digest(path: str) -> tuple[int, str]:
 # (ETIME, EIO), or while its client briefly loses the backing service (connection
 # aborted, reset or not connected: a FUSE mount dropping out for a few minutes).
 _SETTLING_ERRNOS = (errno.ETIME, errno.EIO, errno.ECONNABORTED, errno.ECONNRESET, errno.ENOTCONN)
+# A mount whose credentials or client briefly fail can answer a path the user owns with
+# EACCES. It is retried only on stores that opt in through ``permission_settle_seconds``,
+# since on a plain directory EACCES is a real, permanent answer.
+_PERMISSION_ERRNO = errno.EACCES
 
 
 def transient_read_error(error: BaseException) -> bool:
@@ -274,7 +278,18 @@ class LocalStore:
     mounts a file closed on another node stays unreadable for minutes while its
     upload commits, and the mount's client can drop its connection to the
     service for a few minutes. Other read errors, and these once the window has
-    passed, are raised. Writes are never retried.
+    passed, are raised. ``put`` is never retried.
+
+    ``permission_settle_seconds`` (default 0: off) opts a store into waiting out a
+    transient ``EACCES``, which a mount can return for a path its user owns while
+    its credentials or client briefly fail. It covers ``open``, ``get``, ``stat``
+    and ``delete`` (a retried delete is harmless: removing a missing file counts as
+    done). ``put`` cannot be retried, since its data may be a one-shot iterator and
+    a partly created object is not distinguishable from another writer's. The last
+    ``PermissionError`` is re-raised once the window has passed, so a real missing
+    right still fails, only later. The window is separate from
+    ``read_settle_seconds`` so a permanent permission error does not wait as long as
+    a slow upload commit; ``EPERM`` and other errors are never retried.
 
     ``profile`` records the mount's measured performance (default:
     ``LOCAL_PROFILE``). ``python -m koochak.storage.probe`` reports which
@@ -292,6 +307,7 @@ class LocalStore:
         file_mode: int = 0o444,
         profile: Optional[StoreProfile] = None,
         read_settle_seconds: float = 0.0,
+        permission_settle_seconds: float = 0.0,
     ) -> None:
         if publish not in _PUBLISH_MODES:
             raise ValueError(f"publish must be one of {_PUBLISH_MODES}, got {publish!r}")
@@ -308,6 +324,10 @@ class LocalStore:
         if not math.isfinite(read_settle) or read_settle < 0:
             raise ValueError("read_settle_seconds must be a finite, non-negative number")
         self.read_settle_seconds = read_settle
+        permission_settle = float(permission_settle_seconds)
+        if not math.isfinite(permission_settle) or permission_settle < 0:
+            raise ValueError("permission_settle_seconds must be a finite, non-negative number")
+        self.permission_settle_seconds = permission_settle
         if profile is not None and not isinstance(profile, StoreProfile):
             raise TypeError("profile must be a StoreProfile")
         self.profile = LOCAL_PROFILE if profile is None else profile
@@ -327,13 +347,27 @@ class LocalStore:
     def _path(self, key: str) -> str:
         return os.path.join(self.root, *validate_key(key).split("/"))
 
-    def _settled(self, read: Callable[[], Any]) -> Any:
-        deadline = time.monotonic() + self.read_settle_seconds
+    def _settle_window(self, code: Optional[int], transient: bool) -> float:
+        if code == _PERMISSION_ERRNO:
+            return self.permission_settle_seconds
+        if transient and code in _SETTLING_ERRNOS:
+            return self.read_settle_seconds
+        return 0.0
+
+    def _settled(self, read: Callable[[], Any], *, transient: bool = True) -> Any:
+        """Run ``read``, retrying the errors this store waits out, each for its own window.
+
+        ``transient=False`` leaves out the ETIME/EIO/connection errors, for the one
+        operation (``delete``) that only the permission window may retry.
+        """
+
+        started = time.monotonic()
         while True:
             try:
                 return read()
             except OSError as exc:
-                if exc.errno not in _SETTLING_ERRNOS or time.monotonic() >= deadline:
+                deadline = started + self._settle_window(exc.errno, transient)
+                if time.monotonic() >= deadline:
                     raise
             time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
 
@@ -483,8 +517,9 @@ class LocalStore:
         return keys
 
     def delete(self, key: str) -> None:
+        path = self._path(key)
         try:
-            os.remove(self._path(key))
+            self._settled(lambda: os.remove(path), transient=False)
         except FileNotFoundError:
             pass
 

@@ -53,7 +53,17 @@ ENV_VAR = "KOOCHAK_STORES"
 VERSION = 1
 
 _ENTRY_KEYS = frozenset(
-    {"type", "root", "publish", "fsync", "verify_readback", "settle_seconds", "read_settle_seconds", "profile"}
+    {
+        "type",
+        "root",
+        "publish",
+        "fsync",
+        "verify_readback",
+        "settle_seconds",
+        "read_settle_seconds",
+        "permission_settle_seconds",
+        "profile",
+    }
 )
 _PROFILE_KEYS = frozenset(field.name for field in dataclasses.fields(StoreProfile))
 _CACHE: Dict[str, tuple[int, int, Dict[str, "StoreSpec"]]] = {}
@@ -71,6 +81,7 @@ class StoreSpec:
     settle_seconds: float = 0.0
     profile: Optional[StoreProfile] = None
     read_settle_seconds: float = 0.0
+    permission_settle_seconds: float = 0.0
 
     def open(self, subpath: str = "") -> LocalStore:
         """A store rooted at ``root/subpath`` (``subpath`` is a validated key or empty)."""
@@ -84,6 +95,7 @@ class StoreSpec:
             settle_seconds=self.settle_seconds,
             profile=self.profile,
             read_settle_seconds=self.read_settle_seconds,
+            permission_settle_seconds=self.permission_settle_seconds,
         )
 
 
@@ -130,7 +142,12 @@ def _entry(scheme: str, value: object, source: str) -> StoreSpec:
         raise ValueError(f"{label}.root must be an absolute path")
     settle = value.get("settle_seconds", 0.0)
     read_settle = value.get("read_settle_seconds", 0.0)
-    for name, number in (("settle_seconds", settle), ("read_settle_seconds", read_settle)):
+    permission_settle = value.get("permission_settle_seconds", 0.0)
+    for name, number in (
+        ("settle_seconds", settle),
+        ("read_settle_seconds", read_settle),
+        ("permission_settle_seconds", permission_settle),
+    ):
         if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
             raise ValueError(f"{label}.{name} must be a number")
     return StoreSpec(
@@ -142,6 +159,7 @@ def _entry(scheme: str, value: object, source: str) -> StoreSpec:
         settle_seconds=float(settle),
         profile=_profile(value["profile"], f"{label}.profile") if "profile" in value else None,
         read_settle_seconds=float(read_settle),
+        permission_settle_seconds=float(permission_settle),
     )
 
 

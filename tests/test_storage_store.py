@@ -321,3 +321,187 @@ def test_settling_reads_wait_out_a_mount_that_drops_its_connection(tmp_path, mon
         impatient.get("k")
     with pytest.raises(OSError):
         impatient.stat("k")
+
+
+class _Clock:
+    """Stands in for ``store_lib.time``: sleeping advances the clock instead of waiting."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _deny(monkeypatch, tmp_path, target: str, operation: str, *, times: int | None, code: int = errno.EACCES):
+    """Make ``operation`` fail on ``target`` ``times`` times (always when ``None``), then pass through.
+
+    Returns the list of attempts on ``target``. ``stat`` and ``delete`` patch the ``os`` call;
+    ``get`` and ``open`` patch the store module's ``open``.
+    """
+
+    attempts: list[str] = []
+    wanted = str(tmp_path / target)
+    real = {"stat": os.stat, "delete": os.remove, "get": open, "open": open}[operation]
+
+    def flaky(path, *args, **kwargs):
+        if os.fspath(path) == wanted:
+            attempts.append(wanted)
+            if times is None or len(attempts) <= times:
+                raise OSError(code, os.strerror(code), wanted)
+        return real(path, *args, **kwargs)
+
+    if operation == "stat":
+        monkeypatch.setattr(store_lib.os, "stat", flaky)
+    elif operation == "delete":
+        monkeypatch.setattr(store_lib.os, "remove", flaky)
+    else:
+        monkeypatch.setattr(store_lib, "open", flaky, raising=False)
+    return attempts
+
+
+def _call(local: LocalStore, operation: str):
+    if operation == "stat":
+        return local.stat("k")
+    if operation == "get":
+        return local.get("k")
+    if operation == "open":
+        with local.open("k") as handle:
+            return handle.read()
+    return local.delete("k")
+
+
+@pytest.mark.parametrize("operation", ["stat", "get", "open", "delete"])
+def test_permission_denied_that_clears_within_the_window_is_retried(tmp_path, monkeypatch, operation):
+    local = LocalStore(tmp_path, permission_settle_seconds=30.0)
+    local.put("k", b"payload")
+    clock = _Clock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    attempts = _deny(monkeypatch, tmp_path, "k", operation, times=2)
+
+    result = _call(local, operation)
+
+    assert len(attempts) == 3
+    assert clock.now < 30.0
+    if operation == "stat":
+        assert result.size == 7
+    elif operation in ("get", "open"):
+        assert result == b"payload"
+    else:
+        assert not (tmp_path / "k").exists()
+
+
+@pytest.mark.parametrize("operation", ["stat", "get", "open", "delete"])
+def test_permission_denied_that_persists_raises_the_same_error_after_the_window(tmp_path, monkeypatch, operation):
+    local = LocalStore(tmp_path, permission_settle_seconds=12.0)
+    local.put("k", b"payload")
+    clock = _Clock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    attempts = _deny(monkeypatch, tmp_path, "k", operation, times=None)
+
+    with pytest.raises(PermissionError) as raised:
+        _call(local, operation)
+
+    assert raised.value.errno == errno.EACCES
+    assert raised.value.filename == str(tmp_path / "k")
+    # Polls every 5 s, never sleeps past the 12 s window, then gives up: 0, 5, 10, 12.
+    assert clock.sleeps == [5.0, 5.0, 2.0] and clock.now == 12.0
+    assert len(attempts) == 4
+    assert os.path.lexists(tmp_path / "k")
+
+
+@pytest.mark.parametrize("settings", [{}, {"read_settle_seconds": 1200.0}], ids=["plain", "read-window-only"])
+@pytest.mark.parametrize("operation", ["stat", "get", "open", "delete"])
+def test_permission_denied_is_not_retried_unless_the_store_opts_in(tmp_path, monkeypatch, operation, settings):
+    # The read window does not cover EACCES: without the opt-in a store fails at once.
+    local = LocalStore(tmp_path, **settings)
+    local.put("k", b"payload")
+    monkeypatch.setattr(store_lib, "time", _Clock())
+    attempts = _deny(monkeypatch, tmp_path, "k", operation, times=None)
+    with pytest.raises(PermissionError):
+        _call(local, operation)
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("operation", ["stat", "get", "delete"])
+def test_permission_window_retries_nothing_but_eacces(tmp_path, monkeypatch, operation):
+    local = LocalStore(tmp_path, permission_settle_seconds=30.0)
+    local.put("k", b"payload")
+    monkeypatch.setattr(store_lib, "time", _Clock())
+    for code in (errno.EPERM, errno.ETIME, errno.EIO, errno.ECONNRESET, errno.EROFS):
+        attempts = _deny(monkeypatch, tmp_path, "k", operation, times=None, code=code)
+        with pytest.raises(OSError) as raised:
+            _call(local, operation)
+        assert raised.value.errno == code and len(attempts) == 1, errno.errorcode[code]
+
+
+def test_delete_stays_a_no_op_for_a_missing_key_and_ignores_the_read_window(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path, read_settle_seconds=60.0, permission_settle_seconds=30.0)
+    local.delete("never-existed")
+    local.put("k", b"payload")
+    monkeypatch.setattr(store_lib, "time", _Clock())
+    # ETIME and EIO retry reads only; a delete that hits them raises as before.
+    attempts = _deny(monkeypatch, tmp_path, "k", "delete", times=None, code=errno.EIO)
+    with pytest.raises(OSError) as raised:
+        local.delete("k")
+    assert raised.value.errno == errno.EIO and len(attempts) == 1
+
+
+def test_eacces_retry_and_read_retry_share_one_start_time(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path, read_settle_seconds=8.0, permission_settle_seconds=30.0)
+    local.put("k", b"payload")
+    clock = _Clock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    codes = iter([errno.EACCES, errno.ETIME, errno.EACCES, errno.ETIME])
+    real_stat = os.stat
+    wanted = str(tmp_path / "k")
+
+    def mixed(path, *args, **kwargs):
+        if os.fspath(path) == wanted:
+            code = next(codes, None)
+            if code is not None:
+                raise OSError(code, os.strerror(code), wanted)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib.os, "stat", mixed)
+    # EACCES at 0 s, ETIME at 5 s (inside its 8 s window; the sleep stops at 8 s), EACCES at
+    # 8 s (inside 30 s), then ETIME at 13 s is past the 8 s read window and raised: each
+    # errno is judged against its own window, measured from the same first attempt.
+    with pytest.raises(OSError) as raised:
+        local.stat("k")
+    assert raised.value.errno == errno.ETIME and clock.now == 13.0
+
+
+def test_put_is_never_retried_after_permission_denied(tmp_path, monkeypatch):
+    local = LocalStore(tmp_path, publish="exclusive", permission_settle_seconds=30.0)
+    clock = _Clock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    wanted = str(tmp_path / "k")
+    attempts: list[str] = []
+    real_open = os.open
+
+    def denied_create(path, flags, *args, **kwargs):
+        if os.fspath(path) == wanted:
+            attempts.append(wanted)
+            raise PermissionError(errno.EACCES, "Permission denied", wanted)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib.os, "open", denied_create)
+    chunks = iter([b"one-shot ", b"iterator"])  # a retry could not replay this
+    with pytest.raises(PermissionError):
+        local.put("k", chunks)
+    assert len(attempts) == 1 and clock.sleeps == []
+    assert not (tmp_path / "k").exists()
+
+
+def test_local_store_rejects_bad_permission_windows(tmp_path):
+    for bad in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="permission_settle_seconds"):
+            LocalStore(tmp_path, permission_settle_seconds=bad)
+    assert LocalStore(tmp_path).permission_settle_seconds == 0.0
+    assert LocalStore(tmp_path, permission_settle_seconds=60).permission_settle_seconds == 60.0

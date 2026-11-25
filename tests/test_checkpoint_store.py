@@ -261,3 +261,135 @@ def test_only_one_background_publication_may_be_pending(tmp_path: Path) -> None:
         assert publisher.wait() is None
     finally:
         publisher.close()
+
+
+class _ManualClock:
+    """Stands in for ``store_lib.time`` so settling reads advance a clock instead of waiting."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _deny_permission(monkeypatch: pytest.MonkeyPatch, call: str, suffix: str, *, times: int | None):
+    """Make ``os.<call>`` fail with EACCES on paths ending in ``suffix`` (``times`` times, or always)."""
+
+    attempts: list[str] = []
+    real = getattr(store_lib.os, call)
+
+    def flaky(path, *args, **kwargs):
+        if str(path).endswith(suffix):
+            attempts.append(str(path))
+            if times is None or len(attempts) <= times:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_lib.os, call, flaky)
+    return attempts
+
+
+def test_publish_survives_one_permission_denied_on_the_manifest_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The 2026-11-25 ms256k crash: the first thing publish does is stat the ready manifest.
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    recording = RecordingStore(
+        LocalStore(tmp_path, publish="exclusive", read_settle_seconds=1200, permission_settle_seconds=60)
+    )
+    attempts = _deny_permission(monkeypatch, "stat", ".ready.json", times=1)
+    data = _payload(7500)
+
+    path = checkpoint.publish(recording, "step000007500.pt", data)
+
+    assert len(attempts) == 2  # denied once, then answered
+    assert recording.ops == [("put", "step000007500.pt"), ("put", "step000007500.pt.ready.json")]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["step000007500.pt", "step000007500.pt.ready.json"]
+    assert checkpoint.publication(path)["sha256"] == hashlib.sha256(data).hexdigest()
+    resolved = checkpoint.resolve_auto_resume(LocalStore(tmp_path, publish="exclusive"))
+    assert resolved is not None and resolved[0] == path
+
+
+def test_republish_retries_denied_stat_and_delete_without_publishing_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    recording = RecordingStore(LocalStore(tmp_path, publish="exclusive", permission_settle_seconds=60))
+    checkpoint.publish(recording, "step000000003.pt", _payload(3))
+    recording.ops.clear()
+    stats = _deny_permission(monkeypatch, "stat", "step000000003.pt", times=2)
+    removals = _deny_permission(monkeypatch, "remove", "step000000003.pt.ready.json", times=1)
+    replacement = _payload(3, next_step=3)
+
+    path = checkpoint.publish(recording, "step000000003.pt", replacement)
+
+    assert len(stats) == 3 and len(removals) == 2
+    assert recording.ops == [
+        ("delete", "step000000003.pt.ready.json"),
+        ("delete", "step000000003.pt"),
+        ("put", "step000000003.pt"),
+        ("put", "step000000003.pt.ready.json"),
+    ]
+    assert Path(path).read_bytes() == replacement
+    assert checkpoint.publication(path)["sha256"] == hashlib.sha256(replacement).hexdigest()
+
+
+def test_publish_fails_with_the_original_error_when_permission_stays_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _ManualClock()
+    monkeypatch.setattr(store_lib, "time", clock)
+    recording = RecordingStore(LocalStore(tmp_path, publish="exclusive", permission_settle_seconds=30))
+    attempts = _deny_permission(monkeypatch, "stat", ".ready.json", times=None)
+
+    with pytest.raises(PermissionError) as raised:
+        checkpoint.publish(recording, "step000000001.pt", _payload(1))
+
+    assert raised.value.errno == errno.EACCES and raised.value.filename.endswith("step000000001.pt.ready.json")
+    assert clock.now == 30.0 and len(attempts) > 1
+    # Nothing was written: a failed publication leaves no partial checkpoint or manifest.
+    assert recording.ops == [] and list(tmp_path.iterdir()) == []
+
+
+def test_production_style_store_without_the_opt_in_still_fails_on_permission_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``read_settle_seconds`` alone (the bucket store) never covered EACCES; neither does the default.
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    store = LocalStore(tmp_path, publish="exclusive", read_settle_seconds=1200)
+    attempts = _deny_permission(monkeypatch, "stat", ".ready.json", times=1)
+
+    with pytest.raises(PermissionError):
+        checkpoint.publish(store, "step000000001.pt", _payload(1))
+
+    assert len(attempts) == 1 and list(tmp_path.iterdir()) == []
+
+
+def test_training_loop_rides_out_a_permission_denied_on_a_checkpoint_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bucket = tmp_path / "bucket"
+    stores = tmp_path / "stores.yaml"
+    stores.write_text(
+        "version: 1\nstores:\n  objects:\n    type: local\n"
+        f"    root: {bucket}\n    publish: exclusive\n    read_settle_seconds: 5\n"
+        "    permission_settle_seconds: 60\n"
+    )
+    monkeypatch.setenv("KOOCHAK_STORES", str(stores))
+    monkeypatch.setattr(store_lib, "time", _ManualClock())
+    attempts = _deny_permission(monkeypatch, "stat", "step000000002.pt.ready.json", times=1)
+
+    result = _train(_train_cfg(tmp_path / "run", checkpoint_dir="objects://runs/a", resume="auto"))
+
+    assert result["next_step"] == 3 and len(attempts) >= 2
+    published = bucket / "runs" / "a"
+    assert sorted(p.name for p in published.glob("step*.pt")) == [
+        "step000000001.pt",
+        "step000000002.pt",
+        "step000000003.pt",
+    ]
+    assert checkpoint.highest_valid_published("objects://runs/a") == str(published / "step000000003.pt")
